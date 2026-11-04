@@ -1,0 +1,10 @@
+{
+  "qgis": {
+    "python": "D:\\QGIS 3.44.13\\bin\\python-qgis-ltr.bat",
+    "pluginsDir": "%APPDATA%\\QGIS\\QGIS3\\profiles\\default\\python\\plugins"
+  },
+  "plugin": {
+    "package": "qgis_agent_plugin",
+    "installAs": "qgis-agent-plugin"
+  }
+}

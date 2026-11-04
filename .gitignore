@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# pytest-qgis writes its throwaway profile here
+.qgis-settings/
+
+# npm (package.json exists; installs are optional)
+node_modules/
+npm-debug.log*
+
+# Local overrides and machine-specific runner config
+.env
+
+# Deploy artefacts
+*.zip
