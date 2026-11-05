@@ -2,8 +2,7 @@
 
 页面拼出的是 socket 客户端会发的那封信封,再交给插件自己的处理管道,所以这里
 看到的结果就是客户端会拿到的结果——参数校验、错误码、操作快照一应俱全。这里不
-认识任何具体命令:参数从模型自己的 JSON schema 起步,执行方式取自声明里列出的
-那几种。
+认识任何具体命令:参数骨架来自 ``params_template``,执行方式取自声明里列出的那几种。
 """
 
 from __future__ import annotations
@@ -28,46 +27,11 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from .params_template import params_template
 from .qgis_actions import COMMAND_NAMES, REGISTRY
-
-# The JSON value a field with no default starts as, per schema type.
-_EMPTY: dict[str, Any] = {
-    "string": "",
-    "integer": 0,
-    "number": 0,
-    "boolean": False,
-    "array": [],
-    "object": {},
-}
 
 # What the wire calls an execution mode, as this page says it.
 _MODE_LABELS = {"sync": "同步", "async": "异步"}
-
-
-def params_template(action: Any) -> dict[str, Any]:
-    """The params of ``action`` as a starting point: one key per declared field.
-
-    An optional field keeps the default it declared; a required one gets a
-    placeholder of its type, so an empty string or a zero is a value the caller
-    has to replace rather than a silent default.
-    """
-
-    template = {}
-    for name, spec in action.params_model.model_json_schema().get("properties", {}).items():
-        template[name] = spec["default"] if "default" in spec else _placeholder(spec)
-    return template
-
-
-def _placeholder(spec: dict[str, Any]) -> Any:
-    """One value for a field the schema gives no default for."""
-
-    if "anyOf" in spec:  # a union: the first branch is the one a caller fills in
-        return _placeholder(spec["anyOf"][0])
-    if "enum" in spec:
-        return spec["enum"][0]
-    if "const" in spec:
-        return spec["const"]
-    return _EMPTY.get(spec.get("type", ""))
 
 
 def outcome_colors() -> tuple[str, str]:

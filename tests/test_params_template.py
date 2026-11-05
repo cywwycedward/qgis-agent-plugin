@@ -1,6 +1,6 @@
 """The Actions page must start every command from params its own model accepts."""
 
-from qgis_agent_plugin.action_tester import params_template
+from qgis_agent_plugin.params_template import params_template
 from qgis_agent_plugin.qgis_actions import COMMAND_NAMES, REGISTRY
 
 
