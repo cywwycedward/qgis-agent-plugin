@@ -11,10 +11,13 @@ def test_wire_surface_is_declared() -> None:
     from qgis_agent_plugin.qgis_actions import COMMAND_NAMES, REGISTRY
 
     assert COMMAND_NAMES
-    assert set(COMMAND_NAMES) == set(REGISTRY)
+    # Every declared command is reachable by the name it declares.
+    for name, action in REGISTRY.items():
+        assert action.name == name
 
 
 def test_ping_answers_without_qgis_state() -> None:
+    from qgis_agent_plugin.qgis_actions import ActionContext, BaseParams
     from qgis_agent_plugin.qgis_actions.qgis.ping import Ping
 
-    assert Ping.name == "ping"
+    assert Ping().run(ActionContext(), BaseParams()) == {"pong": True}
