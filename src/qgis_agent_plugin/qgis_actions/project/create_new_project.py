@@ -72,6 +72,16 @@ class CreateNewProject(Action):
                 f"Cannot create {params.path}: {directory} is not a directory. "
                 "The current project was left as it is.",
             )
+        # A project file that is already there is never replaced: writing one
+        # truncates it, and the caller named no file to keep it.  SaveProject is
+        # the command that writes over a project on purpose.
+        if os.path.exists(params.path):
+            raise ActionError(
+                "path_exists",
+                f"Cannot create {params.path}: the file is already there, and creating a "
+                "project would replace it. Pass a path that is not taken, or remove the "
+                "file first. The current project was left as it is.",
+            )
 
         project.clear()
         # A written project is meant to travel with its data, and clear() keeps
