@@ -16,12 +16,20 @@ def test_params_template_places_a_typed_value_for_a_required_field() -> None:
     assert params_template(REGISTRY["zoom_to_layer"]) == {"layer_id": ""}
 
 
-def test_params_template_is_valid_for_every_registered_command() -> None:
-    for name in COMMAND_NAMES:
-        action = REGISTRY[name]
-        # A command with a required field gets a placeholder the caller replaces,
-        # so only the params no rule rejects are expected to validate here.
-        try:
-            action.validate(params_template(action))
-        except Exception:
-            continue
+def test_params_template_is_accepted_by_every_command_whose_fields_are_optional() -> None:
+    """A template is only valid where no placeholder has to be replaced first.
+
+    A required field starts as an empty string or a zero the caller has to change,
+    so only a command whose every field declares a default has a template its model
+    accepts.  The set is read off the schemas, so it follows the command surface
+    instead of being a list to keep in step, and it must not be empty.
+    """
+
+    optional_only = [
+        name
+        for name in COMMAND_NAMES
+        if not REGISTRY[name].params_model.model_json_schema().get("required")
+    ]
+    assert optional_only, "no command declares every field optional: nothing is proved here"
+    for name in optional_only:
+        REGISTRY[name].validate(params_template(REGISTRY[name]))
