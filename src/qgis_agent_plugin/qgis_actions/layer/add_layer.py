@@ -82,7 +82,10 @@ class AddLayer(Action):
 
         transform = ctx.project.transformContext()
         wanted = params.name or [None] * len(chosen)
-        layers = [self._build(detail, name, transform) for detail, name in zip(chosen, wanted)]
+        layers = [
+            self._build(detail, name, transform)
+            for detail, name in zip(chosen, wanted, strict=True)
+        ]
 
         # Nothing reaches the project until every layer is known to be good: a
         # source that turns out to be unreadable must not leave half of itself
@@ -156,9 +159,7 @@ class AddLayer(Action):
             raise ActionError(
                 "layer_not_valid", f"Could not build a layer from {detail.uri() or detail.name()}"
             )
-        layer.setName(
-            name or detail.name() or QgsMapLayerFactory.typeToString(detail.type())
-        )
+        layer.setName(name or detail.name() or QgsMapLayerFactory.typeToString(detail.type()))
         return layer
 
     def _candidates(self, found: list[Any]) -> str:

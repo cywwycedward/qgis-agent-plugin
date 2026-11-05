@@ -13,6 +13,7 @@ would break.
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -175,9 +176,7 @@ class QGISOperationManager:
             )
             return
 
-        self._terminal(
-            operation, "succeeded", None, getattr(job, "result", None)
-        )
+        self._terminal(operation, "succeeded", None, getattr(job, "result", None))
 
     def _terminal(
         self,
@@ -198,10 +197,8 @@ class QGISOperationManager:
         operation.result = result
         disconnect = getattr(operation.finished_signal, "disconnect", None)
         if callable(disconnect) and operation.finished_callback is not None:
-            try:
+            with contextlib.suppress(TypeError, RuntimeError):
                 disconnect(operation.finished_callback)
-            except (TypeError, RuntimeError):
-                pass
         # Release the job at the callback boundary: QGIS owns it from here on.
         operation.job = None
         operation.finished_signal = None

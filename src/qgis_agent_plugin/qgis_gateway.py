@@ -90,10 +90,8 @@ class QGISGateway:
         try:
             params = action.validate(envelope.params or {})
             ctx = self.context()
-            if execution == "sync":
-                result = action.run(ctx, params)
-            else:
-                result = action.arun(ctx, params)
+            run = action.run if execution == "sync" else action.arun
+            result = run(ctx, params)
             return {"status": "success", "result": result}
         except Exception as error:
             # An error that names its own code is one the command expected, so the

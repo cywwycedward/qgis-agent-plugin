@@ -59,9 +59,7 @@ class CreateNewProject(Action):
         project = ctx.project
         # Anything the current project would lose stops the creation: its own
         # changes, which a save can still keep, and the layers no save can keep.
-        refusal = unsaved_refusal(
-            project, params.on_unsaved_changes, "a new empty project"
-        )
+        refusal = unsaved_refusal(project, params.on_unsaved_changes, "a new empty project")
         if refusal is not None:
             raise ActionError("unsaved_changes", refusal)
 

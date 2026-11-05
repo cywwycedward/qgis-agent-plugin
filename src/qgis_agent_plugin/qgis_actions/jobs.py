@@ -179,9 +179,7 @@ class ProcessingJob(OperationJob):
         # What the algorithm produced, turned into the answer by the command that
         # ran it: the background path reports the same shape as the synchronous one.
         self._report = report
-        self._task = AlgorithmTask(
-            algorithm, parameters, context, feedback, self._task_finished
-        )
+        self._task = AlgorithmTask(algorithm, parameters, context, feedback, self._task_finished)
 
     @property
     def progress(self) -> float | None:

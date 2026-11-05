@@ -21,12 +21,15 @@ class SaveProjectParams(BaseParams):
     has to be absolute and to end in ``.qgz``, the format that is written.
     """
 
-    path: Annotated[
-        str,
-        Field(min_length=1, max_length=4096),
-        AfterValidator(absolute_path),
-        AfterValidator(qgz_path),
-    ] | None = None
+    path: (
+        Annotated[
+            str,
+            Field(min_length=1, max_length=4096),
+            AfterValidator(absolute_path),
+            AfterValidator(qgz_path),
+        ]
+        | None
+    ) = None
 
 
 class SaveProjectResult(BaseResult):
@@ -79,9 +82,7 @@ class SaveProject(Action):
             project.setFileName(origin_path)
             project.setFilePathStorage(previous_storage)
             project.setDirty(previous_dirty)
-            raise ActionError(
-                "save_failed", project.error() or f"Failed to save project to {path}"
-            )
+            raise ActionError("save_failed", project.error() or f"Failed to save project to {path}")
 
         return SaveProjectResult(
             origin_path=origin_path,

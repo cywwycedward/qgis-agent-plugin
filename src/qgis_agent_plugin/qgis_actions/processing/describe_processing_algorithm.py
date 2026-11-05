@@ -57,12 +57,8 @@ class ParameterDocumentation(BaseModel):
     parameter_class: str = Field(
         description="QGIS parameter class, e.g. 'QgsProcessingParameterAggregate'."
     )
-    type_description: str = Field(
-        description="QGIS's description of the parameter type."
-    )
-    python_import: str = Field(
-        description="QGIS's Python import statement for the parameter type."
-    )
+    type_description: str = Field(description="QGIS's description of the parameter type.")
+    python_import: str = Field(description="QGIS's Python import statement for the parameter type.")
     accepted_string_values: list[str] = Field(
         description="String forms explicitly accepted by QGIS's parameter type."
     )
@@ -102,7 +98,9 @@ class AlgorithmParameter(BaseModel):
     name: str = Field(description="Key to pass in execute_processing's parameters.")
     description: str = Field(description="What QGIS calls the parameter in a dialog.")
     type: str = Field(description="QGIS parameter type id, e.g. 'source', 'enum'.")
-    type_name: str = Field(description="QGIS's name for that type; empty when it is not registered.")
+    type_name: str = Field(
+        description="QGIS's name for that type; empty when it is not registered."
+    )
     accepted: list[str] = Field(
         description="Value shapes QGIS accepts, in its own words; empty when the type "
         "is not registered."
@@ -180,9 +178,7 @@ class DescribeProcessingAlgorithmResult(BaseResult):
     description: str = Field(description="One line about it; empty when it has none.")
     help: str = Field(description="Its help text as written, newlines included; empty when none.")
     tags: list[str] = Field(description="Words it can be found by.")
-    flags: list[str] = Field(
-        description="QGIS's flag names for it, e.g. ['FlagDeprecated']."
-    )
+    flags: list[str] = Field(description="QGIS's flag names for it, e.g. ['FlagDeprecated'].")
     parameters: list[AlgorithmParameter] = Field(
         description="In the algorithm's own order, which is the order a dialog shows."
     )
@@ -198,9 +194,7 @@ class DescribeProcessingAlgorithm(Action):
     name = "describe_processing_algorithm"
     params_model = DescribeProcessingAlgorithmParams
 
-    def run(
-        self, ctx: ActionContext, params: DescribeProcessingAlgorithmParams
-    ) -> dict[str, Any]:
+    def run(self, ctx: ActionContext, params: DescribeProcessingAlgorithmParams) -> dict[str, Any]:
         try:
             return _answer(require_algorithm(params.algorithm), ctx.project)
         except ActionError:
@@ -222,8 +216,7 @@ def _answer(algorithm: Any, project: Any = None) -> dict[str, Any]:
         context.setProject(project)
     definitions = list(algorithm.parameterDefinitions())
     parameter_types = {
-        definition.type(): _parameter_type(definition.type())
-        for definition in definitions
+        definition.type(): _parameter_type(definition.type()) for definition in definitions
     }
 
     return DescribeProcessingAlgorithmResult(
@@ -251,9 +244,7 @@ def _answer(algorithm: Any, project: Any = None) -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
-def _parameter(
-    definition: Any, parameter_type: Any, context: Any
-) -> AlgorithmParameter:
+def _parameter(definition: Any, parameter_type: Any, context: Any) -> AlgorithmParameter:
     """Read one parameter definition, asking QGIS for its type's own description."""
 
     from qgis.core import Qgis
@@ -276,9 +267,7 @@ def _parameter(
             definition.allowMultiple() if hasattr(definition, "allowMultiple") else None
         ),
         data_types=_data_types(definition),
-        has_geometry=(
-            definition.hasGeometry() if hasattr(definition, "hasGeometry") else None
-        ),
+        has_geometry=(definition.hasGeometry() if hasattr(definition, "hasGeometry") else None),
         file_filter=(
             definition.fileFilter() or None if hasattr(definition, "fileFilter") else None
         ),

@@ -186,10 +186,7 @@ class QGISAgentPlugin:
     def initGui(self) -> None:
         """Initialize GUI"""
         # Create action
-        action = QAction(
-            "QGIS Agent",
-            self.iface.mainWindow()
-        )
+        action = QAction("QGIS Agent", self.iface.mainWindow())
         action.setCheckable(True)
         action.triggered.connect(self.toggle_dock)
         self.action = action

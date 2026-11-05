@@ -108,9 +108,7 @@ class ListProcessingAlgorithmsResult(BaseResult):
     algorithms: list[ProcessingAlgorithmSummary] = Field(
         description="In id order, which is the same order on every machine."
     )
-    returned: int = Field(
-        ge=0, description="How many this page holds, which is len(algorithms)."
-    )
+    returned: int = Field(ge=0, description="How many this page holds, which is len(algorithms).")
     total: int = Field(ge=0, description="Algorithms that matched, however many this page holds.")
     limit: int | None = Field(
         description="The page size asked for; null when all of the matching ones were asked for."

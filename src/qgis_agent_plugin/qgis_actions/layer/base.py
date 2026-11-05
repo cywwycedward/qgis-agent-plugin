@@ -133,9 +133,9 @@ class RasterLayer(BaseLayer):
     width: int = Field(ge=0, description="Raster width in pixels.")
     height: int = Field(ge=0, description="Raster height in pixels.")
     bandCount: int = Field(ge=0, description="Number of bands.")
-    rasterType: Literal[
-        "GrayOrUndefined", "Palette", "MultiBand", "SingleBandColorData"
-    ] = Field(description="Band layout as QGIS names it.")
+    rasterType: Literal["GrayOrUndefined", "Palette", "MultiBand", "SingleBandColorData"] = Field(
+        description="Band layout as QGIS names it."
+    )
     rasterUnitsPerPixelX: float = Field(
         description="Ground units per pixel across, in the layer's CRS."
     )

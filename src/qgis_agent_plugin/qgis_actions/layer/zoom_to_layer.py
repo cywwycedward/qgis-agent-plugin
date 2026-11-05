@@ -37,9 +37,7 @@ class ZoomToLayerResult(BaseResult):
     )
     scale: float = Field(description="Scale of that view, as the canvas reports it.")
     crs: str = Field(description="CRS the extent is in: the canvas's own, not the layer's.")
-    layer_crs: str = Field(
-        description="The layer's own CRS, empty when its source declares none."
-    )
+    layer_crs: str = Field(description="The layer's own CRS, empty when its source declares none.")
 
 
 class ZoomToLayer(Action):

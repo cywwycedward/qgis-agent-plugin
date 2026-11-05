@@ -12,9 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 
-def parameter_documentation(
-    definition: Any, parameter_type: Any, context: Any
-) -> dict[str, Any]:
+def parameter_documentation(definition: Any, parameter_type: Any, context: Any) -> dict[str, Any]:
     """Return the QGIS documentation attached to one parameter definition."""
 
     if parameter_type is None:
@@ -36,23 +34,15 @@ def parameter_documentation(
         "parameter_class": class_name,
         "type_description": _text(_call(parameter_type, "description")),
         "python_import": _text(_call(parameter_type, "pythonImportString")),
-        "accepted_string_values": _strings(
-            _call(parameter_type, "acceptedStringValues")
-        ),
-        "accepted_parameter_types": _strings(
-            _call(parameter_type, "acceptedParameterTypes")
-        ),
-        "accepted_output_types": _strings(
-            _call(parameter_type, "acceptedOutputTypes")
-        ),
+        "accepted_string_values": _strings(_call(parameter_type, "acceptedStringValues")),
+        "accepted_parameter_types": _strings(_call(parameter_type, "acceptedParameterTypes")),
+        "accepted_output_types": _strings(_call(parameter_type, "acceptedOutputTypes")),
         "class_documentation": _class_documentation(class_name),
         "default_python": _default_python(definition, context),
     }
 
 
-def render_algorithm_help(
-    algorithm: Any, parameter_types: Mapping[str, Any]
-) -> str:
+def render_algorithm_help(algorithm: Any, parameter_types: Mapping[str, Any]) -> str:
     """Render a text help page from QGIS declarations without using GUI code."""
 
     lines = [f"{algorithm.displayName()} ({algorithm.id()})", ""]
@@ -77,9 +67,7 @@ def render_algorithm_help(
             lines.append("\n\tAvailable values:")
             lines.extend(f"\t\t- {index}: {option}" for index, option in enumerate(options))
 
-        accepted = [] if parameter_type is None else _call(
-            parameter_type, "acceptedPythonTypes"
-        )
+        accepted = [] if parameter_type is None else _call(parameter_type, "acceptedPythonTypes")
         if accepted:
             lines.extend(["", "\tAccepted data types:"])
             lines.extend(f"\t\t- {value}" for value in accepted)

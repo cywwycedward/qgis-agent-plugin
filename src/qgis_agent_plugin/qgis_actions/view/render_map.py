@@ -32,7 +32,7 @@ class RenderMap(Action):
     params_model = RenderMapParams
 
     def _settings(self, ctx: ActionContext, params: RenderMapParams) -> Any:
-        """Build the render settings; the canvas and the project are read here, on the main thread."""
+        """Build the render settings, reading the canvas and the project on this thread."""
 
         from qgis.core import QgsMapSettings
         from qgis.PyQt.QtCore import QSize
