@@ -18,7 +18,6 @@ from .project.load_project import LoadProject
 from .project.save_project import SaveProject
 from .qgis.get_qgis_info import GetQGISInfo
 from .qgis.ping import Ping
-from .style.validate_qml import ValidateQml
 from .view.render_map import RenderMap
 
 # The order the commands are declared in is the order the surface reports them.
@@ -31,7 +30,6 @@ ACTIONS: tuple[Action, ...] = (
     GetLayers(),
     RemoveLayer(),
     ZoomToLayer(),
-    ValidateQml(),
     ListProcessingAlgorithms(),
     ExecuteProcessing(),
     DescribeProcessingAlgorithm(),
