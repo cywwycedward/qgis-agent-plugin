@@ -1,0 +1,13 @@
+# Line endings, pinned rather than left to each machine's core.autocrlf.
+#
+# Everything this project writes is LF today, including the PowerShell wrappers
+# (Test-Path/robocopy do not care).  cmd files are the exception: cmd.exe parses
+# a CRLF batch file and misreads a lone LF, which TEST.md records as a trap, so
+# a .bat that lands here later arrives with the ending it needs.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.png binary
+*.jpg binary
+*.qgz binary
