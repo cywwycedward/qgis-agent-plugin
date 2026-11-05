@@ -1,2 +1,4 @@
 __pycache__/
 .pytest_cache/
+# Local agent skill bundle, installed per machine; nothing here references it.
+.agents/
