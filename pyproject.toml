@@ -1,0 +1,28 @@
+# Tool configuration only.  This package is deployed into QGIS as a plugin, not
+# installed as a distribution, so there is deliberately no build backend here.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The plugin is not installed anywhere; the tests load it from the source tree,
+# the way an installed plugin is laid out.
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # import order
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+    "C4",  # comprehensions
+]
+# Left out on purpose: D (a docstring rule would restate every docstring that is
+# already there), ANN, and ARG (Qt slot signatures carry arguments they must not
+# use).  RUF is left out until its ambiguous-character rules can be ignored:
+# RUF001/2/3 report full-width Chinese punctuation as ambiguous.

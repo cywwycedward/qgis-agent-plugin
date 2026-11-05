@@ -2,10 +2,13 @@
   "name": "qgis-agent-plugin",
   "version": "0.1.0",
   "private": true,
-  "description": "Dev tasks for the QGIS Agent plugin: deploy src/qgis_agent_plugin to the QGIS profile, run tests.",
+  "description": "Dev tasks for the QGIS Agent plugin: deploy src/qgis_agent_plugin to the QGIS profile, lint, run tests.",
   "scripts": {
     "deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\deploy.ps1",
     "deploy:list": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\deploy.ps1 -ListOnly",
+    "lint": "ruff check .",
+    "lint:fix": "ruff check --fix .",
+    "format": "ruff format .",
     "test": "npm run test:unit",
     "test:unit": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\pytest.ps1",
     "test:verbose": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\pytest.ps1 -vv tests"
