@@ -7,13 +7,18 @@ from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDockWidget,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .action_tester import ActionTesterWidget, outcome_colors
 from .qgis_actions import REGISTRY
 from .qgis_gateway import QGISGateway
 from .qgis_runtime import PluginRuntime
@@ -36,14 +41,30 @@ def server_builder(runtime: PluginRuntime) -> Callable[[int], QGISSocketBridge]:
     return build
 
 
+def command_runner(runtime: PluginRuntime) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Return the answer the socket would give for one command, without a socket.
+
+    The Actions page sends the envelope a client would send and shows what comes
+    back, so a command that works here works for a caller too.
+    """
+
+    return QGISGateway(runtime.context, REGISTRY).handle
+
+
 class QGISAgentDockWidget(QDockWidget):
     """Dock widget for the qgis-agent-plugin"""
 
     closed = pyqtSignal()
 
-    def __init__(self, build_server: Callable[[int], Any]) -> None:
+    def __init__(
+        self,
+        build_server: Callable[[int], Any],
+        run_command: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> None:
         super().__init__("QGIS Agent")
         self._build_server = build_server
+        self._run_command = run_command
+        self._ok_color, _ = outcome_colors()
         self.server: Any = None
         self.setup_ui()
 
@@ -52,32 +73,64 @@ class QGISAgentDockWidget(QDockWidget):
         # Create widget and layout
         widget = QWidget()
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
         widget.setLayout(layout)
 
-        # Add port selection
-        layout.addWidget(QLabel("Server Port:"))
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.build_server_page(), "服务")
+        self.tabs.addTab(ActionTesterWidget(self._run_command), "动作调试")
+        layout.addWidget(self.tabs)
+
+        # Add to dock widget
+        self.setWidget(widget)
+
+    def build_server_page(self) -> QWidget:
+        """Build the page that binds the port and starts the bridge"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        box = QGroupBox("本地服务")
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(10, 8, 10, 10)
+        box_layout.setSpacing(6)
+
+        form = QFormLayout()
+        form.setSpacing(6)
         self.port_spin = QSpinBox()
         self.port_spin.setMinimum(1024)
         self.port_spin.setMaximum(65535)
         self.port_spin.setValue(9876)
-        layout.addWidget(self.port_spin)
+        self.port_spin.setToolTip("端口范围 1024–65535，默认 9876。")
+        # A port is a number, not a sentence: it does not need the whole width.
+        self.port_spin.setMaximumWidth(120)
+        form.addRow("端口", self.port_spin)
+        box_layout.addLayout(form)
 
-        # Add server control buttons
-        self.start_button = QPushButton("Start Server")
+        hint = QLabel("MCP 服务器通过回环地址调用 QGIS 动作。")
+        hint.setWordWrap(True)
+        box_layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        self.start_button = QPushButton("启动服务")
         self.start_button.clicked.connect(self.start_server)
-        layout.addWidget(self.start_button)
-
-        self.stop_button = QPushButton("Stop Server")
+        buttons.addWidget(self.start_button)
+        self.stop_button = QPushButton("停止服务")
         self.stop_button.clicked.connect(self.stop_server)
         self.stop_button.setEnabled(False)
-        layout.addWidget(self.stop_button)
+        buttons.addWidget(self.stop_button)
+        box_layout.addLayout(buttons)
 
-        # Add status label
-        self.status_label = QLabel("Server: Stopped")
-        layout.addWidget(self.status_label)
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        box_layout.addWidget(self.status_label)
+        self._show_running(False)
 
-        # Add to dock widget
-        self.setWidget(widget)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
 
     def start_server(self) -> None:
         """Start the server"""
@@ -101,9 +154,11 @@ class QGISAgentDockWidget(QDockWidget):
     def _show_running(self, running: bool) -> None:
         """Report the server's state on the widgets that carry it"""
         if running:
-            self.status_label.setText(f"Server: Running on port {self.server.port}")
+            self.status_label.setText(f"服务运行中 · {self.server.host}:{self.server.port}")
+            self.status_label.setStyleSheet(f"color: {self._ok_color}; font-weight: 600;")
         else:
-            self.status_label.setText("Server: Stopped")
+            self.status_label.setText("服务未启动")
+            self.status_label.setStyleSheet("")
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
         self.port_spin.setEnabled(not running)
@@ -124,29 +179,31 @@ class QGISAgentPlugin:
         # still be readable through get_operation after the next Start.
         self.runtime = PluginRuntime(iface)
         self._build_server = server_builder(self.runtime)
+        self._run_command = command_runner(self.runtime)
         self.dock_widget: QGISAgentDockWidget | None = None
         self.action: QAction | None = None
 
     def initGui(self) -> None:
         """Initialize GUI"""
         # Create action
-        self.action = QAction(
+        action = QAction(
             "QGIS Agent",
             self.iface.mainWindow()
         )
-        self.action.setCheckable(True)
-        self.action.triggered.connect(self.toggle_dock)
+        action.setCheckable(True)
+        action.triggered.connect(self.toggle_dock)
+        self.action = action
 
         # Add to plugins menu and toolbar
-        self.iface.addPluginToMenu("QGIS Agent", self.action)
-        self.iface.addToolBarIcon(self.action)
+        self.iface.addPluginToMenu("QGIS Agent", action)
+        self.iface.addToolBarIcon(action)
 
     def toggle_dock(self, checked: bool) -> None:
         """Toggle the dock widget"""
         if checked:
             # Create dock widget if it doesn't exist
             if not self.dock_widget:
-                self.dock_widget = QGISAgentDockWidget(self._build_server)
+                self.dock_widget = QGISAgentDockWidget(self._build_server, self._run_command)
                 self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
                 # Connect close event
                 self.dock_widget.closed.connect(self.dock_closed)
@@ -160,13 +217,11 @@ class QGISAgentPlugin:
 
     def dock_closed(self) -> None:
         """Handle dock widget closed"""
-        self.action.setChecked(False)
+        if self.action is not None:
+            self.action.setChecked(False)
 
     def unload(self) -> None:
         """Unload plugin"""
-        # initGui() and toggle_dock() made these connections; unload undoes them.
-        self.action.triggered.disconnect(self.toggle_dock)
-
         # Stop server if running
         if self.dock_widget:
             self.dock_widget.closed.disconnect(self.dock_closed)
@@ -174,9 +229,13 @@ class QGISAgentPlugin:
             self.iface.removeDockWidget(self.dock_widget)
             self.dock_widget = None
 
-        # Remove plugin menu item and toolbar icon
-        self.iface.removePluginMenu("QGIS Agent", self.action)
-        self.iface.removeToolBarIcon(self.action)
+        action = self.action
+        if action is not None:
+            # initGui() made these connections; unload undoes them.
+            action.triggered.disconnect(self.toggle_dock)
+            # Remove plugin menu item and toolbar icon
+            self.iface.removePluginMenu("QGIS Agent", action)
+            self.iface.removeToolBarIcon(action)
         self.action = None
 
 
