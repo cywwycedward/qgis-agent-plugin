@@ -72,7 +72,6 @@ class LoadProject(Action):
     """Read ``path`` as the current project, per the caller's unsaved policy."""
 
     name = "load_project"
-    read_only = False
     params_model = LoadProjectParams
 
     def run(self, ctx: ActionContext, params: LoadProjectParams) -> dict[str, Any]:

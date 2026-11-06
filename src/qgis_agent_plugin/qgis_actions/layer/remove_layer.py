@@ -50,7 +50,6 @@ class RemoveLayer(Action):
     """Drop one layer from the current project."""
 
     name = "remove_layer"
-    read_only = False
     params_model = RemoveLayerParams
 
     def run(self, ctx: ActionContext, params: RemoveLayerParams) -> dict[str, Any]:

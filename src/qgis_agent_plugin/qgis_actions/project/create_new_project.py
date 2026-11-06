@@ -50,7 +50,6 @@ class CreateNewProject(Action):
     """Replace the current project with an empty one and write it to ``path``."""
 
     name = "create_new_project"
-    read_only = False
     params_model = CreateNewProjectParams
 
     def run(self, ctx: ActionContext, params: CreateNewProjectParams) -> dict[str, Any]:
