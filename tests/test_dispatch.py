@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from qgis_agent_plugin.command import Command, CommandContext, Params, Result
@@ -57,7 +59,18 @@ class Breaks(Command):
         raise RuntimeError("boom")
 
 
-COMMANDS = {command.name: command for command in (Echo(), Both(), Refuses(), Breaks())}
+class AnswersADict(Command):
+    """A command breaking the result contract, the way a defect does."""
+
+    name = "answers_a_dict"
+
+    def run(self, ctx: CommandContext, params: Params) -> Any:
+        return {"pong": True}
+
+
+COMMANDS = {
+    command.name: command for command in (Echo(), Both(), Refuses(), Breaks(), AnswersADict())
+}
 
 
 @pytest.fixture
@@ -130,4 +143,14 @@ def test_dispatcher_unexpected_failure_answers_internal_error(handle: Handle) ->
     answer = handle({"type": "breaks"})
 
     assert answer["status"] == "error"
+    assert answer["code"] == "internal_error"
+
+
+def test_dispatcher_command_returning_a_bare_dict_answers_internal_error(
+    handle: Handle,
+) -> None:
+    """A result the wire cannot take is a defect, and is answered as one."""
+
+    answer = handle({"type": "answers_a_dict"})
+
     assert answer["code"] == "internal_error"

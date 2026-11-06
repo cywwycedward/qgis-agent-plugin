@@ -67,6 +67,9 @@ def dispatcher(context: Callable[[], CommandContext], commands: Mapping[str, Com
         try:
             run = action.run if execution == "sync" else action.arun
             result: Result = run(context(), params)
+            # Dumping is inside the try too: a command returning something that is
+            # not a Result is a defect here, and has to answer as one.
+            return success(result)
         except CommandError as error:
             # An explained failure: the code it was raised with is what leaves.
             logger.warning("%s: %s", error.code, error)
@@ -75,6 +78,5 @@ def dispatcher(context: Callable[[], CommandContext], commands: Mapping[str, Com
             # Anything else is a defect here and is worth the stack.
             logger.exception("QGIS Agent command failed")
             return failure("internal_error", str(error))
-        return success(result)
 
     return handle
