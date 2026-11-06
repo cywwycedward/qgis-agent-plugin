@@ -62,7 +62,6 @@ class AddLayer(Action):
     """Add every layer of ``source`` to the project, or the sublayers named."""
 
     name = "add_layer"
-    read_only = False
     params_model = AddLayerParams
 
     def run(self, ctx: ActionContext, params: AddLayerParams) -> dict[str, Any]:

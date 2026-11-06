@@ -1,12 +1,12 @@
-"""Job adapters that give ``Action.arun`` something the operation manager can hold.
+"""Job adapters that give ``Action.arun`` something the registry can hold.
 
-``QGISOperationManager`` connects to a job's ``finished`` signal and assumes its
+``OperationRegistry`` connects to a job's ``finished`` signal and assumes its
 callbacks run on the QGIS main thread.  QGIS offers neither of those directly:
 ``QgsMapRendererJob.finished`` is a signal but there is nothing to connect it to
 yet, while ``QgsTask.finished`` is the virtual method a Python subclass overrides
 rather than a signal, so ``connect`` on it fails.  Every adapter here is a QObject
 created on the main thread, so the signal it emits -- and every callback the
-manager runs from it -- lands on the main thread.
+registry runs from it -- lands on the main thread.
 
 This module imports PyQt at import time: actions must import it inside ``arun``
 only, because the action package has to load in a plain interpreter.
@@ -21,15 +21,13 @@ from typing import Any
 from qgis.core import QgsApplication, QgsProcessingAlgRunnerTask, QgsProcessingFeedback
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
-from .base import ActionContext
-
 logger = logging.getLogger(__name__)
 
 
 class OperationJob(QObject):
-    """One running job as the operation manager sees it.
+    """One running job as the registry sees it.
 
-    ``start`` and ``cancelWithoutBlocking`` are the manager's calls into the job.
+    ``start`` and ``cancelWithoutBlocking`` are the registry's calls into the job.
     ``settle`` records the outcome and emits ``finished`` once, so an operation
     always reaches a terminal state instead of staying ``running`` forever.
     """
@@ -52,7 +50,7 @@ class OperationJob(QObject):
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> None:
-        """Record the outcome and tell the manager the job is done."""
+        """Record the outcome and tell the registry the job is done."""
 
         if self._settled:
             return
@@ -140,11 +138,14 @@ class ProcessingFeedback(QgsProcessingFeedback):
     """A feedback that keeps the progress text where a poll can read it.
 
     QGIS reports progress by calling ``setProgress`` and ``setProgressText``.
-    The first only updates a value the base class can be asked for, but the
-    second reaches nothing else, so the text has to be kept here.  Both are
-    written from the thread the algorithm runs on and read by ``get_operation``
-    on the main thread: the percentage is a value QGIS owns, and the text is one
-    attribute assignment of the latest string, which is all a reader wants.
+    The first lands in a value the base class can be asked for, but the second
+    only appends to the feedback's log -- there is no getter for the latest text
+    -- so the text has to be kept here.  Overriding it also keeps progress
+    chatter out of ``textLog()``, which is where a failed run reads its reason.
+    Both are written from the thread the algorithm runs on and read by
+    ``get_operation`` on the main thread: the percentage is a value QGIS owns,
+    and the text is one attribute assignment of the latest string, which is all
+    a reader wants.
 
     A run that failed says so only through the base class's own text log -- the
     reason an output could not be written, say -- which is where a failed job
@@ -244,15 +245,3 @@ class AlgorithmTask(QgsProcessingAlgRunnerTask):
     def finished(self, result: bool) -> None:
         super().finished(result)
         self._on_finished(self, result)
-
-
-def start_operation(ctx: ActionContext, name: str, job: OperationJob) -> dict[str, Any]:
-    """Register ``job`` as an asynchronous operation and return its first snapshot.
-
-    The manager owns both the record and the terminal decision; the job only
-    supplies its outcome through its ``finished`` signal.
-    """
-
-    operations = ctx.operations
-    operation_id = operations.enqueue(name)
-    return operations.start(operation_id, job)

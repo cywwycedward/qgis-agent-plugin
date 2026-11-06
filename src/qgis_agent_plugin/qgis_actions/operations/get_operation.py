@@ -16,9 +16,9 @@ class GetOperationParams(BaseParams):
 
 
 class GetOperation(Action):
-    """Return the manager's snapshot of ``operation_id``, with its result once it succeeded.
+    """Return the registry's snapshot of ``operation_id``, with its result once it succeeded.
 
-    An unknown identifier is the manager's own error and reaches the caller as an
+    An unknown identifier is the registry's own error and reaches the caller as an
     error envelope naming the id, so this command maps no errors of its own.
     """
 

@@ -7,10 +7,10 @@ envelope -- belongs to the gateway pipeline, so the pipeline never needs to
 know a specific command, and a command's result leaves that pipeline as ``run``
 or ``arun`` returned it.
 
-The declarations the pipeline does not consume yet (``project``, approval,
-capability gating, deadlines) are added to this base class when those stages
-land, so each new stage keeps costing one declaration plus one pipeline
-implementation instead of one edit per command.
+The declarations the pipeline does not consume yet (approval, capability
+gating, deadlines) are added to this base class when those stages land, so each
+new stage keeps costing one declaration plus one pipeline implementation instead
+of one edit per command.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError
+
+from ..validation import describe
 
 # The wire modes each execution offers, default-first: an omitted request takes
 # the first one, so a "both" command stays synchronous unless it is asked
@@ -46,7 +48,7 @@ class ActionContext:
 
     iface: Any = None
     project: Any = None
-    operations: Any = None  # the QGISOperationManager, for asynchronous commands
+    operations: Any = None  # the OperationRegistry, for asynchronous commands
 
 
 class BaseParams(BaseModel):
@@ -74,23 +76,6 @@ class BaseResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _describe_errors(error: ValidationError) -> str:
-    """Render every failure, one per line, naming the field it belongs to.
-
-    A caller that sent three bad fields learns about all three at once instead
-    of one retry at a time.  The rejected value and the documentation link are
-    left out: this line reaches an agent's context.  The error type stays
-    because it is the part a caller can branch on, unlike the wording.
-    """
-
-    lines = []
-    for item in error.errors(include_url=False, include_input=False):
-        field = ".".join(str(part) for part in item["loc"])
-        detail = f"{item['msg']} [{item['type']}]"
-        lines.append(f"{field}: {detail}" if field else detail)
-    return "\n".join(lines)
-
-
 def _is_params_model(value: Any) -> bool:
     """True when a command declared a model that carries the shared param rules."""
 
@@ -102,7 +87,6 @@ class Action:
 
     name: ClassVar[str]
     params_model: ClassVar[type[BaseParams]] = BaseParams
-    read_only: ClassVar[bool] = True
     execution: ClassVar[str] = "sync"  # sync | async | both
     modes: ClassVar[tuple[str, ...]] = ("sync",)  # the wire modes execution offers
 
@@ -134,18 +118,7 @@ class Action:
         try:
             return self.params_model.model_validate(raw)
         except ValidationError as error:
-            raise ActionError("invalid_field", _describe_errors(error)) from error
-
-    def project(self, result: Any) -> Any:
-        """Shape what a command's result leaves as; not wired in yet.
-
-        The gateway hands ``run``'s or ``arun``'s result out unchanged, so
-        overriding this changes nothing today.  What the stage should do is
-        still open, so the base refuses instead of pretending to be the
-        identity.
-        """
-
-        raise NotImplementedError(f"{self.name} does not project results")
+            raise ActionError("invalid_field", describe(error)) from error
 
     def run(self, ctx: ActionContext, params: Any) -> Any:
         """Run the command: validated input, only QGIS work here.

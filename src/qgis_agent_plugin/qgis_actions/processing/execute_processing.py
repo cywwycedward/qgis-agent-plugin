@@ -59,7 +59,6 @@ class ExecuteProcessing(Action):
     """Run ``algorithm`` with the caller's ``parameters``."""
 
     name = "execute_processing"
-    read_only = False
     execution = "both"
     params_model = ExecuteProcessingParams
 
@@ -88,7 +87,7 @@ class ExecuteProcessing(Action):
     def arun(self, ctx: ActionContext, params: ExecuteProcessingParams) -> dict[str, Any]:
         """Hand the algorithm to a background task and answer with its operation."""
 
-        from ..jobs import ProcessingFeedback, ProcessingJob, start_operation
+        from ..jobs import ProcessingFeedback, ProcessingJob
 
         algorithm = _checked(ctx.project, params)
         feedback = ProcessingFeedback()
@@ -100,7 +99,7 @@ class ExecuteProcessing(Action):
             return _answer(ctx.project, context, params.algorithm, algorithm, results)
 
         job = ProcessingJob(algorithm, params.parameters, context, feedback, answer)
-        return start_operation(ctx, self.name, job)
+        return ctx.operations.start(self.name, job)
 
 
 def _context(project: Any, feedback: Any) -> Any:
@@ -131,9 +130,8 @@ def _checked(project: Any, params: ExecuteProcessingParams) -> Any:
     Both checks run on a context of their own, thrown away afterwards.  The
     context that runs the algorithm is handed to a background task, and a task
     must be given a context nothing has resolved parameters with: QGIS keeps
-    what the check left there alive past the run, and the asynchronous path
-    crashes on the next task when a context that has been used for checking is
-    handed over (see ``docs/execute-processing-research.md``).
+    what the check left there alive past the run, so handing a context that has
+    already resolved parameters to the task crashes the next one.
     """
 
     algorithm = require_algorithm(params.algorithm)

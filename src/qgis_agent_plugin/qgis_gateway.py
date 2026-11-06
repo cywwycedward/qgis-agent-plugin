@@ -22,6 +22,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, ValidationError
 
+from .validation import describe
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,19 +43,6 @@ class CommandEnvelope(BaseModel):
     execution: StrictStr | None = None
 
 
-def _describe_envelope_error(error: ValidationError) -> str:
-    """Render envelope failures without exposing Pydantic's internal URL."""
-
-    lines = []
-    for item in error.errors(include_url=False, include_input=False):
-        if not item["loc"] and item["type"] == "model_type":
-            return "A command must be a JSON object"
-        field = ".".join(str(part) for part in item["loc"])
-        message = item["msg"]
-        lines.append(f"{field}: {message}" if field else message)
-    return "\n".join(lines)
-
-
 class QGISGateway:
     """Dispatch one decoded command through one fixed pipeline."""
 
@@ -67,7 +56,10 @@ class QGISGateway:
         try:
             envelope = CommandEnvelope.model_validate(command)
         except ValidationError as error:
-            return _error("invalid_command", _describe_envelope_error(error))
+            # A command that is not an object at all is not a field failure.
+            if any(not item["loc"] and item["type"] == "model_type" for item in error.errors()):
+                return _error("invalid_command", "A command must be a JSON object")
+            return _error("invalid_command", describe(error))
 
         name = envelope.type
         action = self.registry.get(name)

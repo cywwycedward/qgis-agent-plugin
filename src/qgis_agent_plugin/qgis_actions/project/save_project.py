@@ -49,7 +49,6 @@ class SaveProject(Action):
     """Write the project to ``path``, or to its own path when omitted."""
 
     name = "save_project"
-    read_only = False
     params_model = SaveProjectParams
 
     def run(self, ctx: ActionContext, params: SaveProjectParams) -> dict[str, Any]:

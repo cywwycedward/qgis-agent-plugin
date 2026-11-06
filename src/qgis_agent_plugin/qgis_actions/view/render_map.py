@@ -27,7 +27,6 @@ class RenderMap(Action):
     """Render the canvas extent to ``path`` at the requested pixel size."""
 
     name = "render_map"
-    read_only = False
     execution = "both"
     params_model = RenderMapParams
 
@@ -70,14 +69,14 @@ class RenderMap(Action):
 
         from qgis.core import QgsMapRendererParallelJob
 
-        from ..jobs import RenderMapJob, start_operation
+        from ..jobs import RenderMapJob
 
         job = RenderMapJob(
             QgsMapRendererParallelJob(self._settings(ctx, params)),
             params.path,
             lambda: _rendered(params),
         )
-        return start_operation(ctx, self.name, job)
+        return ctx.operations.start(self.name, job)
 
 
 def _rendered(params: RenderMapParams) -> dict[str, Any]:

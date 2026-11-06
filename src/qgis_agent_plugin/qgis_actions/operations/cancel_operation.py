@@ -16,10 +16,9 @@ class CancelOperationParams(BaseParams):
 
 
 class CancelOperation(Action):
-    """Ask the operation manager to cancel ``operation_id``."""
+    """Ask the registry to cancel ``operation_id``."""
 
     name = "cancel_operation"
-    read_only = False
     params_model = CancelOperationParams
 
     def run(self, ctx: ActionContext, params: CancelOperationParams) -> dict[str, Any]:
