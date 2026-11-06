@@ -12,9 +12,9 @@ from typing import Any
 
 
 def classFactory(iface: Any) -> Any:
-    from .plugin import QGISAgentPlugin
+    from .plugin import Plugin
 
-    return QGISAgentPlugin(iface)
+    return Plugin(iface)
 
 
 __all__ = ["classFactory"]
