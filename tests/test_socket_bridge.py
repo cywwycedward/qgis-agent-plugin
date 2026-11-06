@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from qgis_agent_plugin.qgis_socket_bridge import QGISSocketBridge
+from qgis_agent_plugin.socket_bridge import SocketBridge
 
 
 class FakeClient:
@@ -30,17 +30,16 @@ class FakeClient:
         pass
 
 
-class Echo:
-    """A gateway that echoes the command it was handed, so framing is visible."""
+def echo(command: object) -> dict[str, object]:
+    """A pipeline that echoes the command it was handed, so framing is visible."""
 
-    def handle(self, command: object) -> dict[str, object]:
-        return {"status": "success", "result": {"seen": command}}
+    return {"status": "success", "result": {"seen": command}}
 
 
 def answers(*chunks: bytes) -> list[dict]:
     """Run the poll loop once per chunk and return the answers it wrote, parsed."""
 
-    bridge = QGISSocketBridge(Echo())
+    bridge = SocketBridge(echo)
     bridge.running = True
     bridge.client = FakeClient(*chunks)
     for _ in chunks:

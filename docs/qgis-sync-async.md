@@ -1,7 +1,7 @@
 # Sync and async in QGIS 3.44.13
 
 How work runs on or off the main thread in QGIS 3.44.13 (`final-3_44_13`), and what this
-plugin's `qgis_actions/jobs.py` adds on top. Read this before adding an `Action` that takes
+plugin's `jobs.py` adds on top. Read this before adding a `Command` that takes
 more than a few milliseconds. Where a claim sits deep inside a long file the citation names
 the member instead of a line range — see [Sources](#sources).
 
@@ -58,15 +58,16 @@ will be called after the task has finished" (`src/core/qgstaskmanager.h:L274-L28
 ## Minimal shapes
 
 Synchronous algorithm run, as `_checked`/`run` already do it
-(`qgis_actions/processing/execute_processing.py:L66-L86`):
+(`commands/processing/execute_processing.py`, `ExecuteProcessing.run`):
 
 ```python
 from qgis.core import QgsProcessingFeedback
 import processing
 
 feedback = QgsProcessingFeedback()
-results = processing.run(algorithm, parameters, context=context, feedback=feedback,
-                         is_child_algorithm=True)   # returns when done; raises on failure
+results = processing.run(
+    algorithm, parameters, context=context, feedback=feedback, is_child_algorithm=True
+)  # returns when done; raises on failure
 ```
 
 `QgsTask` subclass — the base contract (`run` off-thread, `finished` on-thread):
@@ -74,15 +75,16 @@ results = processing.run(algorithm, parameters, context=context, feedback=feedba
 ```python
 from qgis.core import QgsTask
 
+
 class Work(QgsTask):
     def run(self) -> bool:
         for i in range(100):
             if self.isCanceled():
                 return False
-            self.setProgress(i)          # emits progressChanged
+            self.setProgress(i)  # emits progressChanged
         return True
 
-    def finished(self, result: bool) -> None:   # main thread; result carries no reason
+    def finished(self, result: bool) -> None:  # main thread; result carries no reason
         ...
 ```
 
@@ -101,24 +103,24 @@ QgsApplication.taskManager().addTask(task)
 `(exception, returned_values)`; `run()` turns any Python exception into `False` plus
 `self.exception`, and a cancelled run synthesises `Exception("Task canceled")`.
 
-`QgsProcessingAlgRunnerTask` — the runner the plugin uses (`qgis_actions/jobs.py:L216-L246`):
+`QgsProcessingAlgRunnerTask` — the runner the plugin uses (`jobs.py`, `AlgorithmTask`):
 
 ```python
 from qgis.core import QgsProcessingAlgRunnerTask, QgsApplication
 
 task = QgsProcessingAlgRunnerTask(algorithm, parameters, context, feedback)
-task.executed.connect(lambda ok, results: ...)   # executed is a real signal
-QgsApplication.taskManager().addTask(task)       # returns 0 on failure
+task.executed.connect(lambda ok, results: ...)  # executed is a real signal
+QgsApplication.taskManager().addTask(task)  # returns 0 on failure
 ```
 
 Renderer job — asynchronous because the job already has threads
-(`qgis_actions/view/render_map.py:L68-L79`):
+(`commands/view/render_map.py`, `RenderMap.arun`):
 
 ```python
 from qgis.core import QgsMapRendererParallelJob
 
 job = QgsMapRendererParallelJob(settings)
-job.finished.connect(save_rendered_image)   # signal, delivered on the main thread
+job.finished.connect(save_rendered_image)  # signal, delivered on the main thread
 job.start()
 ```
 
@@ -166,7 +168,7 @@ Anything that must return immediately uses the second.
 - `setProgressText()` is not a stored field: `QgsProcessingFeedback::setProgressText`
   appends the text to the HTML and text logs (`qgsprocessingfeedback.cpp`), and there is no
   getter. A poller that wants the latest text must capture it itself — which is what
-  `ProcessingFeedback.setProgressText` does (`qgis_actions/jobs.py:L158-L159`), and that
+  `ProcessingFeedback.setProgressText` does (`jobs.py`), and that
   override also keeps progress chatter out of the log.
 - `textLog()` is the accumulated message log: every `pushInfo`, `pushWarning`, `reportError`
   and — by default — every progress text lands there. It is the only place a failed
@@ -202,7 +204,7 @@ override is reached only if the virtual really exists.
 - **`setProgressText` reaches Python, and the base implementation really is skipped.** A C++
   proxy forwarding one string landed in the override, and `textLog()` afterwards was `''`:
   the C++ append never runs, so an override suppresses log growth as well as capturing the
-  text. This is the measured form of the claim `jobs.py:L158-L159` now makes.
+  text. This is the measured form of the claim `jobs.py` now makes.
 - **`setProgress` never reaches Python.** The same C++ proxy reported `0` calls to a Python
   override: the method is not virtual, so overriding it is dead code. Read `progress()`
   instead, which is what `ProcessingJob.progress` does.
@@ -211,10 +213,10 @@ override is reached only if the virtual really exists.
   text is per-algorithm, not a guarantee, so `progress_text` being `None` or `''` is normal
   and says nothing about the run.
 - **The job layer and the manager layer disagree on a cancelled task, on purpose.** Cancel a
-  `ProcessingJob` and the job settles `error_code="processing_failed"` with an empty message,
-  because a cancelled algorithm task simply reports `finished(False)`. Only
-  `OperationRegistry` turns that into `terminal_outcome="cancelled"`, since it read
-  `cancel_requested` first (`operation_registry.py`, `_finished`). Without that one writer a
+  `ProcessingJob` and the job settles a `processing_failed` failure with an empty message,
+  because a cancelled algorithm task simply reports `finished(False)`. Only `Operations`
+  turns that into `terminal_outcome="cancelled"`, since it read `cancel_requested` first
+  (`operations.py`, `_finish`). Without that one writer a
   user-initiated cancel would arrive as a failure.
 
 ## Errors
@@ -224,13 +226,13 @@ and the algorithm's own messages go through `QgsProcessingFeedback::reportError`
 writes them to the log (`qgsprocessingfeedback.cpp`). Hence:
 
 ```python
-error_message = self._feedback.textLog().strip() or None   # jobs.py:L196-L207
+self.fail(CommandError("processing_failed", self._feedback.textLog().strip()))  # jobs.py
 ```
 
 `QgsProcessingAlgRunnerTask::finished(bool)` runs `mAlgorithm->postProcess(...)` and then
 emits `executed(result, results)`, so the results arrive through a signal, after
 post-processing, on the main thread. `AlgorithmTask` connects to `executed` to record success
-*before* the `finished()` override runs (`qgis_actions/jobs.py:L226-L246`).
+*before* the `finished()` override runs (`jobs.py`, `AlgorithmTask`).
 
 A renderer job reports errors through the job's own error list; `finished()` only means "the
 render stopped", cancelled or not.
@@ -250,7 +252,7 @@ Source comment, `src/core/qgstaskmanager.h:L274-L284`:
 
 It is declared under `protected:` (`:L262`) and is absent from the `signals:` block
 (`:L221-L260`), which is why `task.finished.connect(...)` cannot work and why `jobs.py` wraps
-every task in a `QObject` with its own `finished` signal (`qgis_actions/jobs.py:L29-L98`). The
+every task in a `QObject` with its own `finished` signal (`jobs.py`, `OperationJob`). The
 manager is what calls it: `QgsTaskManager::taskStatusChanged` invokes `task->finished( result )`
 on `Complete`/`Terminated` (`qgstaskmanager.cpp`), reached through the task's `statusChanged`
 signal.
@@ -259,7 +261,7 @@ signal.
 
 This is **observed behaviour in this plugin**, not a documented QGIS rule. `_checked` runs
 `checkParameterValues(...)` against a throwaway context and says why
-(`qgis_actions/processing/execute_processing.py:L122-L139`): "a task must be given a context
+(`commands/processing/execute_processing.py`, `_checked`): "a task must be given a context
 nothing has resolved parameters with: QGIS keeps what the check left there alive past the
 run, so handing a context that has already resolved parameters to the task crashes the next
 one."
@@ -274,7 +276,7 @@ again in its own constructor (`qgsprocessingalgrunnertask.cpp`), so a context on
 
 The other half of the constraint is lifetime: the task holds raw pointers to the algorithm,
 the context and the feedback, not copies — keep them alive on the job
-(`qgis_actions/jobs.py:L162-L181`).
+(`jobs.py`, `ProcessingJob`).
 
 ## Pitfalls verified on 3.44.13
 
@@ -306,15 +308,15 @@ the context and the feedback, not copies — keep them alive on the job
 
 | Plugin class | QGIS mechanism | Why the wrapper exists |
 | --- | --- | --- |
-| `OperationJob` (`jobs.py:L29`) | none | One `finished` **signal**, one `settle()` that fires once, and `progress`/`progress_text` that may be `None`. |
-| `RenderMapJob` (`jobs.py:L104`) | `QgsMapRendererParallelJob` | The job already has threads and a real `finished` signal; the wrapper only saves the image and settles. No progress, because the job reports none. |
-| `ProcessingFeedback` (`jobs.py:L154-L159`) | `QgsProcessingFeedback` | Keeps the latest `setProgressText` string where a poll can read it, and keeps it out of the log. |
-| `AlgorithmTask` (`jobs.py:L216-L246`) | `QgsProcessingAlgRunnerTask` | Turns `executed(bool, results)` plus the `finished` override into one callback, so a cancelled task and a failed task both settle. |
-| `ProcessingJob` (`jobs.py:L162-L213`) | `QgsProcessingAlgRunnerTask` | Holds the algorithm/context/feedback alive, maps progress, and takes the failure reason from `textLog()`. |
-| `OperationRegistry` (`operation_registry.py`, `start`/`cancel`/`status`) | none | The only writer of a terminal outcome, and the store a poll reads: the job itself is released at the boundary, because QGIS keeps neither the finished task nor its result. |
-| `Action.execution` / `.modes` (`qgis_actions/base.py:L109-L121`) | none | A declaration states whether `run`, `arun` or both exist; the gateway picks the method (`qgis_gateway.py:L93-L94`). |
+| `OperationJob` (`jobs.py`) | none | One `finished` **signal**, a `settle()`/`fail()` pair that fires once, and `progress`/`progress_text` that may be `None`. |
+| `RenderMapJob` (`jobs.py`) | `QgsMapRendererParallelJob` | The job already has threads and a real `finished` signal; the wrapper only saves the image and settles. No progress, because the job reports none. |
+| `ProcessingFeedback` (`jobs.py`) | `QgsProcessingFeedback` | Keeps the latest `setProgressText` string where a poll can read it, and keeps it out of the log. |
+| `AlgorithmTask` (`jobs.py`) | `QgsProcessingAlgRunnerTask` | Turns `executed(bool, results)` plus the `finished` override into one callback, so a cancelled task and a failed task both settle. |
+| `ProcessingJob` (`jobs.py`) | `QgsProcessingAlgRunnerTask` | Holds the algorithm/context/feedback alive, maps progress, and takes the failure reason from `textLog()`. |
+| `Operations` (`operations.py`, `start`/`cancel`/`status`) | none | The only writer of a terminal outcome, and the store a poll reads: the job itself is released at the boundary, because QGIS keeps neither the finished task nor its result. |
+| `Command.execution` / `.modes` (`command.py`) | none | A declaration states whether `run`, `arun` or both exist; the pipeline picks the method (`dispatch.py`). |
 
-A new asynchronous action declares `execution = "both"` (or `"async"`), writes an `arun` that
+A new asynchronous command declares `execution = "both"` (or `"async"`), writes an `arun` that
 builds a job and ends with `ctx.operations.start(self.name, job)`, and reuses `RenderMapJob` or
 `ProcessingJob` when the mechanism is one of those two. Only a new mechanism needs a new adapter.
 
