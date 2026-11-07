@@ -78,7 +78,8 @@ record.model_dump_json(indent=2)
 ```
 
 `crs_authid` 是工程自己的 CRS，空工程可能是 `""`；`project_epoch` 是插件本地的代数，不是
-QGIS 的工程版本号。`run_sync` 永远返回终态（`SUCCEEDED` 或 `FAILED`）。
+QGIS 的工程版本号。**控制面通过之后**，`run_sync` 返回终态（`SUCCEEDED` 或 `FAILED`）；控制面失败
+（未知 Operation、非主线程、引擎已关闭、对后台 Operation 调用）直接抛 `FrameworkError`，不建记录。
 
 ## 3. 参数写错的样子
 
@@ -159,7 +160,7 @@ engine.get(submitted.execution_id).status      # 下一轮事件循环后
 
 ```text
 submit -> QUEUED
-observed statuses: QUEUED -> SCHEDULED -> SUCCEEDED
+observed statuses (polling): QUEUED -> SCHEDULED -> SUCCEEDED    # RUNNING 落在两次采样之间
 result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
          "skipped_null": 1, "total": 225.0, "snapshot_project_epoch": 0}
 progress: 100.0
@@ -168,8 +169,14 @@ progress: 100.0
 几条实测到的事实：
 
 - worker 在 Qt 线程池线程上跑（探针里线程名 `Dummy-1`），`finished` 回调在 `MainThread`。
-- 4 要素 / 9000 要素这种快任务，记录里的进度只写 `0 → 100`；`RUNNING` 甚至可能观察不到
-  （第一个进度报告还没到，任务已经结束，记录直接由 `SCHEDULED` 经成功路径到 `SUCCEEDED`）。
+- 记录里的进度不止两端：首条进度报告会立刻写一次（并把记录推进到 `RUNNING`），完成前还会
+  补写最后一条被节流的值。实测（直接记录每次 `store.transition`，同一个 4 要素图层）：
+  `PREPARING 0 → SCHEDULED 0 → RUNNING 0 → RUNNING 33.333 → RUNNING 66.667 → FINALIZING 66.667
+  → SUCCEEDED 100`；9000 要素则是 `RUNNING 0 → RUNNING 1.0 → RUNNING 99.0 → FINALIZING 99.0
+  → SUCCEEDED 100`。
+- 轮询 `engine.get()` 看不到这些中间值，因为它们落在两次轮询之间；`RUNNING` 也常常错过。
+  那是轮询粒度问题，不是记录没经过：`_running()` 在任何成功路径前强制 `SCHEDULED -> RUNNING`，
+  状态机也不允许 `SCHEDULED -> SUCCEEDED`。
 - 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
 - 超过 `max_snapshot_features`（默认 10000）：10001 个要素 → `FAILED`
   `SNAPSHOT_LIMIT_EXCEEDED`，不做静默截断。
@@ -208,8 +215,8 @@ engine.get(running_id).status         # 等任务自己报告，才变 'CANCELLE
 ```
 
 **未实测（本文件）**：正在 `RUNNING` 的 `QgsTask` 的 `CANCEL_REQUESTED -> CANCELLED` 这一段。
-4 要素/9000 要素的求和在毫秒级结束，构造不出稳定的取消窗口；F5 的实现报告里有
-`progress 60.0 → CANCEL_REQUESTED → CANCELLED` 的探针记录。语义见 `docs/ERRORS.md` §4。
+4 要素/9000 要素的求和在毫秒级结束，构造不出稳定的取消窗口；这条路径由 `tests/test_qgs_task.py` 的
+单测覆盖。语义见 `docs/ERRORS.md` §4。
 
 `cancel` 对主线程正在执行的调用、以及 `FINALIZING` 的记录，返回 `accepted=false`
 与 `reason="NOT_INTERRUPTIBLE"` / `"FINALIZING"`。
@@ -275,7 +282,7 @@ FrameworkError: INTERNAL_ERROR | <id>: CANCEL_REQUESTED -> SUCCEEDED is not a tr
 | --- | --- |
 | `iface.agent_engine` / `iface.agent_registry` 本身 | 需要 QGIS Desktop 的 `iface`；headless 里用同一套类手工装配，`initGui` 的发布逻辑由单测覆盖 |
 | `project.create` 成功路径 | 需要真实 `iface.newProject()`，且被 F9 挡住 |
-| `project.open` 成功路径 | 被 F9 挡住（headless 里用“只取消后台记录”的替身验证过修复方向，见 F9 报告） |
+| `project.open` 成功路径 | 被 F9 挡住（headless 探针里把“取消活动后台任务”换成只针对后台记录后，同一调用 SUCCEEDED，epoch 0 → 1） |
 | 运行中后台任务的 `CANCEL_REQUESTED -> CANCELLED` | 现有后台 Operation 太快，构造不出稳定窗口 |
 | 父级组隐藏时的 `visible=true / effective_visible=false` | 需要 GUI 图层树里的组；单测覆盖，Console 未跑 |
 | 多个后台任务排队（`max_active_background=2` 的 FIFO） | 探针里三次 9000 要素求和都在三轮事件循环内跑完，看不到第三个停在 `QUEUED`；单测覆盖该路径 |

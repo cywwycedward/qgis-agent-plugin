@@ -74,6 +74,7 @@
 | 后台 `SCHEDULED` / `RUNNING` | `accepted=true`，记录转 `CANCEL_REQUESTED`，并调 `QgsTask.cancel()`；等任务自己报告终止才变 `CANCELLED` |
 | `FINALIZING` | `accepted=false`，`reason="FINALIZING"`：结果正在提交，不允许出现“写完了却报取消” |
 | 已是终态 | `accepted=false`，`reason="ALREADY_TERMINAL"` |
+| 已是 `CANCEL_REQUESTED` | `accepted=true`，状态不变：重复取消只是再确认一次请求，等任务自己报告终止才变 `CANCELLED` |
 | 主线程已 `RUNNING` | `accepted=false`，`reason="NOT_INTERRUPTIBLE"`：同步调用没法从外部打断 |
 
 已实测：`submit` 之后立刻 `cancel` 一个主线程调用，得到
@@ -90,7 +91,9 @@ FrameworkError: INTERNAL_ERROR | <execution-id>: CANCEL_REQUESTED -> SUCCEEDED i
 - 原因：`QgsProject.read()` / `iface.newProject()` 会发 `aboutToBeCleared`，引擎把正在执行的
   这条**主线程**记录也当成后台任务取消（`_stop_background` 没有按 strategy 过滤），
   于是它从 `RUNNING` 变 `CANCEL_REQUESTED`，再想变 `SUCCEEDED` 就撞上状态机。
-- 现象：异常从 `run_sync` 抛给调用方，并且记录停在 `CANCEL_REQUESTED`（非终态，之后不能再迁移）。
+- 现象：异常从 `run_sync` 抛给调用方，记录停在 `CANCEL_REQUESTED`。它**是非终态，但没有任何代码
+  再写它**：状态机本身允许 `CANCEL_REQUESTED -> CANCELLED/FAILED`，只是没有任务在跑、没有完成回调
+  会来；对它再 `cancel()` 只得到一条 `accepted=true` 的重复回执，状态不变。
 - 影响：`project.create`、`project.open` 的成功半边不可用；其它七个 Operation 不受影响。
 - 修复：F9（`fix/engine-background-cancel`，一行 strategy 过滤）。修复落地前，调用方应当
   认为这两个 Operation 的“成功”路径不可用；`INVALID_CRS`、`PROJECT_REPLACE_REQUIRED`、

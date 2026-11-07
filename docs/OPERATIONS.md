@@ -126,6 +126,12 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
 | `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
+成功路径同样会触发 `QgsProject.aboutToBeCleared`（`read()` 会清空旧工程），所以 `project_epoch` 加 1、
+旧代数的排队调用立即 `CANCELLED`。**该成功路径当前有缺陷**：与 `project.create` 同因（缺陷 F9），
+真实 QGIS 里抛 `INTERNAL_ERROR`、记录停在 `CANCEL_REQUESTED`，本节返回字段表里的四个值在修复前拿不到。
+失败路径（`INVALID_INPUT`、`PATH_NOT_ALLOWED`、`PROJECT_REPLACE_REQUIRED`、`PROJECT_OPEN_FAILED`）
+不受影响。详见 `docs/ERRORS.md` §5。
+
 ## 4. `project.save`
 
 把当前工程写到本地文件。
@@ -288,8 +294,9 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 
 - 只有这一段是后台的：`prepare_main`（主线程读要素、跳过 null、拷成 float 元组）、
   `execute_worker`（后台求和）、`finalize_main`（主线程只比对 epoch）。
-- 进度走 `QgsTask.setProgress`，记录里最多每 100 ms 写一次，且**不写 100**——100 只由
-  `SUCCEEDED` 那一步写，否则一个 3 ms 的任务会留下“100% 但已取消”的记录。
+- 进度走 `QgsTask.setProgress`，记录最多每 100 ms 写一次，且**不写 100**——100 只由
+  `SUCCEEDED` 那一步写，否则一个 3 ms 的任务会留下“100% 但已取消”的记录。首条报告会立刻写
+  （并推进到 `RUNNING`），完成前还会补写最后一次被节流的值。
 - 任务声明了 `dependent_layer_ids`，适配器调用 `setDependentLayers`：图层被删时 QGIS 自己
   取消任务。
 - 结果描述的是快照，不是任务结束那一刻图层里的值。

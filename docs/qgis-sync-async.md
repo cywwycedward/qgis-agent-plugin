@@ -64,7 +64,7 @@
 QUEUED            submit 返回时；输入已经校验过，排队中
 PREPARING         下一轮事件循环，主线程跑 prepare_main
 SCHEDULED         addTask 返回非 0，QGIS 接手中（还没必然开始）
-RUNNING           第一个进度报告到达主线程时才置（短任务可能观察不到这一步）
+RUNNING           第一个进度报告到达主线程时才置（轮询可能看不到这一步，记录本身仍会经过它）
 FINALIZING        finished(true) 且没被取消，主线程跑 finalize_main（先校验 project_epoch）
 SUCCEEDED/FAILED  输出校验后落终态
 CANCELLED         finished 报告已取消，或排队时就被取消
@@ -74,10 +74,11 @@ CANCELLED         finished 报告已取消，或排队时就被取消
 
 ```text
 submit -> QUEUED
-observed statuses: QUEUED -> SCHEDULED -> SUCCEEDED      # 任务 3 ms 级，RUNNING 没被观察到
-worker thread: Dummy-1 | finished callback thread: MainThread
+observed statuses: QUEUED -> SCHEDULED -> SUCCEEDED      # 轮询采样错过 RUNNING，记录仍经过它
+worker 线程: Dummy-1 | finished 回调线程: MainThread
 progressChanged 次数 100（worker 调 setProgress 100 次，一次不少）
-记录里的 progress: 0.0 -> 100.0
+记录里的 progress: 0.0 -> 1.0 -> 99.0 -> 100.0
+（首条报告、末条被节流的值、终态各写一次；轮询采样只看到两端）
 ```
 
 ## 5. 会咬人的地方（都写在适配器的注释里）
