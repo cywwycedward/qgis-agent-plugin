@@ -296,7 +296,8 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
   `execute_worker`（后台求和）、`finalize_main`（主线程只比对 epoch）。
 - 进度走 `QgsTask.setProgress`，记录最多每 100 ms 写一次，且**不写 100**——100 只由
   `SUCCEEDED` 那一步写，否则一个 3 ms 的任务会留下“100% 但已取消”的记录。首条报告会立刻写
-  （并推进到 `RUNNING`），完成前还会补写最后一次被节流的值。
+  （并推进到 `RUNNING`），完成前还会补写最后一次被节流的值；一条可用报告都没有时（快照里只剩
+  一个非 null 值），`RUNNING` 由完成路径补写。
 - 任务声明了 `dependent_layer_ids`，适配器调用 `setDependentLayers`：图层被删时 QGIS 自己
   取消任务。
 - 结果描述的是快照，不是任务结束那一刻图层里的值。

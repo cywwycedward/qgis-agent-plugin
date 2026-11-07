@@ -55,7 +55,7 @@
 | `SNAPSHOT_LIMIT_EXCEEDED` | `layer.sum_numeric_field` | 要素数超过 `max_snapshot_features`（默认 10000） | 该 Operation 只用于线程/取消验收，不为大图层设计；不要指望它静默截断 |
 | `TOO_MANY_EXECUTIONS` | 引擎 `submit` | 排队数超过 `max_pending`（默认 32）。实测：第 33 个 `submit` 拿到 `FAILED` | 等已有调用结束（`get` 轮询）再提交；请求不会被静默丢弃，而是明确失败 |
 | `TASK_SUBMISSION_FAILED` | 引擎 / 后台适配器 | 没有装后台适配器，或 `QgsTaskManager.addTask()` 返回 0（QGIS 拒绝接手） | 重试一次；持续失败说明 QGIS 任务系统有问题，`message` 里有原因类别 |
-| `STALE_PROJECT` | 引擎 / `finalize_main` | 任务运行期间工程被替换（`project_epoch` 变了），结果被拒绝 | 结果作废；在新工程上重新提交 |
+| `STALE_PROJECT` | 后台适配器 / `finalize_main` | 任务运行期间工程被替换（`project_epoch` 变了），结果被拒绝 | 结果作废；在新工程上重新提交 |
 | `OUTPUT_VALIDATION_FAILED` | 引擎 | Operation 的返回值不符它自己声明的输出模型 | 构建缺陷，不是调用方的问题；报 bug |
 | `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常：`message` 只有 `类型名: unexpected failure`，或 `project.create` 的 `iface.newProject()` 返回 `False`，或任务结束但没有结果 | 先看本机日志里的堆栈；`INTERNAL_ERROR` 也可能是缺陷 F9 的症状（见 §5） |
 

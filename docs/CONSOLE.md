@@ -175,8 +175,11 @@ progress: 100.0
   → SUCCEEDED 100`；9000 要素则是 `RUNNING 0 → RUNNING 1.0 → RUNNING 99.0 → FINALIZING 99.0
   → SUCCEEDED 100`。
 - 轮询 `engine.get()` 看不到这些中间值，因为它们落在两次轮询之间；`RUNNING` 也常常错过。
-  那是轮询粒度问题，不是记录没经过：`_running()` 在任何成功路径前强制 `SCHEDULED -> RUNNING`，
-  状态机也不允许 `SCHEDULED -> SUCCEEDED`。
+  那是轮询粒度问题，不是记录没经过：状态机不允许 `SCHEDULED -> SUCCEEDED`，完成路径也会先用
+  `_running()` 把 `SCHEDULED` 补成 `RUNNING`。
+- 快照里只剩一个非 null 值时，worker 唯一一次 `set_progress(100)` 会被适配器的 `>= 100` 守卫
+  丢掉，记录就是 `PREPARING 0 → SCHEDULED 0 → RUNNING 0 → FINALIZING 0 → SUCCEEDED 100`（实测）：
+  这里的 `RUNNING` 来自完成路径补写，不是进度报告。
 - 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
 - 超过 `max_snapshot_features`（默认 10000）：10001 个要素 → `FAILED`
   `SNAPSHOT_LIMIT_EXCEEDED`，不做静默截断。

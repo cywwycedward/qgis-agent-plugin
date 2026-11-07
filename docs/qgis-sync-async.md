@@ -64,7 +64,7 @@
 QUEUED            submit 返回时；输入已经校验过，排队中
 PREPARING         下一轮事件循环，主线程跑 prepare_main
 SCHEDULED         addTask 返回非 0，QGIS 接手中（还没必然开始）
-RUNNING           第一个进度报告到达主线程时才置（轮询可能看不到这一步，记录本身仍会经过它）
+RUNNING           首个进度报告到达主线程时置；没报告时由完成路径 _running() 补写（轮询可能错过）
 FINALIZING        finished(true) 且没被取消，主线程跑 finalize_main（先校验 project_epoch）
 SUCCEEDED/FAILED  输出校验后落终态
 CANCELLED         finished 报告已取消，或排队时就被取消
@@ -76,7 +76,7 @@ CANCELLED         finished 报告已取消，或排队时就被取消
 submit -> QUEUED
 observed statuses: QUEUED -> SCHEDULED -> SUCCEEDED      # 轮询采样错过 RUNNING，记录仍经过它
 worker 线程: Dummy-1 | finished 回调线程: MainThread
-progressChanged 次数 100（worker 调 setProgress 100 次，一次不少）
+progressChanged 报告 100 次（1.0 … 100.0 各一次；1.0 的步进每次都会跨过 0.1 档，所以没被过滤器吞掉）
 记录里的 progress: 0.0 -> 1.0 -> 99.0 -> 100.0
 （首条报告、末条被节流的值、终态各写一次；轮询采样只看到两端）
 ```
@@ -92,17 +92,24 @@ progressChanged 次数 100（worker 调 setProgress 100 次，一次不少）
 - **worker 里抛异常会 abort QGIS**（异常穿过 C++ 任务框架）：`OperationRun.run` 用
   `except BaseException` 兜住，转成 `FAILED(INTERNAL_ERROR)`，堆栈只进本机日志。
 - **`waitForFinished(30000)` 默认 30 秒**，`0` 是无期限；超时只说明任务还在跑。本插件不用它。
-- **进度节流要自己做**：`QgsTask.setProgress` 每次都发 `progressChanged`（实测 100 次调用 = 100 次
-  信号），所以适配器才把“写执行记录”限制到每 100 ms 一次，并且**不写 100**——100 只由
-  `SUCCEEDED` 那一步写，否则一个已取消的任务也会留下 100% 的记录。
-  （`QgsFeedback::setProgress` 才有“变化 1/10 才发信号”的行为，那是另一个类。）
-- **任务没有结果也可能是失败**：`finished(true)` 只表示 `run()` 返回了真值；本插件还要看有没有
-  算出的结果，没有就 `FAILED(INTERNAL_ERROR: the task ended without a result)`。
+- **进度节流要自己做**：`QgsTask.setProgress` 只在“十分之一”档位变化时才发 `progressChanged`
+  （与 `QgsFeedback::setProgress` 是同一个过滤器，两个类一致）。实测：16 次调用
+  （`0.01 / 0.02 / 0.05 / 0.09 / 0.1 / 0.15 / 0.19 / 0.2 / 0.25 / 1.0 / 1.01 / 1.05 / 1.1 / 2.0 /
+  2.05 / 2.1`）只换来 6 次信号，落在 `0.1 / 0.2 / 1.0 / 1.1 / 2.0 / 2.1`；而 1.0 步进的 100 次
+  调用恰好每次都跨档，所以 9000 要素那次求和的 100 次调用全都到了。任务结束时 QGIS 还会为成功的
+  任务报一次 `100`（探针里最后显式值是 `2.1`，仍收到一次 `100.0`），所以适配器宁可忽略一切
+  `>= 100` 的报告。这个粒度对写执行记录仍然太密，因此“写记录”被限制到每 100 ms 一次，100 只由
+  `SUCCEEDED` 那一步写——否则一个已取消的任务也会留下 100% 的记录。
+- **`finished(false)` 不等于有诊断**：`finished(false)` 且既没捕获到异常、也没被取消时，适配器记
+  `FAILED(INTERNAL_ERROR: the task ended without a result)`。`finished(true)` 只表示 `run()` 返回了
+  真值；结果能不能用由 `finalize_main` + 输出模型校验决定（`execute_worker` 真返回 `None` 时会在
+  `finalize_main` 里抛，最终记 `INTERNAL_ERROR`，`message` 是 `AttributeError: unexpected failure`）。
 
 ## 6. PyQGIS 能碰什么、不能碰什么
 
-只有 public virtual 的成员会让 C++ 回调进 Python；随 QGIS 附带的 `_core.pyi` stub 会列出方法，
-但不告诉你它是不是 virtual，只能看头文件的 `virtual` 与访问段。
+只有 virtual 成员（public 或 protected）会让 C++ 回调进 Python——`QgsTask::run()` / `finished()`
+就是 protected virtual（本插件的 `OperationTask` 正是 override 它们才能跑起来）；随 QGIS 附带的
+`_core.pyi` stub 会列出方法，但不告诉你它是不是 virtual，只能看头文件的 `virtual` 与访问段。
 
 | 成员 | 在 C++（3.44.13） | 在 PyQGIS |
 | --- | --- | --- |
@@ -123,7 +130,7 @@ progressChanged 次数 100（worker 调 setProgress 100 次，一次不少）
 - **`setProgressText` 会进 Python，且 C++ 的默认实现被跳过**：C++ 代理转发一个字符串，Python 的
   override 收到了，事后 `textLog()` 是空的。用 C++ 侧转发才证明得了这件事，Python 调 Python
   证明不了。
-- **`setProgress` 不会进 Python**：同一个代理报告 0 次调用——它不是 virtual。要读进度只能读
+- **`QgsFeedback::setProgress` 不会进 Python**：同一个代理报告 0 次调用——它不是 virtual。要读进度只能读
   `progress()`。
 - **原生算法可能一直不报进度文本**：20000 个要素跑 `native:centroids`，`setProgressText` 0 次、
   `textLog()` 为空。所以“进度文本为空”不代表出错。

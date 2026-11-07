@@ -172,8 +172,10 @@ F8 不做；F7 的 GUI 验收清单里有这一条）。
 
 插件管理器里禁用即可从 `iface` 上撤掉会话，Python 侧的对象按 PRD 9.3 的六步收尾（活动任务
 被请求取消，Supervisor 等最后一个任务真正终止后自删）。要彻底删除文件就删
-`%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgis-agent-plugin`，或反过来把
-`src/qgis_agent_plugin` 清空后跑一次 `npm run deploy`（镜像会把目标清干净）。
+`%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\qgis-agent-plugin`；或者删掉这个目标目录
+再 `npm run deploy`（源不动，脚本会重建）。**不要靠“把 `src/qgis_agent_plugin` 清空再 deploy”来删
+目标**：`deploy.ps1` 在 robocopy 之前就检查源里的 `metadata.txt`，源被清空时它直接报
+`not a QGIS plugin package (metadata.txt missing)` 并 `exit 1`，镜像一行都不会跑。
 
 ## 8. 文档索引
 
