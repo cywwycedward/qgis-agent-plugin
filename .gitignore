@@ -3,3 +3,6 @@ __pycache__/
 # Local agent skill bundle, installed per machine; nothing here references it.
 .agents/
 skills-lock.json
+
+# Agent handoff notes, per machine; the product never reads them.
+docs/delegate/
