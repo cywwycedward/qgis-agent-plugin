@@ -143,6 +143,13 @@ def test_a_stored_record_comes_back_as_an_independent_copy() -> None:
     assert fresh.result == {"value": "done"}
 
 
+def test_create_hands_back_a_snapshot_too() -> None:
+    store = ExecutionStore(Settings())
+    stored = store.create(make_record(QUEUED))
+    stored.status = CANCELLED
+    assert store.get("x").status is QUEUED
+
+
 def test_an_unknown_id_is_not_found() -> None:
     with pytest.raises(FrameworkError) as caught:
         ExecutionStore(Settings()).get("missing")
@@ -197,6 +204,14 @@ def test_progress_is_written_without_moving_the_status() -> None:
     record = store.transition("x", progress=40)
     assert record.status is QUEUED
     assert record.progress == 40
+
+
+def test_asking_for_the_current_status_changes_nothing() -> None:
+    store = ExecutionStore(Settings())
+    store.create(make_record(QUEUED))
+    record = store.transition("x", QUEUED)
+    assert record.status is QUEUED
+    assert record.finished_at is None
 
 
 def test_a_succeeded_record_needs_its_result_and_full_progress() -> None:
@@ -257,8 +272,18 @@ def test_reading_a_finished_record_past_its_ttl_is_not_found() -> None:
     store = ExecutionStore(Settings(terminal_ttl_seconds=1800), clock=clock)
     store.create(succeeded("old"))
 
-    # Only the clock moves: no other record finishes, so retention has to be applied
-    # on read as well (PRD 8.5, AT-24).
+    # Only the clock moves, and get is the first read: no earlier call may expire it.
+    clock.advance(1800)
+    with pytest.raises(FrameworkError) as caught:
+        store.get("old")
+    assert caught.value.code == EXECUTION_NOT_FOUND
+
+
+def test_listing_records_past_their_ttl_returns_nothing() -> None:
+    clock = Clock()
+    store = ExecutionStore(Settings(terminal_ttl_seconds=1800), clock=clock)
+    store.create(succeeded("old"))
+
     clock.advance(1800)
     assert store.ids(TERMINAL_STATUSES) == []
     with pytest.raises(FrameworkError) as caught:
@@ -273,6 +298,8 @@ def test_the_finish_log_carries_the_duration_and_the_error_code(
     with caplog.at_level("INFO"):
         store.create(make_record(RUNNING))
         move(store, "x", FAILED)
+    # Both the birth and the transition are recorded (PRD 11.3).
+    assert "execution x test.echo main_thread RUNNING" in caplog.text
     assert re.search(r"-> FAILED \(\d+\.\d{3}s, INTERNAL_ERROR\)", caplog.text)
 
 

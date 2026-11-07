@@ -251,6 +251,9 @@ class OperationEngine:
         """Run one queued main-thread call, unless it is no longer wanted."""
 
         record = self._store.get(execution_id)
+        # The runner already skipped an execution that ended; this asks the narrower
+        # question (is it still waiting?) that keeps a leftover callback from starting
+        # a call which has moved on (PRD 8.5).
         if record.status is not ExecutionStatus.QUEUED:
             return
         if record.project_epoch != self._lifecycle.current_epoch:
@@ -271,6 +274,9 @@ class OperationEngine:
         """
 
         runner = self._background_runner
+        # Same question as the runner's, asked once more right before the adapter gets
+        # anything: this is the last point where a cancelled call can be kept away from
+        # a QgsTask.
         if runner is None or not self._is_live(execution_id):
             return
         try:

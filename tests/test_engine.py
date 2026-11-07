@@ -176,6 +176,32 @@ class Exploding(
         return ValueResult(value=request.value)
 
 
+class RefusingParams(Params):
+    value: str
+
+    @field_validator("value")
+    @classmethod
+    def _refuse(cls, value: str) -> str:
+        # An operation's own refusal must keep its code, not become INVALID_INPUT.
+        raise FrameworkError(PATH_NOT_ALLOWED, "value is not an allowed path")
+
+
+class RefusingInput(
+    BaseQuery[RefusingParams, ValueResult],
+    MainThreadOperationMixin[RefusingParams, ValueResult],
+):
+    name = "test.refuse_input"
+    description = "an operation whose input model refuses with a business code"
+    input_model = RefusingParams
+    output_model = ValueResult
+
+    def execute_main(
+        self, ctx: OperationContext, request: RefusingParams
+    ) -> ValueResult:
+        CALLED.append(self.name)
+        return ValueResult(value=request.value)
+
+
 class Queue:
     """The Qt event queue, stood in for by a list the test drains."""
 
@@ -261,13 +287,25 @@ def test_an_unknown_operation_is_refused_without_a_record() -> None:
 def test_invalid_input_ends_as_a_failed_record_and_does_not_run(call_name: str) -> None:
     harness = Harness(Echo())
     call = getattr(harness.engine, call_name)
-    record = call("test.echo", {"value": "x", "unknown": 1})
+    record = call("test.echo", {"value": "x", "surprise": 1})
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INVALID_INPUT
-    assert record.error.message == "test.echo: invalid input at unknown"
+    # The message names the offending field, and names no other field and no value.
+    assert record.error.message == "test.echo: invalid input at surprise"
+    # A non-success terminal record never claims to be complete (PRD 6.6).
+    assert record.progress == 0
     assert CALLED == []
     assert harness.queue.callbacks == []
+
+
+def test_a_validator_that_refuses_with_a_business_code_keeps_it() -> None:
+    harness = Harness(RefusingInput())
+    record = harness.engine.submit("test.refuse_input", {"value": "x"})
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == PATH_NOT_ALLOWED
+    assert record.error.message == "value is not an allowed path"
 
 
 def test_an_input_model_that_raises_unexpectedly_ends_as_failed() -> None:
@@ -311,7 +349,9 @@ def test_a_submitted_call_waits_for_the_event_queue() -> None:
     assert CALLED == ["test.echo"]
 
 
-def test_a_queued_call_cancelled_before_its_turn_never_runs() -> None:
+def test_a_queued_call_cancelled_before_its_turn_never_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     harness = Harness(Echo())
     record = harness.engine.submit("test.echo", {})
     receipt = harness.engine.cancel(record.execution_id)
@@ -319,9 +359,43 @@ def test_a_queued_call_cancelled_before_its_turn_never_runs() -> None:
     assert receipt.status is CANCELLED
     assert receipt.reason is None
 
+    with caplog.at_level(logging.ERROR):
+        harness.queue.tick()
+    assert CALLED == []
+    cancelled = harness.engine.get(record.execution_id)
+    assert cancelled.status is CANCELLED
+    assert cancelled.progress == 0
+    # Skipped on purpose, not "started, refused by the state machine and logged":
+    # a missing skip leaves an ERROR record from the Qt-slot guard.
+    assert cancelled.started_at is None
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+
+
+def test_a_cancelled_background_call_is_never_handed_to_the_adapter() -> None:
+    handed: list[ExecutionRecord] = []
+
+    def adapter(
+        engine: OperationEngine, record: ExecutionRecord, operation: BaseOperation, request: Any
+    ) -> None:
+        handed.append(record)
+
+    harness = Harness(Sum(), background_runner=adapter)
+    record = harness.engine.submit("test.sum", {})
+    assert harness.engine.cancel(record.execution_id).status is CANCELLED
+
+    harness.queue.tick()
+    assert handed == []
+    assert harness.store.get(record.execution_id).status is CANCELLED
+
+
+def test_a_stale_callback_does_not_run_a_call_that_already_moved_on() -> None:
+    harness = Harness(Echo())
+    record = harness.engine.submit("test.echo", {})
+    # Something else already started it, so this queued callback is a leftover.
+    harness.store.transition(record.execution_id, RUNNING)
+
     harness.queue.tick()
     assert CALLED == []
-    assert harness.engine.get(record.execution_id).status is CANCELLED
 
 
 def test_a_finished_call_cannot_be_cancelled() -> None:
@@ -341,6 +415,17 @@ def test_a_running_main_thread_call_is_not_interruptible() -> None:
     assert receipt.accepted is False
     assert receipt.reason == "NOT_INTERRUPTIBLE"
     assert receipt.status is RUNNING
+
+
+def test_a_scheduled_background_call_only_gets_a_cancel_request() -> None:
+    harness = Harness(Sum(), background_runner=no_adapter)
+    record = harness.engine.submit("test.sum", {})
+    harness.store.transition(record.execution_id, PREPARING)
+    harness.store.transition(record.execution_id, SCHEDULED)
+
+    receipt = harness.engine.cancel(record.execution_id)
+    assert receipt.accepted is True
+    assert receipt.status is CANCEL_REQUESTED
 
 
 def test_a_running_background_call_only_gets_a_cancel_request() -> None:
