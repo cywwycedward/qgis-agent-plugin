@@ -54,6 +54,8 @@ def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> 
         # resolve() also normalises a trailing ``.``/``..``, which would otherwise
         # look like it lived inside the root while naming its parent.
         target = (parent / path.name).resolve()
+        if target.is_dir():
+            _refuse()
 
     if not any(target == root or root in target.parents for root in allowed):
         _refuse()

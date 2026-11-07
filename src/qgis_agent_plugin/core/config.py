@@ -37,25 +37,28 @@ class Settings:
     def from_mapping(cls, values: Mapping[str, Any]) -> Settings:
         """Build the settings from a mapping, keeping every declared default.
 
-        Values may arrive as strings -- that is what a QSettings-like store
-        returns -- so the counts are converted and the roots are turned into
-        paths here, once, instead of in every caller.
+        A key may be absent or ``None`` -- that is what a QSettings-like store
+        returns for something nobody wrote -- and both mean "not set", so the
+        dataclass default stays.  A count may arrive as a string and a root list
+        as the single value the store returns, which is why both are converted
+        here, once, instead of in every caller.
         """
 
-        resolved: dict[str, Any] = {key: _roots(values.get(key, ())) for key in _ROOT_KEYS}
-        resolved.update(
-            {
-                field.name: int(values.get(field.name, getattr(cls, field.name)))
-                for field in fields(cls)
-                if field.name not in _ROOT_KEYS
-            }
-        )
+        set_values = {key: value for key, value in values.items() if value is not None}
+        resolved: dict[str, Any] = {}
+        for field in fields(cls):
+            if field.name not in set_values:
+                continue
+            value = set_values[field.name]
+            resolved[field.name] = _roots(value) if field.name in _ROOT_KEYS else int(value)
         return cls(**resolved)
 
 
 def _roots(value: Any) -> tuple[Path, ...]:
-    """One root may arrive as a single string: QSettings returns one value that way."""
+    """One root may arrive as a single path: QSettings returns one value that way."""
 
-    if isinstance(value, str):
+    if not value:
+        return ()
+    if isinstance(value, (str, Path)):
         return (Path(value),)
     return tuple(Path(root) for root in value)

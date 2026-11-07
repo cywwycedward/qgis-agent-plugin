@@ -108,6 +108,13 @@ def test_an_existing_save_target_resolves(tmp_path: Path) -> None:
     assert resolve_path(str(target), [root], must_exist=False) == target.resolve()
 
 
+def test_a_save_target_that_is_a_directory_is_refused(tmp_path: Path) -> None:
+    root = data_root(tmp_path)
+    existing = root / "photos"
+    existing.mkdir()
+    refused(str(existing), [root], must_exist=False)
+
+
 def test_a_save_with_a_missing_parent_directory_is_refused(tmp_path: Path) -> None:
     root = data_root(tmp_path)
     refused(str(root / "missing" / "output.qgz"), [root], must_exist=False)
@@ -173,6 +180,15 @@ def test_the_default_settings_allow_no_directory(tmp_path: Path) -> None:
 def test_a_single_root_string_is_read_as_one_root(tmp_path: Path) -> None:
     settings = Settings.from_mapping({"allowed_data_roots": str(tmp_path)})
     assert settings.allowed_data_roots == (tmp_path,)
+
+
+def test_a_single_path_root_is_read_as_one_root(tmp_path: Path) -> None:
+    settings = Settings.from_mapping({"allowed_project_roots": tmp_path})
+    assert settings.allowed_project_roots == (tmp_path,)
+
+
+def test_unset_values_fall_back_to_the_defaults() -> None:
+    assert Settings.from_mapping({"allowed_data_roots": None, "max_pending": None}) == Settings()
 
 
 def test_settings_take_counts_as_strings_and_keep_the_other_defaults(tmp_path: Path) -> None:

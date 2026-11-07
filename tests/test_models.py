@@ -220,4 +220,3 @@ def test_unknown_input_field_is_refused() -> None:
 def test_string_true_is_not_a_boolean() -> None:
     with pytest.raises(ValidationError):
         StrictParams.model_validate({"enabled": "true"})
-
