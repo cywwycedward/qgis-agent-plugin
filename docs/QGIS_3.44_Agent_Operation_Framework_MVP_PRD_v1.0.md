@@ -187,32 +187,40 @@ class OperationKind(str, Enum):
     COMMAND = "command"
     QUERY = "query"
 
+
 class ExecutionStrategy(str, Enum):
     MAIN_THREAD = "main_thread"
     BACKGROUND = "background"
 
+
 class BaseOperation(ABC, Generic[InputT, OutputT]):
-    name: str                 # 稳定注册键，例如 layer.add
-    description: str          # 面向开发者与未来 Tool 的描述
+    name: str  # 稳定注册键，例如 layer.add
+    description: str  # 面向开发者与未来 Tool 的描述
     input_model: type[InputT]
     output_model: type[OutputT]
-    kind: OperationKind       # 由 BaseCommand/BaseQuery 决定
+    kind: OperationKind  # 由 BaseCommand/BaseQuery 决定
     strategy: ExecutionStrategy
     destructive: bool = False
+
 
 class BaseCommand(BaseOperation[InputT, OutputT]):
     kind = OperationKind.COMMAND
 
+
 class BaseQuery(BaseOperation[InputT, OutputT]):
     kind = OperationKind.QUERY
 
+
 class MainThreadOperationMixin(ABC, Generic[InputT, OutputT]):
     strategy = ExecutionStrategy.MAIN_THREAD
+
     @abstractmethod
     def execute_main(self, ctx: OperationContext, request: InputT) -> OutputT: ...
 
+
 class BackgroundOperationMixin(ABC, Generic[InputT, OutputT, SnapshotT, WorkerT]):
     strategy = ExecutionStrategy.BACKGROUND
+
     @abstractmethod
     def prepare_main(self, ctx: OperationContext, request: InputT) -> SnapshotT: ...
     @abstractmethod
@@ -727,21 +735,27 @@ info = engine.run_sync("project.get_info", {})
 assert info.status == ExecutionStatus.SUCCEEDED
 
 # 安全添加图层：需事先配置 allowed_data_roots
-submitted = engine.submit("layer.add", {
-    "kind": "vector",
-    "source_path": "/workspace/data/roads.gpkg",
-    "name": "Roads",
-    "sub_layer": "roads",
-    "add_to_legend": True,
-})
+submitted = engine.submit(
+    "layer.add",
+    {
+        "kind": "vector",
+        "source_path": "/workspace/data/roads.gpkg",
+        "name": "Roads",
+        "sub_layer": "roads",
+        "add_to_legend": True,
+    },
+)
 # 由 Qt 事件循环推进任务；之后查询：
 latest = engine.get(submitted.execution_id)
 
 # 真正由 QgsTask 执行的 GIS 只读统计
-job = engine.submit("layer.sum_numeric_field", {
-    "layer_id": "<from layer.add result>",
-    "field_name": "population",
-})
+job = engine.submit(
+    "layer.sum_numeric_field",
+    {
+        "layer_id": "<from layer.add result>",
+        "field_name": "population",
+    },
+)
 # 可以在 QGIS 主线程查询/取消：
 receipt = engine.cancel(job.execution_id)
 ```

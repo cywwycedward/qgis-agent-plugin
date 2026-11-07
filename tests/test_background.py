@@ -224,9 +224,9 @@ def test_the_task_depends_on_the_layer_it_reads() -> None:
 
     # PRD 8.4 / AT-12: QGIS cancels the task when its dependent layer goes away.
     assert harness.tasks[0].dependent_layers == [layer]
-    assert LayerSumNumericField().dependent_layer_ids(SumNumericFieldParams(
-        layer_id="layer-1", field_name=FIELD
-    )) == ["layer-1"]
+    assert LayerSumNumericField().dependent_layer_ids(
+        SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
+    ) == ["layer-1"]
 
 
 # --- refusals that happen before any task exists -----------------------------
@@ -255,9 +255,7 @@ def test_the_parameters_accept_only_a_plain_layer_and_field_name(value: Any) -> 
 
 def test_an_undeclared_parameter_is_refused() -> None:
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate(
-            {"layer_id": "a", "field_name": FIELD, "limit": 10}
-        )
+        SumNumericFieldParams.model_validate({"layer_id": "a", "field_name": FIELD, "limit": 10})
 
 
 def test_the_operation_registers_as_a_background_query() -> None:
@@ -316,9 +314,7 @@ def test_a_field_the_layer_does_not_have_is_invalid_field_type() -> None:
 
 
 def test_a_field_that_is_not_numeric_is_invalid_field_type() -> None:
-    harness = harness_with(
-        make_layer([("a",)], fields=[FakeField(FIELD, numeric=False)])
-    )
+    harness = harness_with(make_layer([("a",)], fields=[FakeField(FIELD, numeric=False)]))
 
     record = settled(harness, submit_sum(harness))
 
@@ -328,9 +324,9 @@ def test_a_field_that_is_not_numeric_is_invalid_field_type() -> None:
 
 
 def test_more_features_than_the_limit_is_refused_not_truncated() -> None:
-    harness = harness_with(make_layer([(1,), (2,), (3,)]), settings=Settings(
-        max_snapshot_features=2
-    ))
+    harness = harness_with(
+        make_layer([(1,), (2,), (3,)]), settings=Settings(max_snapshot_features=2)
+    )
 
     record = settled(harness, submit_sum(harness))
 
@@ -492,9 +488,7 @@ class BadFinalize(Counting):
     name = "test.bad_finalize"
     description = "raise while the result is being applied"
 
-    def finalize_main(
-        self, ctx: OperationContext, request: Params, result: int
-    ) -> DoneResult:
+    def finalize_main(self, ctx: OperationContext, request: Params, result: int) -> DoneResult:
         raise RuntimeError("finalize broke")
 
 
@@ -504,9 +498,7 @@ class LyingFinalize(Counting):
     name = "test.lying_finalize"
     description = "return an object instead of its output model"
 
-    def finalize_main(
-        self, ctx: OperationContext, request: Params, result: int
-    ) -> DoneResult:
+    def finalize_main(self, ctx: OperationContext, request: Params, result: int) -> DoneResult:
         return object()  # type: ignore[return-value]
 
 
