@@ -33,8 +33,8 @@
 
 ```python
 spec = iface.agent_registry.get_spec("layer.add")
-spec.input_schema["required"]        # ['kind', 'source_path', 'name']
-spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 'crs_authid']
+spec.input_schema["required"]  # ['kind', 'source_path', 'name']
+spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_authid']
 ```
 
 ## 1. 通用约定
@@ -60,7 +60,9 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
   `..` 和软链接跳不出去）。
 - 读（`layer.add`、`project.open`）：目标必须存在且是普通文件。
 - 写（`project.save`）：目标可以不存在，但父目录必须存在且在根内；不创建父目录。
-- URL、provider URI、`/vsi*` 一律先拒，不做 I/O。错误消息里**不含**原始路径。
+- URL、provider URI、`/vsi*`、以及 Windows UNC 路径（`\\host\share\…`、`//host/share/…`、
+  `\\?\…`）都在**任何 I/O 之前**拒掉：UNC 的解析本身就会连主机并带上当前 Windows 凭据，
+  所以它和 URL 一样不能先进白名单再判。错误消息里**不含**原始路径。
 - 允许目录**默认为空**，即默认拒绝一切文件访问（已实测：`layer.add` 与 `project.save`
   在未配置时都是 `PATH_NOT_ALLOWED`）。配置方法见 `docs/INSTALL.md`。
 
@@ -120,10 +122,21 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | `layer_count` | int | 注册进来的图层数 |
 | `invalid_layer_count` | int | 其中 `isValid() == False` 的数量（AT-18B：工程读成功但图层坏掉不算失败，只是不完整） |
 
+**工程里的数据源也要过白名单。** `read()` 只认工程文件，工程文件里写的图层数据源是另一回事，
+所以 `read()` 之后会逐个图层问 `allowed_data_roots`（用 provider 自己的 `decodeUri()` 取真实路径，
+不切字符串）：
+
+- 有数据源落在根外（或 provider 说不出一个本地路径，例如 provider metadata 缺失）→ 这些图层
+  用 `removeMapLayer()` 从工程里移除，然后整次 `project.open` 以 `PATH_NOT_ALLOWED` 失败，
+  `message` 里带被移除的图层数。**不是**“加载成功 + 只报个字段”：那等于白名单被绕过。
+- 数据源文件**不存在**不算越界（它还在根内）：那是 AT-18B 的部分加载，照常 `SUCCEEDED` +
+  `invalid_layer_count > 0`。
+- 工程文件本身已经 `read()` 进去了，所以失败时**当前工程已经变成新工程的剩余部分**，不回滚。
+
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
 | `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
@@ -328,3 +341,6 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | 7.4 成功样例 `is_dirty: false` | 返回 `project.write()` 之后的真实值 | 通常情况下仍是 `false`，但这是读出来的，不是写死的 |
 | 6.1 “兼容 Pydantic v1/v2” | 只支持 v2，`pydantic_major` 恒为 2 | 已记录偏差；非 v2 的 pydantic 在插件导入时直接 `RuntimeError` |
 | 11.1 `error.details` | 字段存在但永远是 `null` | `FrameworkError` 只带 `code` + `message`，没有 details 通路 |
+| 7.3 / 11.2 “含无法加载的图层 → `PROJECT_OPEN_FAILED`” | `SUCCEEDED` + `invalid_layer_count > 0` | 同一份 PRD 里这两句与 AT-18B（`read()` 为真但有坏图层 → 成功 + 计数）互斥。**以 AT-18B 与这里的代码为准**：读成功就是成功，坏图层只计数、不谎称可用。评审时不要按 7.3/11.2 那两句改代码 |
+| 7.3 未提工程内数据源 | `project.open` 逐层校验数据源，越界则移除该层并整体 `PATH_NOT_ALLOWED` | 更严，不是更松：PRD 2.3/10.2 要的是数据白名单，而数据源是工程文件替调用方写的路径，所以它们也得过 `allowed_data_roots`（已实测，见 `PROJECT_OPEN_FAILED` 之外的这条码） |
+| 未定义：provider 说不出本地路径 | 这种图层算越界（移除 + 失败） | 宁可拒绝：白名单无法为一个说不出来源的层担保；工程里出现 `memory` 等非文件 provider 时 `project.open` 会失败 |

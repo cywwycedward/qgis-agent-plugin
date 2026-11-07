@@ -29,7 +29,7 @@
 ```python
 registry = iface.agent_registry
 engine = iface.agent_engine
-len(registry.list_specs())                     # 9
+len(registry.list_specs())  # 9
 [s.name for s in registry.list_specs()]
 ```
 
@@ -48,7 +48,7 @@ len(registry.list_specs())                     # 9
 
 ```python
 record = engine.run_sync("project.get_info", {})
-record.status                                  # 'SUCCEEDED'
+record.status  # 'SUCCEEDED'
 record.model_dump_json(indent=2)
 ```
 
@@ -99,11 +99,14 @@ status: FAILED | error: INVALID_INPUT | project.get_info: invalid input at disca
 ## 4. 加图层、看图层
 
 ```python
-added = engine.run_sync("layer.add", {
-    "kind": "vector",
-    "source_path": r"C:\temp\data\cities.geojson",
-    "name": "Cities",
-})
+added = engine.run_sync(
+    "layer.add",
+    {
+        "kind": "vector",
+        "source_path": r"C:\temp\data\cities.geojson",
+        "name": "Cities",
+    },
+)
 layer_id = added.result["layer_id"]
 engine.run_sync("layer.list", {}).result
 engine.run_sync("layer.get_info", {"layer_id": layer_id}).result
@@ -150,10 +153,9 @@ engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
 ## 6. 后台求和（唯一的 background Operation）
 
 ```python
-submitted = engine.submit("layer.sum_numeric_field",
-                          {"layer_id": layer_id, "field_name": "pop"})
-submitted.status                               # 'QUEUED'
-engine.get(submitted.execution_id).status      # 下一轮事件循环后
+submitted = engine.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+submitted.status  # 'QUEUED'
+engine.get(submitted.execution_id).status  # 下一轮事件循环后
 ```
 
 已实测（headless，4 个要素、1 个 null）：
@@ -213,8 +215,8 @@ after the event loop: CANCELLED      # 排队中的回调被跳过，没有再�
 后台任务一旦交给 QGIS，取消只是“请求”：
 
 ```python
-receipt = engine.cancel(running_id)   # accepted=true, status='CANCEL_REQUESTED'
-engine.get(running_id).status         # 等任务自己报告，才变 'CANCELLED'
+receipt = engine.cancel(running_id)  # accepted=true, status='CANCEL_REQUESTED'
+engine.get(running_id).status  # 等任务自己报告，才变 'CANCELLED'
 ```
 
 **未实测（本文件）**：正在 `RUNNING` 的 `QgsTask` 的 `CANCEL_REQUESTED -> CANCELLED` 这一段。
@@ -228,9 +230,9 @@ engine.get(running_id).status         # 等任务自己报告，才变 'CANCELLE
 
 ```python
 engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})
-engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})   # 第二次
+engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})  # 第二次
 engine.run_sync("project.open", {"path": r"C:\temp\projects\missing.qgz", "discard_current": True})
-engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz",  "discard_current": True})
+engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz", "discard_current": True})
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz"})
 ```
 

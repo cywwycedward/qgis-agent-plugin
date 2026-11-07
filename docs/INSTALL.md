@@ -76,9 +76,9 @@ restart QGIS; enable "QGIS Agent" under Plugins > Manage and Install Plugins if 
 3. Python Console 里验证：
 
 ```python
-hasattr(iface, "agent_engine"), hasattr(iface, "agent_registry")     # (True, True)
-len(iface.agent_registry.list_specs())                               # 9
-iface.agent_engine.run_sync("project.get_info", {}).status           # 'SUCCEEDED'
+hasattr(iface, "agent_engine"), hasattr(iface, "agent_registry")  # (True, True)
+len(iface.agent_registry.list_specs())  # 9
+iface.agent_engine.run_sync("project.get_info", {}).status  # 'SUCCEEDED'
 ```
 
 实测（headless，同一套类手工装配，因为 headless 没有 `iface`）：
@@ -110,6 +110,7 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 ```python
 # A. Python Console（写进当前 profile 的 QGIS3.ini）
 from qgis.core import QgsSettings
+
 s = QgsSettings()
 s.setValue("qgis_agent_plugin/allowed_data_roots", [r"C:\temp\data"])
 s.setValue("qgis_agent_plugin/allowed_project_roots", [r"C:\temp\projects"])
@@ -122,6 +123,12 @@ B. 设置 → 选项 → 高级，搜索 qgis_agent_plugin，逐键填。
 
 生效时机：`initGui` 读一次（`plugin.read_settings()`），所以**改完要在插件管理器里禁用再启用**
 （或重启 QGIS）。
+
+五个计数键（`max_active_background`、`max_pending`、`max_terminal_records`、
+`terminal_ttl_seconds`、`max_snapshot_features`）必须 **≥ 1**：写 `0` 或负数、或者写成
+`32 (default)` 这类非数字，`initGui` 会直接报一个带键名（非法值时也带原值）的错误，插件
+不加载。故意不夹取：`max_active_background=0` 会让每个后台调用永久 `QUEUED`，这种配置
+失误必须当场暴露。
 
 实测（只读，没有写用户 profile）：
 
@@ -141,23 +148,29 @@ F8 不做；F7 的 GUI 验收清单里有这一条）。
 
 ## 5. 开发日常
 
-| 命令 | 作用 | 实测结果（基 `d7e18c4`，即 F9 合并后的 develop） |
+| 命令 | 作用 | 结果 |
 | --- | --- | --- |
-| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | `347 passed` |
+| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 全绿（当前输出见下） |
 | `npm run test:verbose` | 同上，`-vv tests` | — |
 | `npm run lint` | `ruff check .` | `All checks passed!` |
 | `npm run format` | `ruff format .` | — |
 | `npm run deploy` | 镜像到 QGIS 插件目录 | 干跑见 §2 |
 
-测试集里**只有一条**需要真实的 QGIS 解释器：`tests/test_engine.py` 的
-`test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it`（它起一个 headless
-`QgsApplication` 跑真信号）。它带 `pytest.importorskip("qgis.core")`，所以在裸解释器里是 skip 而不是
-failed；其余全部用例在裸解释器里也能跑（`qgis`/`PyQt5` 的 import 都在函数体内，
-`tests/test_package.py` 在子进程里强制这条规则）。
+全量用例**必须在 QGIS 解释器下跑**：需要真 `QgsApplication` 的用例不止一条（真信号、真
+`QgsTaskManager`、真 provider 都在里面），跳过它们得到的绿色不算验收。裸解释器跑同一套会
+**多两条 skip**（`tests/qgis_integration/test_claim_root.py` 整模块 `importorskip`、
+`tests/test_engine.py` 里那条真信号的用例），其余用例在裸解释器里也能跑（`qgis`/`PyQt5` 的
+import 都在函数体内，`tests/test_package.py` 在子进程里强制这条规则）。所以别按条数判断“跑过了”，
+按解释器判断。
 
-```powershell
-& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests   # 346 passed, 1 skipped
-& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' -m pytest -q tests      # 347 passed
+实测一次（`fix/audit-a1`，两个解释器各跑一遍）：
+
+```text
+$ npm run test                                                       # QGIS 解释器
+403 passed, 1 warning in 4.14s
+
+$ & 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests   # 裸解释器
+394 passed, 2 skipped in 2.10s
 ```
 
 ## 6. 排错
@@ -168,6 +181,7 @@ failed；其余全部用例在裸解释器里也能跑（`qgis`/`PyQt5` 的 impo
 | 插件管理器里看不到 “QGIS Agent” | 部署没跑到 profile，或没显示实验性插件 | 重跑 `npm run deploy`，勾 “Show experimental plugins”，重启 QGIS |
 | Console 里 `iface.agent_engine` 不存在 | 插件没启用，或已卸载 | 启用插件；看 Console/日志里的加载异常 |
 | 所有文件操作都 `PATH_NOT_ALLOWED` | 两个允许目录是空的（默认） | 见 §4；确认路径是绝对路径 |
+| 插件加载失败，日志里是 `max_active_background must be at least 1` 或 `… must be a whole number` | 某个计数键写成了 0/负数/非数字 | 按报错里的键名改回 ≥ 1 的整数；见 §4 |
 | `layer.set_visibility` 返回 `LAYER_NOT_IN_TREE` | 该图层是 `layer.add(add_to_legend=false)` 加进来的 | 用 `true` 重加，或只做 `layer.get_info` |
 | `run_sync` 报 `UNSUPPORTED_EXECUTION_MODE` | 对 `layer.sum_numeric_field` 用了 `run_sync` | 用 `submit` + `get` |
 
