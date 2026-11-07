@@ -58,10 +58,14 @@ def main(argv: list[str]) -> int:
     runtime = root / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     # QGIS drops symbology-style.db into the working directory, so the fixtures are
-    # generated from the throwaway one rather than from the repository.
+    # generated from the throwaway one rather than from the repository.  They are
+    # generated after ``initQgis()`` because a project QGIS writes has to be written by
+    # a QGIS whose providers are loaded: before that point the provider registry holds
+    # 16 providers, not 34, and the Delimited Text provider is one of the missing ones
+    # (measured), so ``file:./points.csv`` cannot be produced (A6 #3, AT-47).
     os.chdir(runtime)
-    generated = fixtures.build(root)
     application = harness.start_application(runtime, profile)
+    generated = fixtures.build(root)
 
     settings_file = harness.settings_file()
     if profile.resolve() not in settings_file.resolve().parents:

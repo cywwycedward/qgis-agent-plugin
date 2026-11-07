@@ -1636,7 +1636,7 @@ def at_43_open_reads_a_project_with_a_deep_group_tree(ctx: Context) -> str:
     reset_project(ctx)
     return (
         f"a {on_disk} byte project with {fixtures.NESTED_GROUPS} nested layer-tree groups "
-        f"(depth 105 in the written XML, measured): SUCCEEDED with {values['layer_count']} "
+        f"(depth ~205 in the written XML, measured): SUCCEEDED with {values['layer_count']} "
         f"layer in {elapsed * 1000:.0f} ms; the scan's limit is {MAX_PROJECT_DEPTH} levels"
     )
 
@@ -1672,6 +1672,141 @@ def at_44_field_sum_refuses_a_non_finite_value(ctx: Context) -> str:
         "a memory layer with values (1.0, nan, inf): FAILED(INVALID_FIELD_TYPE) with 'the field "
         "holds a non-finite ...' and no result. The audit measured total=nan in a SUCCEEDED "
         "record, and json.dumps(..., allow_nan=False) refuses that record"
+    )
+
+
+def at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail(ctx: Context) -> str:
+    """An element's text is the whole subtree, tail included (A6 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at45 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    target = ctx.fixtures.root / "tail source.qgs"
+    fixtures.write_mixed_content_remote(target, ctx.fixtures.raster, port)
+
+    connections = 0
+    started = time.monotonic()
+    try:
+        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+        elapsed = time.monotonic() - started
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            pass
+        else:
+            connections += 1
+            connection.close()
+    finally:
+        listener.close()
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on a tail-carried source")
+    equal(error_code(record), PATH_NOT_ALLOWED, "the code for a tail-carried source")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("remote data source" in error.message, f"the message: {error.message!r}")
+    equal(connections, 0, "TCP connections made while the project was opened")
+    require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        "<datasource><x/>/vsicurl/http://127.0.0.1:<a port this case listens on>: "
+        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms with {connections} TCP "
+        "connections. QDom datasource.text() is the whole subtree, so read() saw the source; "
+        "the scan only read element.text and made 42 HTTP requests (measured). The old "
+        "project kept its layer"
+    )
+
+
+def at_46_open_refuses_a_project_that_declares_xml_entities(ctx: Context) -> str:
+    """An internal DTD subset is expanded before any budget, so it is refused (A6 #2)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    on_disk = ctx.fixtures.entity_project.stat().st_size
+
+    # What the file costs whoever parses it: read() expands it and accepts it, so the
+    # refusal has to come from the scan, before read() is handed the file.
+    reader = QgsProject()
+    started = time.monotonic()
+    read_result = reader.read(str(ctx.fixtures.entity_project))
+    read_elapsed = time.monotonic() - started
+    reader.clear()
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at46 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+
+    started = time.monotonic()
+    record = ctx.run(
+        "project.open", {"path": str(ctx.fixtures.entity_project), "discard_current": True}
+    )
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on a project declaring entities")
+    equal(error_code(record), PATH_NOT_ALLOWED, "the code for a project declaring entities")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("entities" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte project whose 1 MiB entity is read 50 times: read() "
+        f"{'accepted' if read_result else 'refused'} it in {read_elapsed:.2f} s (expanded to "
+        f"50 MiB), while project.open returned FAILED(PATH_NOT_ALLOWED) with 'declares XML "
+        f"entities' in {elapsed * 1000:.0f} ms, before read(). The old scan parsed the "
+        "expansion and peaked at 100 MiB (measured); this process kept answering and the "
+        "old project kept its layer"
+    )
+
+
+def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
+    """A CSV layer's ``file:`` source and a DOI in layer metadata are not remote (A6 #3)."""
+
+    reset_project(ctx)
+    csv_project = ctx.fixtures.root / "csv project.qgs"
+    fixtures.write_csv_project(csv_project, ctx.fixtures.root)
+    metadata_project = ctx.fixtures.root / "metadata project.qgs"
+    fixtures.write_metadata_project(metadata_project, ctx.fixtures.cities, fixtures.CITIES_LAYER)
+    evidence: list[str] = []
+    for label, target in (
+        ("a Delimited Text layer spelled file:./points.csv", csv_project),
+        (
+            "a layer whose metadata carries https://example.org/datasets/42",
+            metadata_project,
+        ),
+    ):
+        started = time.monotonic()
+        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+        elapsed = time.monotonic() - started
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"project.open on {label}")
+        values = result_of(record)
+        require(values["layer_count"] >= 1, f"the layers of {label}: {values['layer_count']}")
+        require(elapsed < 2.0, f"{label} took {elapsed:.2f}s")
+        evidence.append(
+            f"{label}: SUCCEEDED with {values['layer_count']} layer in {elapsed * 1000:.0f} ms"
+        )
+    layers = project_layer_ids()
+    reset_project(ctx)
+    return (
+        "; ".join(evidence) + f" (the second project registered {len(layers)} layer). Both were "
+        "FAILED(PATH_NOT_ALLOWED) before this fix, while read() accepted them in 0.06 s "
+        "(measured): a file: prefix is not a scheme that reaches a host, and a layer's "
+        "metadata is not a data source"
     )
 
 
@@ -1725,4 +1860,7 @@ CASES = (
     ("AT-42", at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted),
     ("AT-43", at_43_open_reads_a_project_with_a_deep_group_tree),
     ("AT-44", at_44_field_sum_refuses_a_non_finite_value),
+    ("AT-45", at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail),
+    ("AT-46", at_46_open_refuses_a_project_that_declares_xml_entities),
+    ("AT-47", at_47_open_reads_projects_the_old_scan_called_remote),
 )

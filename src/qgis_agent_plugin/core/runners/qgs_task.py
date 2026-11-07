@@ -212,7 +212,13 @@ class OperationTaskRunner:
         if run.error is not None:
             # A real failure outranks a cancel request (PRD 8.2: CANCEL_REQUESTED -> FAILED).
             self._running(store, execution_id, record)
-            self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(run.error))
+            if isinstance(run.error, FrameworkError):
+                # A worker's own refusal keeps its code: the field sum refuses a total
+                # that overflowed to Infinity (A6 #4) and the caller has to see that
+                # code, not INTERNAL_ERROR.
+                self._fail(store, execution_id, run.error.code, run.error.message)
+            else:
+                self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(run.error))
         elif cancelled:
             if record.status in (ExecutionStatus.SCHEDULED, ExecutionStatus.RUNNING):
                 # QGIS cancels a task on its own when its dependent layer goes away,

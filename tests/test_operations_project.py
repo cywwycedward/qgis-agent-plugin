@@ -1023,8 +1023,8 @@ def test_a_deeply_nested_project_is_refused_before_it_is_read(
 def test_a_project_nested_up_to_the_depth_bound_is_still_read(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # The bound may not turn an ordinary project into a failure: 64 levels is far
-    # deeper than any project QGIS writes, and it is still accepted.
+    # The bound may not turn an ordinary project into a failure: the deepest project
+    # QGIS itself writes is a 100-group tree at depth 105, and the bound is 256.
     root = project_dir(tmp_path)
     target = nested_project(root, "nested.qgs", project.MAX_PROJECT_DEPTH - 1)
     loaded = FakeProject()
@@ -1245,6 +1245,230 @@ def test_a_project_that_is_not_well_formed_xml_is_refused_before_read(
 
     assert loaded.read_path is None
     assert "may have changed" in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_a_remote_source_that_a_child_element_carries_in_its_tail(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # An element's text is not only ``element.text``: in
+    # ``<datasource><x/>/vsicurl/…</datasource>`` the URI is the child's ``tail``, and
+    # QDomElement::text() concatenates the whole subtree, so read() saw the source and
+    # made 42 HTTP requests while the scan only asked ``element.text`` (measured).
+    xml = (
+        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
+        f"<datasource><x/>{REMOTE_SOURCE}</datasource>"
+        "</maplayer></projectlayers></qgis>"
+    )
+    root = project_dir(tmp_path)
+    if suffix == ".qgz":
+        target = qgz_bytes(root, f"tail{suffix}", xml.encode("utf-8"))
+    else:
+        target = root / f"tail{suffix}"
+        target.write_text(xml, encoding="utf-8")
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_a_project_that_declares_xml_entities(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # expat expands an internal subset into element.text, so the bytes on disk say
+    # nothing about the memory the scan needs: 1 MiB read 50 times peaked at 100 MiB
+    # with a 1 MiB file, 51 tags and depth 3 -- every other bound stays silent.
+    entity = "A" * (1024 * 1024)
+    xml = f'<!DOCTYPE qgis [<!ENTITY a "{entity}">]><qgis>{"<a>&a;</a>" * 50}</qgis>'
+    root = project_dir(tmp_path)
+    if suffix == ".qgz":
+        target = qgz_bytes(root, f"entities{suffix}", xml.encode("utf-8"))
+    else:
+        target = root / f"entities{suffix}"
+        target.write_text(xml, encoding="utf-8")
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    tracemalloc.start()
+    try:
+        failed = refused(
+            PATH_NOT_ALLOWED,
+            lambda: project.ProjectOpen().execute_main(
+                ctx, project.ProjectOpenParams(path=str(target))
+            ),
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert loaded.read_path is None
+    assert "entities" in failed.message
+    assert peak < 64 * 1024 * 1024, f"the scan peaked at {peak / 1024 / 1024:.1f} MiB"
+
+
+def test_a_project_with_the_doctype_qgis_writes_is_still_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The refusal above may not cost a normal project its file: QGIS writes a public
+    # doctype with no internal subset, and that is what every project on disk has.
+    root = project_dir(tmp_path)
+    target = root / "doctype.qgs"
+    target.write_text(
+        "<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>"
+        f"<qgis><projectlayers><maplayer><datasource>{root / 'a.gpkg'}</datasource>"
+        "</maplayer></projectlayers></qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert loaded.read_path == str(target)
+
+
+@pytest.mark.parametrize(
+    "source", ["file:./points.csv", "file:/data/points.csv", "file:///C:/data/points.csv"]
+)
+def test_open_reads_a_project_whose_datasource_is_a_file_uri(
+    qgis: types.ModuleType, tmp_path: Path, source: str
+) -> None:
+    # QGIS writes a Delimited Text layer as ``file:./points.csv`` when the CSV sits
+    # next to the project, and ``file:`` is not a scheme that reaches a host: the
+    # old scan refused every CSV project (measured, PATH_NOT_ALLOWED).
+    root = project_dir(tmp_path)
+    target = qgs_file(root, "csv.qgs", source)
+    # The provider decodes ``file:`` to a real path before the per-layer check asks the
+    # allow-list, so the fake layer names the file the URI points into.
+    loaded = FakeProject(layers_after_read={"points": FakeLayer(source=str(root / "points.csv"))})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert loaded.removed == []
+
+
+@pytest.mark.parametrize(
+    "source", ["file://no-such-host-audit/share/points.csv", "file://localhost/C:/points.csv"]
+)
+def test_open_refuses_a_file_uri_that_names_a_host(
+    qgis: types.ModuleType, tmp_path: Path, source: str
+) -> None:
+    # ``file://<authority>/…`` names a host and stays what it looks like, so stripping
+    # the prefix may not turn it into a local path.
+    root = project_dir(tmp_path)
+    target = qgs_file(root, "hosted.qgs", source)
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=source)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "<identifier>https://example.org/datasets/42</identifier>",
+        "<abstract>Downloaded from https://example.org/data</abstract>",
+    ],
+)
+def test_open_reads_a_project_whose_layer_metadata_holds_a_url(
+    qgis: types.ModuleType, tmp_path: Path, metadata: str
+) -> None:
+    # A layer's metadata is not a data source: it carries the dataset's own DOI or the
+    # page it came from, and refusing those refused every documented project (measured,
+    # one local GeoPackage layer plus a metadata identifier).
+    root = project_dir(tmp_path)
+    target = root / "metadata.qgs"
+    target.write_text(
+        "<qgis><projectlayers><maplayer>"
+        f"<datasource>{root / 'a.gpkg'}</datasource>"
+        f"<metadata>{metadata}</metadata>"
+        "</maplayer></projectlayers></qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert loaded.read_path == str(target)
+
+
+def test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked(
+    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The budget counts decompressed bytes, so an empty member costs nothing there;
+    # but each member costs one ZipFile.open(): 100000 empty members in a 10.4 MB
+    # archive kept the main thread 1.75 s (measured), linear in the count.
+    root = project_dir(tmp_path)
+    target = root / "many empty members.qgz"
+    with zipfile.ZipFile(target, "w") as archive:
+        for index in range(100_000):
+            archive.writestr(f"empty{index}.txt", b"")
+    assert target.stat().st_size < project.MAX_PROJECT_BYTES
+
+    def open_member(self: zipfile.ZipFile, member: Any, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(f"the archive member {member} was unpacked before it was counted")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path is None
+    assert "members" in failed.message
+    # 1.75 s before the bound, when every member was opened in turn; what is left is
+    # zipfile reading the 100000-entry central directory once (~0.6-1.0 s on this box).
+    assert elapsed < 1.5, f"the {target.stat().st_size} byte archive took {elapsed:.2f}s"
+
+
+def test_the_depth_bound_is_the_one_read_time_measured(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The bound is set by read()'s time, not by its crash: 900 nested groups took the
+    # main thread 30.11 s (measured), 600 8.84 s, 200 0.28 s, and 256 sits between
+    # them while a real group tree is depth 105.
+    assert project.MAX_PROJECT_DEPTH == 256
+    root = project_dir(tmp_path)
+    target = nested_project(root, "at the bound.qgs", project.MAX_PROJECT_DEPTH)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "nests deeper" in failed.message
 
 
 def test_open_reads_a_project_with_the_attributes_qgis_itself_writes(
