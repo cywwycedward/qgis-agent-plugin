@@ -54,9 +54,11 @@ def resolve_path(
     exist and be inside the same roots, and the overwrite decision stays with the
     operation (``TARGET_EXISTS`` is not this module's concern).
 
-    ``allow_directory`` is for a data source, not for a project file: a source may
-    be a directory (an ESRI FileGDB is one), and the allow-list asks the same
-    question of it -- resolved, inside a root -- but does not require a file.
+    ``allow_directory=True`` turns the save shape into the one a data source needs:
+    the target may be a directory and its parent does not have to exist -- a source
+    whose directory was moved away is still a source inside the roots (AT-18B) --
+    so only the resolved path is compared with the roots.  It says nothing about a
+    read; a read is always a regular file.
     """
 
     _refuse_remote(raw)
@@ -69,7 +71,15 @@ def resolve_path(
 
     if must_exist:
         target = _resolve_existing(path)
-        if not target.is_file() and not (allow_directory and target.is_dir()):
+        if not target.is_file():
+            _refuse()
+    elif allow_directory:
+        # Non-strict on purpose: what does not exist cannot be outside the roots,
+        # and ``resolve()`` still follows the links that do.  An unreadable path is
+        # refused rather than reported as an engine failure, as a read would be.
+        try:
+            target = path.resolve()
+        except OSError:
             _refuse()
     else:
         parent = _resolve_existing(path.parent)
@@ -78,7 +88,7 @@ def resolve_path(
         # resolve() also normalises a trailing ``.``/``..``, which would otherwise
         # look like it lived inside the root while naming its parent.
         target = (parent / path.name).resolve()
-        if target.is_dir() and not allow_directory:
+        if target.is_dir():
             _refuse()
 
     if not any(target == root or root in target.parents for root in allowed):
