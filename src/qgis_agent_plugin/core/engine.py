@@ -217,9 +217,10 @@ class OperationEngine:
     def _stop_background(self) -> None:
         """Report the cancel request, then ask the adapter to stop every live task.
 
-        Only background records: a main-thread call that reaches this is on this
-        very stack (``project.open`` fires ``aboutToBeCleared`` from inside its
-        own ``execute_main``) and cannot be cancelled, only finished (PRD 9.2, 9.3.2).
+        Only background records: the main-thread call that fires ``aboutToBeCleared``
+        from inside ``execute_main`` (``project.open``, ``project.create``) is on this
+        very stack, and neither PRD 9.2 nor 9.3.2 cancels main-thread work that has
+        already started; a running one is only left to finish.
         """
 
         live = [

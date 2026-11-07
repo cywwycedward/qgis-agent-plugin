@@ -765,8 +765,10 @@ def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
 
     from qgis_agent_plugin.operations.project import ProjectCreate, ProjectOpen
 
-    # A headless application is enough for the real signal; keeping the working
-    # directory in tmp_path keeps the profile files QGIS writes out of the repo.
+    # A headless application is enough for the real signal.  QGIS keeps its profile
+    # and style databases under QGIS_CUSTOM_CONFIG_PATH and stray working-directory
+    # files next to the cwd, so both are pointed at tmp_path (qgis/TEST.md).
+    monkeypatch.setenv("QGIS_CUSTOM_CONFIG_PATH", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     application = QgsApplication([], False)
     application.initQgis()
