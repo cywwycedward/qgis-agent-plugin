@@ -465,8 +465,73 @@ def write_mixed_content_remote(path: Path, local_raster: Path, port: int) -> Non
     )
 
 
+# A datasource spelled as five text nodes: no fragment holds a marker, and their
+# concatenation is the address read() reaches (A7 #1, AT-48).
+SPLIT_DATASOURCE = "/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:{port}/never.tif"
+
+
+def write_split_content_remote(path: Path, local_raster: Path, port: int) -> None:
+    """A real project whose datasource URI is split across several child elements.
+
+    ``QDomElement::text()`` concatenates them, so ``read()`` sees
+    ``/vsicurl/http://127.0.0.1:<port>/never.tif`` while every single fragment is an
+    ordinary piece of a path (A7 #1, AT-48).
+    """
+
+    _write_project(path, [], [local_raster])
+    _replace_first_datasource(
+        path, f"<datasource>{SPLIT_DATASOURCE.format(port=port)}</datasource>"
+    )
+
+
+def write_vsi_directory_project(path: Path, source: Path, sub_layer: str) -> None:
+    """A real project whose datasource sits in a directory spelled ``vsi_data``.
+
+    ``/vsi`` is a virtual file system only when it opens the path: a layer in a
+    directory called ``vsi_data`` is an ordinary local file, and the substring check
+    refused the project as a remote source (A7 #3, AT-49).
+    """
+
+    from qgis.core import QgsVectorLayer
+
+    directory = path.parent / "vsi_data"
+    directory.mkdir(exist_ok=True)
+    local = directory / source.name
+    local.write_bytes(source.read_bytes())
+    layer = QgsVectorLayer(f"{local}|layername={sub_layer}", "vsi data", "ogr")
+    if not layer.isValid():
+        raise RuntimeError(f"could not build a layer from {local}")
+    project = QgsProject()
+    project.addMapLayer(layer, True)
+    if not project.write(str(path)):
+        raise RuntimeError(f"could not write {path}")
+    project.clear()
+    if "vsi_data" not in path.read_text(encoding="utf-8").partition("<projectlayers>")[2]:
+        raise RuntimeError(f"{path} does not name its source inside vsi_data")
+
+
 def _replace_first_datasource(path: Path, replacement: str) -> None:
-    head, marker, layers = path.read_text(encoding="utf-8").partition("<projectlayers>")
+    """Rewrite the first map layer's datasource, in a ``.qgs`` or inside a ``.qgz``."""
+
+    if path.suffix.lower() == ".qgz":
+        with zipfile.ZipFile(path) as archive:
+            members = [(item.filename, archive.read(item)) for item in archive.infolist()]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, data in members:
+                if name.lower().endswith(".qgs"):
+                    data = _replace_in_datasource_text(data.decode("utf-8"), replacement).encode(
+                        "utf-8"
+                    )
+                archive.writestr(name, data)
+        return
+    path.write_text(
+        _replace_in_datasource_text(path.read_text(encoding="utf-8"), replacement),
+        encoding="utf-8",
+    )
+
+
+def _replace_in_datasource_text(text: str, replacement: str) -> str:
+    head, marker, layers = text.partition("<projectlayers>")
     rewritten, replaced = re.subn(
         r"<datasource>[^<]*</datasource>",
         # A function, not a template: a UNC path is full of backslash escapes.
@@ -475,8 +540,8 @@ def _replace_first_datasource(path: Path, replacement: str) -> None:
         count=1,
     )
     if not marker or replaced != 1:
-        raise RuntimeError(f"could not place the datasource in {path}")
-    path.write_text(head + marker + rewritten, encoding="utf-8")
+        raise RuntimeError("the project XML holds no <datasource> to replace")
+    return head + marker + rewritten
 
 
 def _encode_utf16(path: Path) -> None:

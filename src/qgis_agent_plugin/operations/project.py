@@ -17,11 +17,10 @@ in a bare interpreter and the path/CRS rules stay testable without QGIS.
 
 from __future__ import annotations
 
-import io
-import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any
+from xml.parsers import expat
 
 from pydantic import AfterValidator, BaseModel, Field, StrictBool, StrictStr
 
@@ -73,9 +72,12 @@ MAX_PROJECT_TAGS = 400_000
 
 # The most members a ``.qgz`` may hold.  The byte budget counts decompressed bytes, so
 # an empty member costs nothing there -- but every member costs one ``ZipFile.open()``:
-# 100000 empty members in a 10.4 MB archive took 1.75 s (measured), linear in the count,
-# and the archive's own size is never checked.  A project archive is a ``.qgs`` and its
-# attachments, not thousands of entries.
+# 100000 empty members in a 10.4 MB archive took 1.75 s (measured), linear in the count.
+# The count is only known after ``zipfile`` has parsed the whole central directory, which
+# costs memory as well (400000 empty members in a 39 MB archive: 2.92 s and 222 MiB), so
+# the archive's own size is bounded before it is opened and this bound is the backstop
+# for what still fits.  A project archive is a ``.qgs`` and its attachments, not
+# thousands of entries.
 MAX_ARCHIVE_MEMBERS = 1000
 
 # What ``QgsProject.read()`` does with a ``.qgz``: it unpacks the whole archive, so a
@@ -330,8 +332,14 @@ def _project_documents(path: Path) -> list[bytes]:
     a per-member check and were held twice over (measured, 200 MB).
     """
 
+    # The archive's own size is asked before ``zipfile`` is built: the member budget
+    # counts decompressed bytes, so 400000 empty members cost it nothing while the
+    # central directory they need took 2.92 s and 222 MiB to parse and was then
+    # refused (measured).  A 16 MB archive holds about 160000 members, so this bound is
+    # what pins the cost of opening one, whatever its manifest says.
+    _refuse_if_too_large(path.stat().st_size)
+
     if path.suffix.lower() != ".qgz":
-        _refuse_if_too_large(path.stat().st_size)
         return [path.read_bytes()]
 
     documents: list[bytes] = []
@@ -372,7 +380,9 @@ def _scan_project_xml(text: bytes) -> None:
     a label QGIS itself writes inflated -- so the parser answers the questions now:
     which elements the file holds, what their text is, and how deep they nest.
     Comments and CDATA sections are not elements and add no depth, and a self-closing
-    ``<a x="/>" .../>`` is the one element it is.
+    ``<a x="/>">`` is the one element it is.  The text is taken from the parser's
+    character-data events (``_ProjectScan``), not from a tree: no tree is built, so
+    nothing has to be freed while the file is walked.
 
     The depth is refused while the file is parsed; a file that does not parse is not
     a project, and it is refused with the sentence ``read()`` would have produced.  A
@@ -393,40 +403,75 @@ def _scan_project_xml(text: bytes) -> None:
             f"the project file has more than {MAX_PROJECT_TAGS} XML tags; it was not opened",
         )
 
-    depth = 0
-    open_datasources = 0
-    # The element that ended at the previous event.  The text after its closing tag
-    # -- its ``tail``, where ``<datasource><x/>/vsicurl/…</datasource>`` keeps the URI
-    # QGIS reads -- only arrives with the next parse event, and ``clear()`` drops it,
-    # so that element is checked one event later, before it is dropped.
-    pending: tuple[ET.Element, str] | None = None
+    scan = _ProjectScan()
+    # Namespace processing, so ``<qgs:datasource>`` is the element ``<datasource>`` is.
+    parser = expat.ParserCreate(namespace_separator="}")
+    parser.StartElementHandler = scan.start
+    parser.EndElementHandler = scan.end
+    parser.CharacterDataHandler = scan.data
     try:
-        for event, element in ET.iterparse(io.BytesIO(text), events=("start", "end")):
-            if event == "start":
-                depth += 1
-                if depth > MAX_PROJECT_DEPTH:
-                    raise FrameworkError(
-                        PROJECT_OPEN_FAILED,
-                        "the project file nests deeper than "
-                        f"{MAX_PROJECT_DEPTH} levels; it was not opened",
-                    )
-                if _local_name(element.tag) == "datasource":
-                    open_datasources += 1
-                continue
-            depth -= 1
-            name = _local_name(element.tag)
-            if name == "datasource":
-                open_datasources -= 1
-            # QDomElement::text() is the whole subtree's text, so the datasource checks
-            # apply to everything a datasource holds as well.
-            carrier = "datasource" if name == "datasource" or open_datasources else ""
-            _refuse_if_remote_text(element.text, carrier)
-            if pending is not None:
-                _refuse_if_remote_text(pending[0].tail, pending[1])
-                pending[0].clear()
-            pending = (element, carrier)
-    except ET.ParseError:
+        parser.Parse(text, True)
+    except expat.ExpatError:
         raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
+
+
+class _ProjectScan:
+    """The project's text, rebuilt from the parser's character-data events.
+
+    The text of a ``datasource`` is what QGIS hands the provider, and
+    ``QDomElement::text()`` is not ``element.text``: it concatenates every
+    character-data event between the element's start tag and its matching end tag, in
+    document order, grandchildren included.  So the fragments are collected and the
+    joined string is asked once, at the element's end.  Checking the fragments
+    separately let ``/v<x/>sicurl/htt<y/>p:...`` -- five nodes, none of them a marker
+    -- through, and ``read()`` made 8 TCP connections before the failure (measured).
+
+    Text outside a datasource is not a source QGIS reads, so it is asked for a marker
+    at the start of each of its text nodes (``_refuse_if_remote_text``).
+    """
+
+    def __init__(self) -> None:
+        self.depth = 0
+        # The collected text of every datasource still open, outermost first.  A
+        # datasource inside a datasource is part of the outer one's text, so what it
+        # collected is appended to the buffer around it when it ends.
+        self.sources: list[list[str]] = []
+        # The character data of the text node being read, outside any datasource.
+        self.node: list[str] = []
+
+    def start(self, name: str, attributes: Any) -> None:
+        self._end_node()
+        self.depth += 1
+        if self.depth > MAX_PROJECT_DEPTH:
+            raise FrameworkError(
+                PROJECT_OPEN_FAILED,
+                f"the project file nests deeper than {MAX_PROJECT_DEPTH} levels; it was not opened",
+            )
+        if _local_name(name) == "datasource":
+            self.sources.append([])
+
+    def end(self, name: str) -> None:
+        self._end_node()
+        self.depth -= 1
+        if _local_name(name) != "datasource":
+            return
+        collected = "".join(self.sources.pop())
+        if self.sources:
+            self.sources[-1].append(collected)
+        _refuse_if_remote_text(collected, source=True)
+
+    def data(self, text: str) -> None:
+        if self.sources:
+            self.sources[-1].append(text)
+        else:
+            self.node.append(text)
+
+    def _end_node(self) -> None:
+        """Ask the text node that ended here, then forget it."""
+
+        if self.node:
+            _refuse_if_remote_text("".join(self.node), source=False)
+            self.node.clear()
 
 
 def _declares_entities(text: bytes) -> bool:
@@ -449,31 +494,32 @@ def _declares_entities(text: bytes) -> bool:
     return bracket >= 0 and (end < 0 or bracket < end)
 
 
-def _refuse_if_remote_text(text: str | None, name: str) -> None:
+def _refuse_if_remote_text(text: str, *, source: bool) -> None:
     """Refuse text that would make ``read()`` reach the network.
 
-    ``datasource`` is the element QGIS takes a layer's source from, whatever its
-    namespace or case, and the whole element text is the source -- so a provider URI
-    with a ``://`` inside it is found there too.  Another element's text is not a
-    source QGIS reads: a layer's metadata holds the dataset's own DOI or URL, and
-    asking every element for ``://`` refused every project carrying one (A6 #3).
-    ``/vsi`` and a UNC prefix are asked of every element, so renaming the carrier
-    still does not put one past the scan.  The parser has decoded character references
+    ``source`` marks the text QGIS takes a layer's source from: the whole subtree text
+    of a ``datasource`` element, whatever its namespace or case, rebuilt in document
+    order.  That is the only text whose scheme matters -- QGIS writes a Delimited Text
+    layer as ``file:./points.csv``, which is a local path, while ``file://host/…`` is a
+    host, and a provider URI with a ``://`` inside it is found there too.  Another
+    element's text is not a source QGIS reads: a layer's metadata holds the dataset's
+    own DOI or URL, and asking every element for ``://`` refused every project carrying
+    one (A6 #3).
+
+    Two markers are network I/O wherever they appear, so they are refused outside a
+    datasource as well -- but only at the start of the text, which is the shape
+    ``is_remote_uri`` asks of a path: ``D:/vsi_data/x.gpkg`` is a local file, and a
+    substring check refused it (A7 #3).  The parser has decoded character references
     by now, so ``&#47;vsicurl&#47;`` reads as the path it names.
     """
 
-    if not text:
-        return
     stripped = text.strip()
-    if name == "datasource":
-        # QGIS writes a Delimited Text layer as ``file:./points.csv``; that prefix is
-        # not a scheme that reaches a host, while ``file://host/…`` still is (A6 #3).
+    if source:
         stripped = _local_file_path(stripped) or stripped
-    if (
-        "/vsi" in stripped.lower()
-        or stripped.startswith(("\\\\", "//"))
-        or (name == "datasource" and ("://" in stripped or is_remote_uri(stripped)))
-    ):
+        remote = "://" in stripped or is_remote_uri(stripped)
+    else:
+        remote = stripped.lower().startswith("/vsi") or stripped.startswith(("\\\\", "//"))
+    if remote:
         raise FrameworkError(
             PATH_NOT_ALLOWED,
             "the project file names a remote data source; it was not opened",

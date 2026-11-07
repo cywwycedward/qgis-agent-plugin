@@ -47,7 +47,7 @@
 | `PROJECT_SAVE_FAILED` | `project.save` | `project.write()` 返回 `False`（磁盘/权限/编码问题） | 目标文件可能已部分写入，不要假装保存成功；换路径或修权限 |
 | `PROJECT_PATH_REQUIRED` | `project.save` | 没给 `path`，且工程没有关联文件 | 传绝对 `.qgs`/`.qgz` 路径 |
 | `TARGET_EXISTS` | `project.save` | 目标已存在（含工程自己的关联文件）且 `overwrite` 不是 `true` | 确认要覆盖再传 `overwrite=true`；不接受隐式覆盖 |
-| `PATH_NOT_ALLOWED` | 路径策略 | 路径不存在、不是普通文件、软链接跳出、不在允许根目录内、是 URL/provider URI/`/vsi*`/Windows UNC（`\\host\share\…`）、父目录不合法；`project.open` 时工程文件不是 UTF-8、声明了 XML 实体，或工程文件 / `.qgz` 每个成员解压后的总量超过 16 MB，或工程文件里任何元素的文本带 `/vsi`/UNC 前缀（或 `<datasource>` 的整段文本含子元素 `tail` 带 `://`、是远程 URI、以 `file://host` 开头），或某层的数据源不在 `allowed_data_roots` 内（这些层会被移除，整次 open 失败）；**默认空允许目录下所有文件访问都命中它** | 先配 `qgis_agent_plugin/allowed_*_roots`（见 `docs/INSTALL.md`）；消息里不会回显你的路径 |
+| `PATH_NOT_ALLOWED` | 路径策略 | 路径不存在、不是普通文件、软链接跳出、不在允许根目录内、是 URL/provider URI/`/vsi*`/Windows UNC（`\\host\share\…`）、父目录不合法；`project.open` 时工程文件不是 UTF-8、声明了 XML 实体，或工程文件 / `.qgz` 档案本身 / 每个成员解压后的总量超过 16 MB，或工程文件里任何元素的文本以 `/vsi`/UNC 前缀**开头**（或 `<datasource>` 的整段文本拼接后带 `://`、是远程 URI、以 `file://host` 开头），或某层的数据源不在 `allowed_data_roots` 内（这些层会被移除，整次 open 失败）；**默认空允许目录下所有文件访问都命中它** | 先配 `qgis_agent_plugin/allowed_*_roots`（见 `docs/INSTALL.md`）；消息里不会回显你的路径 |
 | `INVALID_LAYER` | `layer.add`、`layer.sum_numeric_field` | 图层构造后 `isValid()` 为假；求和的对象不是有效矢量图层 | 检查数据源本身；工程图层数不会变 |
 | `LAYER_NOT_FOUND` | `layer.get_info`、`layer.set_visibility`、`layer.sum_numeric_field` | 工程里没有这个 `layer_id` | 用 `layer.list` 拿真实 ID；同名的不同图层 ID 不同 |
 | `LAYER_NOT_IN_TREE` | `layer.set_visibility` | 图层已注册但没有图层树节点（`add_to_legend=false` 加进来的） | 不要对这样的图层调可见性；只能 `layer.get_info` |
