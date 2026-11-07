@@ -399,6 +399,7 @@ def at_08c_concurrency_limit(ctx: Context) -> str:
     ctx.register_probes()
     limit = ctx.engine._settings.max_active_background
     equal(limit, 2, "max_active_background (PRD 10.1 default)")
+    PROBE_LOG.prepared.clear()
     PROBE_LOG.starts.clear()
     labels = ["at08c-a", "at08c-b", "at08c-c", "at08c-d"]
     ids = [
@@ -421,15 +422,46 @@ def at_08c_concurrency_limit(ctx: Context) -> str:
 
     pump_until(ctx.app, tick, timeout=30.0, what="all four tasks to finish")
     equal(peak, limit, "the highest number of tasks active at once")
-    equal(PROBE_LOG.starts, labels, "the order the waiting tasks started in")
+    # PRD 8.5: "空位出现后按提交先后顺序（FIFO）开始 PREPARING".  The snapshot is
+    # built in prepare_main, on the main thread, where the adapter decides the order;
+    # the worker's run() order is QThreadPool's and is not part of that contract.
+    equal(PROBE_LOG.prepared, labels, "the order the calls were granted a slot in")
+    equal(
+        sorted(PROBE_LOG.starts),
+        sorted(labels),
+        "the calls whose worker really ran (any thread order)",
+    )
     equal(
         [ctx.status(execution_id) for execution_id in ids],
         [ExecutionStatus.SUCCEEDED] * len(ids),
         "the final status of every task",
     )
+
+    # A8 #1: six calls in one go mean four waiting calls and four slot releases, each
+    # of which has to start the next call instead of losing the slot.  Every record
+    # reaching SUCCEEDED is what proves no call stayed behind in QUEUED/SCHEDULED.
+    PROBE_LOG.prepared.clear()
+    wave = [f"at08c-{letter}" for letter in "efghij"]
+    wave_ids = [
+        ctx.submit("probe.slow", {"label": label, "steps": 2, "step_seconds": 0.01}).execution_id
+        for label in wave
+    ]
+    pump_until(
+        ctx.app,
+        lambda: all(ctx.status(execution_id) in TERMINAL_STATUSES for execution_id in wave_ids),
+        timeout=30.0,
+        what="the six further background calls to finish",
+    )
+    equal(PROBE_LOG.prepared, wave, "the order the second wave was granted a slot in")
+    equal(
+        [ctx.status(execution_id) for execution_id in wave_ids],
+        [ExecutionStatus.SUCCEEDED] * len(wave_ids),
+        "the final status of every call in the second wave",
+    )
     return (
-        f"four submissions, never more than {peak} active, two QUEUED, and the waiting ones "
-        f"started in submission order ({', '.join(PROBE_LOG.starts)})"
+        f"four submissions, never more than {peak} active, two QUEUED, PREPARING granted in "
+        f"submission order ({', '.join(labels)}), all four workers ran; then six at once, "
+        f"four of them waiting, and all six reached SUCCEEDED in submission order"
     )
 
 

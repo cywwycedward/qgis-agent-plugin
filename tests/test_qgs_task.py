@@ -265,6 +265,7 @@ class Harness:
             task_factory=self._make_task,
             task_manager=self.manager,
             clock=self.clock,
+            post=self.queue,
         )
         self.engine = OperationEngine(
             self.registry,
@@ -294,9 +295,14 @@ class Harness:
         return record
 
     def run(self, task: FakeTask) -> None:
-        """Run one worker and deliver its completion, like QGIS would."""
+        """Run one worker and deliver its completion, like QGIS would.
+
+        The completion only posts the drain, so the queue is turned afterwards --
+        exactly as the QGIS event loop would do on its next turn.
+        """
 
         task.finished(task.run())
+        self.queue.tick()
 
     def record(self, record: ExecutionRecord) -> ExecutionRecord:
         return self.engine.get(record.execution_id)
@@ -454,6 +460,27 @@ def test_a_third_background_call_waits_in_queued_until_a_slot_frees(
     # A free slot starts the waiting call in submission order.
     assert harness.record(third).status is SCHEDULED
     assert counting.seen.count("prepare") == 3
+    assert len(harness.tasks) == 3
+
+
+def test_a_freed_slot_is_filled_one_event_loop_turn_later(counting: Counting) -> None:
+    harness = Harness(counting)
+    harness.submit(counting.name, {"amount": 1})
+    harness.submit(counting.name, {"amount": 2})
+    waiting = harness.submit(counting.name, {"amount": 3})
+    task = harness.tasks[0]
+
+    task.finished(task.run())  # the completion alone; the event queue is not turned yet
+
+    # A8 #1: a task submitted from inside another task's finished() callback is one
+    # QGIS 3.44.13 sometimes accepts and never runs, so the adapter may not do it.
+    assert harness.record(waiting).status is QUEUED
+    assert len(harness.tasks) == 2
+
+    harness.queue.tick()
+
+    # The posted drain reads the slot count and the records again, then starts it.
+    assert harness.record(waiting).status is SCHEDULED
     assert len(harness.tasks) == 3
 
 
