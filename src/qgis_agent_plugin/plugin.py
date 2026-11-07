@@ -1,10 +1,10 @@
-"""The plugin QGIS loads: a registry built at ``initGui`` and dropped at ``unload``.
+"""The plugin QGIS loads: registry and engine at ``initGui``, dropped at ``unload``.
 
-Nothing is wired to the engine yet, so the plugin's whole surface is the registry
-it fills from the operations this build ships.  The pydantic major is checked
-here, before the model layer can be imported: the DTOs are written against
-pydantic 2, so any other major has to read as a dependency error rather than as
-an import failure inside a model module.
+The plugin's surface is the registry it fills from the operations this build ships
+and the engine that dispatches them.  The pydantic major is checked here, before
+the model layer can be imported: the DTOs are written against pydantic 2, so any
+other major has to read as a dependency error rather than as an import failure
+inside a model module.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import pydantic
 
 if TYPE_CHECKING:
+    from .core.engine import OperationEngine
     from .core.registry import OperationRegistry
 
 
@@ -33,16 +34,34 @@ class Plugin:
     def __init__(self, iface: Any) -> None:
         self.iface = iface
         self.registry: OperationRegistry | None = None
+        self.engine: OperationEngine | None = None
 
     def initGui(self) -> None:
+        from qgis.core import QgsProject
+
+        from .core.config import Settings
+        from .core.context import ProjectLifecycle
+        from .core.engine import OperationEngine
         from .core.registry import OperationRegistry
         from .operations import register_all
 
         registry = OperationRegistry()
         register_all(registry)
         self.registry = registry
+        # Settings stay at their defaults until the lifecycle reads QgsSettings;
+        # the epoch starts at 0 until it is bound to aboutToBeCleared.
+        self.engine = OperationEngine(
+            registry,
+            Settings(),
+            ProjectLifecycle(),
+            iface=self.iface,
+            project=QgsProject.instance(),
+        )
 
     def unload(self) -> None:
+        if self.engine is not None:
+            self.engine.shutdown()
+        self.engine = None
         self.registry = None
 
 
