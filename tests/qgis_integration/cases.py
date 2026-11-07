@@ -1814,38 +1814,53 @@ def at_46_open_refuses_a_project_that_declares_xml_entities(ctx: Context) -> str
 
 
 def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
-    """A CSV layer's ``file:`` source and a DOI in layer metadata are not remote (A6 #3)."""
+    """A CSV layer's ``file:`` source is not remote; a metadata URL now is (A6 #3)."""
+
+    from qgis.core import QgsProject
 
     reset_project(ctx)
     csv_project = ctx.fixtures.root / "csv project.qgs"
     fixtures.write_csv_project(csv_project, ctx.fixtures.root)
     metadata_project = ctx.fixtures.root / "metadata project.qgs"
     fixtures.write_metadata_project(metadata_project, ctx.fixtures.cities, fixtures.CITIES_LAYER)
-    evidence: list[str] = []
-    for label, target in (
-        ("a Delimited Text layer spelled file:./points.csv", csv_project),
-        (
-            "a layer whose metadata carries https://example.org/datasets/42",
-            metadata_project,
-        ),
-    ):
-        started = time.monotonic()
-        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-        elapsed = time.monotonic() - started
-        equal(record.status, ExecutionStatus.SUCCEEDED, f"project.open on {label}")
-        values = result_of(record)
-        require(values["layer_count"] >= 1, f"the layers of {label}: {values['layer_count']}")
-        require(elapsed < 20.0, f"{label} took {elapsed:.2f}s")
-        evidence.append(
-            f"{label}: SUCCEEDED with {values['layer_count']} layer in {elapsed * 1000:.0f} ms"
-        )
-    layers = project_layer_ids()
+
+    started = time.monotonic()
+    record = ctx.run("project.open", {"path": str(csv_project), "discard_current": True})
+    csv_elapsed = time.monotonic() - started
+    equal(record.status, ExecutionStatus.SUCCEEDED, "project.open on a CSV layer spelled file:./")
+    csv_layers = result_of(record)["layer_count"]
+    require(csv_layers >= 1, f"the CSV project's layers: {csv_layers}")
+    require(csv_elapsed < 20.0, f"the CSV project took {csv_elapsed:.2f}s")
+
+    # The rule has no element name in it, so a layer whose identifier *is* a URL is
+    # refused before read(): the accepted false refusal in docs/OPERATIONS.md section 12.
+    ctx.add_layer(ctx.fixtures.cities, "at47 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    started = time.monotonic()
+    metadata_record = ctx.run(
+        "project.open", {"path": str(metadata_project), "discard_current": True}
+    )
+    metadata_elapsed = time.monotonic() - started
+
+    equal(metadata_record.status, ExecutionStatus.FAILED, "project.open on a metadata identifier")
+    equal(error_code(metadata_record), PATH_NOT_ALLOWED, "the code for a metadata identifier")
+    error = metadata_record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("remote data source" in error.message, f"the message: {error.message!r}")
+    require(metadata_elapsed < 1.0, f"the metadata project took {metadata_elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
     reset_project(ctx)
     return (
-        "; ".join(evidence) + f" (the second project registered {len(layers)} layer). Both were "
-        "FAILED(PATH_NOT_ALLOWED) before this fix, while read() accepted them in 0.06 s "
-        "(measured): a file: prefix is not a scheme that reaches a host, and a layer's "
-        "metadata is not a data source"
+        f"a Delimited Text layer spelled file:./points.csv: SUCCEEDED with {csv_layers} "
+        f"layer in {csv_elapsed * 1000:.0f} ms; a layer whose metadata identifier is "
+        "https://example.org/datasets/42: FAILED(PATH_NOT_ALLOWED) with 'remote data "
+        f"source' in {metadata_elapsed * 1000:.0f} ms, before read() -- the accepted "
+        "false refusal of the uniform rule (docs/OPERATIONS.md section 12). The CSV "
+        "project was FAILED(PATH_NOT_ALLOWED) before A6 #3 while read() accepted it in "
+        "0.06 s (measured): a file: prefix is not a scheme that reaches a host"
     )
 
 

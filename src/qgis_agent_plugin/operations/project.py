@@ -17,6 +17,7 @@ in a bare interpreter and the path/CRS rules stay testable without QGIS.
 
 from __future__ import annotations
 
+import re
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any
@@ -42,7 +43,7 @@ from ..core.models import (
     FrameworkError,
     Params,
 )
-from ..core.security import is_remote_uri, resolve_path
+from ..core.security import resolve_path
 
 # The two formats this plugin reads and writes; anything else is a caller mistake.
 PROJECT_SUFFIXES = (".qgs", ".qgz")
@@ -89,6 +90,18 @@ _UNPACKABLE = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 # One read from an archive member.  The budget counts these bytes as they are
 # decompressed, never the size the manifest claims.
 _CHUNK = 1024 * 1024
+
+# Only the start of a value is judged, so an element's text is kept up to this many
+# characters after its leading whitespace.  The longest marker is a scheme plus
+# ``://`` (``https://`` is eight), which leaves every real scheme room; the bound is
+# what keeps a 16 MB text nested 256 levels deep from being re-joined once per level.
+# shortcut: a value whose scheme is longer than 59 characters is not seen; upgrade if
+# a provider starts spelling one.
+_VALUE_HEAD = 64
+
+# A scheme at the very start of a value.  ``EPSG:4326`` and ``C:/data`` carry a colon
+# but no ``//``, and both are values QGIS writes into a project.
+_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
 # What ``read()`` reports for a file it cannot parse; the scan uses the same sentence
 # rather than inventing an error of its own.
@@ -298,11 +311,12 @@ class ProjectGetInfo(
 def _refuse_remote_datasources(path: Path) -> None:
     """Refuse a project that must not reach ``read()``, before it is opened.
 
-    ``QgsProject.read()`` builds every layer the file names, so a remote URI in the
-    file is an HTTP request or an SMB authentication attempt on the main thread --
-    before any per-layer check could run (PRD 10.2) -- and a file nested deeply
-    enough overflows the parser's stack inside the process.  Only the file's bytes
-    are read here, and nothing is built.
+    ``QgsProject.read()`` builds every layer the file names and loads the pictures its
+    layouts name, so a remote URI anywhere in the file -- a layer's ``<datasource>``,
+    a layout item's ``file=`` attribute -- is an HTTP request or an SMB authentication
+    attempt on the main thread, before any per-layer check could run (PRD 10.2) -- and
+    a file nested deeply enough overflows the parser's stack inside the process.  Only
+    the file's bytes are read here, and nothing is built.
     """
 
     try:
@@ -378,7 +392,8 @@ def _scan_project_xml(text: bytes) -> None:
     Four rounds of byte scanners were walked past by legal XML -- a ``>`` inside an
     attribute value, a fake close tag inside a comment or CDATA, a depth counter that
     a label QGIS itself writes inflated -- so the parser answers the questions now:
-    which elements the file holds, what their text is, and how deep they nest.
+    which elements the file holds, what their text is, every attribute value, and how
+    deep they nest.
     Comments and CDATA sections are not elements and add no depth, and a self-closing
     ``<a x="/>">`` is the one element it is.  The text is taken from the parser's
     character-data events (``_ProjectScan``), not from a tree: no tree is built, so
@@ -415,63 +430,73 @@ def _scan_project_xml(text: bytes) -> None:
         raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
 
 
+class _Head:
+    """The start of one value: leading whitespace skipped, at most ``_VALUE_HEAD`` chars.
+
+    The scan judges only the start of a value, so this is all it keeps of an element's
+    text; keeping the whole text would mean re-joining it once per nesting level.
+    """
+
+    __slots__ = ("started", "text")
+
+    def __init__(self) -> None:
+        self.text = ""
+        # Whether the value's first non-whitespace character has been kept already.
+        self.started = False
+
+    def add(self, data: str) -> None:
+        if not self.started:
+            data = data.lstrip()
+            if not data:
+                return
+            self.started = True
+        room = _VALUE_HEAD - len(self.text)
+        if room > 0:
+            self.text += data[:room]
+
+
 class _ProjectScan:
-    """The project's text, rebuilt from the parser's character-data events.
+    """Every value the file holds, taken from the parser's character-data events.
 
-    The text of a ``datasource`` is what QGIS hands the provider, and
-    ``QDomElement::text()`` is not ``element.text``: it concatenates every
-    character-data event between the element's start tag and its matching end tag, in
-    document order, grandchildren included.  So the fragments are collected and the
-    joined string is asked once, at the element's end.  Checking the fragments
-    separately let ``/v<x/>sicurl/htt<y/>p:...`` -- five nodes, none of them a marker
-    -- through, and ``read()`` made 8 TCP connections before the failure (measured).
+    One rule is asked of every value -- an element's whole text and every attribute
+    value -- and no element name is in it (``_refuse_if_remote_value``): QGIS reads
+    more than ``<datasource>``, and a layout's picture item keeps its picture in a
+    ``file=`` attribute that ``read()`` loads (A11 #1).
 
-    Text outside a datasource is not a source QGIS reads, so it is asked for a marker
-    at the start of each of its text nodes (``_refuse_if_remote_text``).
+    An element's text is not ``element.text``: ``QDomElement::text()`` concatenates
+    every character-data event between the element's start tag and its matching end
+    tag, in document order, grandchildren included.  So a child's text stays in its
+    parent's, and ``/v<x/>sicurl/htt<y/>p:...`` -- five nodes, none of them a marker
+    -- is the address ``read()`` reached (measured, A7 #1).  Only the start of the
+    text is judged, so only ``_VALUE_HEAD`` characters of it are kept.
     """
 
     def __init__(self) -> None:
         self.depth = 0
-        # The collected text of every datasource still open, outermost first.  A
-        # datasource inside a datasource is part of the outer one's text, so what it
-        # collected is appended to the buffer around it when it ends.
-        self.sources: list[list[str]] = []
-        # The character data of the text node being read, outside any datasource.
-        self.node: list[str] = []
+        # The start of the text of every element still open, outermost first.
+        self.open: list[_Head] = []
 
     def start(self, name: str, attributes: Any) -> None:
-        self._end_node()
         self.depth += 1
         if self.depth > MAX_PROJECT_DEPTH:
             raise FrameworkError(
                 PROJECT_OPEN_FAILED,
                 f"the project file nests deeper than {MAX_PROJECT_DEPTH} levels; it was not opened",
             )
-        if _local_name(name) == "datasource":
-            self.sources.append([])
+        for value in attributes.values():
+            _refuse_if_remote_value(value)
+        self.open.append(_Head())
 
     def end(self, name: str) -> None:
-        self._end_node()
         self.depth -= 1
-        if _local_name(name) != "datasource":
-            return
-        collected = "".join(self.sources.pop())
-        if self.sources:
-            self.sources[-1].append(collected)
-        _refuse_if_remote_text(collected, source=True)
+        head = self.open.pop()
+        if self.open:
+            self.open[-1].add(head.text)
+        _refuse_if_remote_value(head.text)
 
     def data(self, text: str) -> None:
-        if self.sources:
-            self.sources[-1].append(text)
-        else:
-            self.node.append(text)
-
-    def _end_node(self) -> None:
-        """Ask the text node that ended here, then forget it."""
-
-        if self.node:
-            _refuse_if_remote_text("".join(self.node), source=False)
-            self.node.clear()
+        if self.open:
+            self.open[-1].add(text)
 
 
 def _declares_entities(text: bytes) -> bool:
@@ -494,31 +519,39 @@ def _declares_entities(text: bytes) -> bool:
     return bracket >= 0 and (end < 0 or bracket < end)
 
 
-def _refuse_if_remote_text(text: str, *, source: bool) -> None:
-    """Refuse text that would make ``read()`` reach the network.
+def _refuse_if_remote_value(value: str) -> None:
+    """Refuse a value that names network I/O at its start, before ``read()`` reaches it.
 
-    ``source`` marks the text QGIS takes a layer's source from: the whole subtree text
-    of a ``datasource`` element, whatever its namespace or case, rebuilt in document
-    order.  That is the only text whose scheme matters -- QGIS writes a Delimited Text
-    layer as ``file:./points.csv``, which is a local path, while ``file://host/…`` is a
-    host, and a provider URI with a ``://`` inside it is found there too.  Another
-    element's text is not a source QGIS reads: a layer's metadata holds the dataset's
-    own DOI or URL, and asking every element for ``://`` refused every project carrying
-    one (A6 #3).
+    One rule, no element name in it: it is asked of every element's text and every
+    attribute value, because ``read()`` fetches more than a layer's source.  A layout's
+    picture item names its picture in an attribute (``<LayoutItem type="65640"
+    file="http://host/picture.png">``) and ``read()`` loads it: 9 TCP connections in
+    0.25 s from a 5 KB project inside the roots, and 180 s against a host that accepts
+    and never answers, still reported as ``SUCCEEDED`` (measured, A11 #1).
 
-    Two markers are network I/O wherever they appear, so they are refused outside a
-    datasource as well -- but only at the start of the text, which is the shape
-    ``is_remote_uri`` asks of a path: ``D:/vsi_data/x.gpkg`` is a local file, and a
-    substring check refused it (A7 #3).  The parser has decoded character references
-    by now, so ``&#47;vsicurl&#47;`` reads as the path it names.
+    Only the *start* is asked, so local text that merely contains a marker is still
+    local: ``D:/vsi_data/x.gpkg``, ``./vsi_data/...`` and a description quoting a URL
+    (A6 #3, A7 #3).  A local scheme is peeled first (``_local_path_of``: ``file:``,
+    which QGIS writes for a CSV layer, and ``attachment:``, which it writes into every
+    project that carries a project style), then the value may not begin with ``/vsi``
+    (GDAL's virtual file systems), with a UNC prefix, or with ``scheme://``.  The
+    parser has decoded character references by now, so ``&#47;vsicurl&#47;`` reads as
+    the path it names.
+
+    What this is not: a proof that nothing else in a project file is fetched.  It is
+    the list of shapes known today, asked of every value, and the layers a project
+    names get a second check after ``read()`` (``_sources_outside_the_allowed_roots``).
     """
 
-    stripped = text.strip()
-    if source:
-        stripped = _local_file_path(stripped) or stripped
-        remote = "://" in stripped or is_remote_uri(stripped)
-    else:
-        remote = stripped.lower().startswith("/vsi") or stripped.startswith(("\\\\", "//"))
+    text = value.strip()
+    local = _local_path_of(text)
+    if local is not None:
+        text = local.strip()
+    remote = (
+        text.lower().startswith("/vsi")
+        or text.startswith(("\\\\", "//"))
+        or _SCHEME.match(text) is not None
+    )
     if remote:
         raise FrameworkError(
             PATH_NOT_ALLOWED,
@@ -526,27 +559,28 @@ def _refuse_if_remote_text(text: str, *, source: bool) -> None:
         )
 
 
-def _local_file_path(text: str) -> str | None:
-    """The path a local ``file:`` URI names, or None when it names a host.
+def _local_path_of(text: str) -> str | None:
+    """The local path a value with a local scheme names, or None for any other value.
 
     ``file:./points.csv`` and ``file:///C:/data/points.csv`` are local paths QGIS
-    writes for a CSV layer; ``file://host/share/…`` names a host and is left for the
-    caller to refuse.
+    writes for a CSV layer; ``file://host/share/...`` names a host and comes back as
+    it is, for the caller to refuse for its ``scheme://`` start.  ``attachment:///
+    styles.db`` is QGIS's own local scheme: it names a file in the project's
+    attachment directory, and QGIS 3.44 writes one into every project that carries a
+    project style, so refusing it would refuse every saved project.
     """
 
-    if text[:5].lower() != "file:":
-        return None
-    rest = text[5:]
-    if not rest.startswith("//"):
-        return rest
-    authority = rest[2:]
-    return authority if authority.startswith("/") else None
-
-
-def _local_name(tag: str) -> str:
-    """The element name without its namespace, in lower case."""
-
-    return tag.rsplit("}", 1)[-1].lower()
+    scheme, _, rest = text.partition(":")
+    scheme = scheme.lower()
+    if scheme == "file":
+        if not rest.startswith("//"):
+            return rest
+        authority = rest[2:]
+        return authority if authority.startswith("/") else None
+    if scheme == "attachment":
+        # ``attachment:///name`` and ``attachment:name`` are the same relative name.
+        return rest.lstrip("/")
+    return None
 
 
 def _refuse_if_too_large(size: int) -> None:

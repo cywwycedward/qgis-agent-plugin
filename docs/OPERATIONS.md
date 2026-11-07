@@ -71,23 +71,29 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 - `project.open` 的工程文件还会在 `read()` **之前**被扫一遍（`.qgs` 是 XML，`.qgz` 是 zip 里的
   同一个 XML）。这一层用的是**标准库 XML 解析器**（`xml.parsers.expat`，事件驱动、不建树），
   不是字节启发式：前四轮的手写扫描被同样几种**合法 XML 形状**打穿（属性值里的 `>`、注释/CDATA
-  里的假闭合标签、QGIS 自己写的 `>` 让深度计数器漂移），所以“有哪些数据源、嵌套多深”现在由
+  里的假闭合标签、QGIS 自己写的 `>` 让深度计数器漂移），所以“有哪些值、嵌套多深”现在由
   解析器回答：
-  - 任何元素的文本节点只要**以** `/vsi`（不区分大小写）或 UNC 前缀（`\\`、`//`）**开头** →
-    `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not
-    opened`。这两个标记本身就是网络 I/O，**改成别的元素名跑不掉**；判的是开头而不是子串：
-    `D:/vsi_data/x.gpkg`、`./vsi_data/…` 这种普通本地路径与名字里带 `data/vsicache` 的图层
-    不再被误拒（A7 #3）。
-  - `<datasource>` 是 QGIS 取图层数据源的地方，它的**整段文本**额外问一次：出现 `://`
-    （XYZ/WMS 把 `…&url=https://…` 写在里面）或过 `is_remote_uri`（覆盖 `zip:…` 这类没有
-    `//` 的 scheme）→ 同样拒。文本以 `file:` 开头时先剥掉前缀再判：`file:./points.csv`
-    （QGIS 自己写的 Delimited Text 图层）与 `file:///C:/…` 是本地路径，`file://host/…` 仍拒。
-    别的元素的文本不是 QGIS 会去取的数据源：图层的 DOI/URL 元数据
-    （`<identifier>https://…</identifier>`、`<abstract>Downloaded from https://…</abstract>`）
-    不再被误判成远程。
-  - 元素的文本不止 `element.text`，也不只是子元素的 `tail`：扫描收的是从 `<datasource>` 的
-    start 到匹配 end 之间的**每一个字符数据事件**，按文档顺序拼成一个串，在 end 时对整串判
-    一次——这就是 QGIS 那边 `QDomElement::text()` 的语义。所以
+  - **一条判据，问文件里的每一个值**：每个元素的**整段文本**与每个**属性值**过同一个判定
+    （不认元素名、不认属性名）：`strip` → 若开头是本地 scheme（`file:`、`attachment:`）先剥掉
+    再判 → 命中以下任一即 `PATH_NOT_ALLOWED`，消息是
+    `the project file names a remote data source; it was not opened`：以 `/vsi` 开头
+    （不区分大小写）、以 UNC 前缀（`\\`、`//`）开头、以 `scheme://` 开头。
+    属性值必须一起判，因为 `read()` 取的不止图层数据源：布局里的图片项把图片写在 `file=`
+    属性里（`<LayoutItem type="65640" file="http://…">`），`read()` 读布局时就去取图——
+    只问 `<datasource>` 文本的那版扫描放行了这种工程，实测同一个 5 KB 文件让 `project.open`
+    发 **9 次 TCP**、返回 `SUCCEEDED`；对端接受连接但永不回应时主线程停 **180.1 s**，仍报
+    `SUCCEEDED`（A11 #1）。
+  - **只看值的开头，不做子串匹配**：`D:/vsi_data/x.gpkg`、`./vsi_data/…`、名字里带
+    `data/vsicache` 的图层、正文里引用 URL 的 `<abstract>Downloaded from https://…</abstract>`
+    都不再被误拒（A6 #3、A7 #3）。代价是**值本身就是 URL** 的元数据
+    （`<identifier>https://…</identifier>`、`Option value="https://…"`）会被拒，这是这条统一
+    判据的已知误拒，记在 §12。
+  - 本地 scheme 先剥掉再判：`file:./points.csv`（QGIS 自己写的 Delimited Text 图层）、
+    `file:///C:/…` 与 `attachment:///styles.db`（QGIS 3.44 给每个带工程样式的工程都写一条）
+    是本地路径；`file://host/…` 剥不掉，仍按 `scheme://` 拒；别的 scheme 一律当远程。
+  - 元素的文本不止 `element.text`，也不只是子元素的 `tail`：扫描收的是从元素的 start 到匹配
+    end 之间的**每一个字符数据事件**，按文档顺序拼成一个串，在 end 时对整串判一次——这就是
+    QGIS 那边 `QDomElement::text()` 的语义。所以
     `<datasource>/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:9/never.tif</datasource>` 这种
     五段拼出来的 `/vsicurl` 地址被当成一个地址拒掉（逐段判时它穿过了前扫，`project.open`
     在失败之前先发了 8 次 TCP，实测，A7 #1）。
@@ -126,7 +132,11 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
     声明尺寸）同样拒。理由是 QGIS 3.44 在加密成员上直接崩（实测 `0xC0000005`），
     而这种档案不该交给它。
 
-  总的来说：这一层只能**更严**，不能更松；它拒绝的形状都会在错误消息里说明是“远程数据源”、
+  总的来说：这一层是**读前尽力而为的清单**，不是“QGIS 会去取什么”的完备枚举。它只问每个值的
+  **开头**，所以值中间才出现远程地址的形状它看不见：provider URI `type=xyz&url=https://…`
+  （XYZ/WMS 的写法）不再在读前被拒，`read()` 之后逐层的数据源检查仍会移除该层并让整次 open
+  `PATH_NOT_ALLOWED`（见 §3），但那一次请求已经发出去了；布局以外的取数落点（符号层里的图片、
+  装饰项、……）没有逐个枚举，同样不在承诺内。它拒绝的形状都会在错误消息里说明是“远程数据源”、
   “嵌套太深”、“标签太多”、“太大”或“读不出来”之一。`read()` 之后还有逐层的数据源白名单检查
   （见 §3），工程里说不出的本地路径同样过不了（层会被移除）。
 - **容器格式不在这一层策略内**：一个合法本地的 `.vrt` 内部可以写
@@ -196,14 +206,16 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 数据源是另一回事：`read()` 会把它们全部构造出来，远程地址就在主线程上发 HTTP、UNC 就在
 主线程上做一次带 Windows 凭据的 SMB 连接。所以两步：
 
-1. **先用 XML 解析器问工程里有什么，不碰数据源**：`read()` 之前用标准库 `expat` 解析
-   工程 XML，任何元素的文本节点以 `/vsi`、UNC 前缀（`\\`、`//`）**开头**，或 `<datasource>`
-   元素的**整段文本**（start 到匹配 end 之间的每个字符数据事件依序拼起来，即
-   `QDomElement::text()`）里出现 `://` / 是个远程 URI（XYZ/WMS 把 `…&url=https://…`
-   写在文本里，也算）→ 直接 `PATH_NOT_ALLOWED`，消息是
-   `the project file names a remote data source; it was not opened`。`<datasource>` 文本以
-   `file:` 开头时先剥掉前缀：`file:./points.csv`（QGIS 自己写的 CSV 图层）与 `file:///C:/…`
-   放行，`file://host/…` 仍拒；图层的 DOI/URL 元数据不是数据源，不再误拒。
+1. **先用 XML 解析器问工程里有什么，不碰任何值**：`read()` 之前用标准库 `expat` 解析
+   工程 XML，**每个元素的整段文本**（start 到匹配 end 之间的每个字符数据事件依序拼起来，即
+   `QDomElement::text()`）与**每个属性值**都过同一条判据：`strip` → 剥掉开头的本地 scheme
+   （`file:`、`attachment:`）→ 以 `/vsi`、UNC 前缀（`\\`、`//`）或 `scheme://` **开头**就
+   直接 `PATH_NOT_ALLOWED`，消息是
+   `the project file names a remote data source; it was not opened`。所以
+   `file:./points.csv`（QGIS 自己写的 CSV 图层）与 `file:///C:/…` 放行，`file://host/…` 仍拒；
+   布局图片项的 `file=` 属性与 HTML 项的 `<url>http://…</url>` 同样在读前拒——它们不是数据源，
+   但 `read()` 会去取（A11 #1）；值本身就是 URL 的元数据（`<identifier>https://…</identifier>`）
+   也会命中，见 §12。
    这一步只读字节、不建树，**当前工程原样保留**（已实测：含 `/vsicurl` / UNC
    数据源的工程 0–16 ms 返回，旧工程与它的图层都还在；一个把 `>` 藏在数据源属性里的工程
    返回 16 ms、监听端口 **0 次 TCP 连接**，旧扫描会给它 9 次；一个把 URI 放在子元素 `tail`
@@ -262,7 +274,7 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里任何元素的文本以 `/vsi`、UNC 前缀**开头**，或 `<datasource>` 的整段文本（拼接后的，即 `QDomElement::text()`）带 `://` / 是远程 URI / 以 `file://host` 开头（**`read()` 之前**就拒）；或工程文件不是 UTF-8、声明了 XML 实体、工程文件或 `.qgz` 档案本身 / 每个成员解压后的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里某个元素的整段文本 / 某个属性值在剥掉本地 `file:` / `attachment:` scheme 后以 `/vsi`、UNC 前缀或 `scheme://` **开头**（**`read()` 之前**就拒，见 §1.2；值本身就是 URL 的元数据也会命中，见 §12）；或工程文件不是 UTF-8、声明了 XML 实体、工程文件或 `.qgz` 档案本身 / 每个成员解压后的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
 | `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或工程 XML 嵌套超过 256 层、标签超过 400000 个、`.qgz` 成员超过 1000 个、不是合法 XML（都在 `read()` 之前拒绝：前者会让 QGIS 解析器爆栈、进程消失，其余不是工程），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
@@ -479,7 +491,9 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 6.1 “兼容 Pydantic v1/v2” | 只支持 v2，`pydantic_major` 恒为 2 | 已记录偏差；非 v2 的 pydantic 在插件导入时直接 `RuntimeError` |
 | 11.1 `error.details` | 字段存在但永远是 `null` | `FrameworkError` 只带 `code` + `message`，没有 details 通路 |
 | 7.3 / 11.2 “含无法加载的图层 → `PROJECT_OPEN_FAILED`” | `SUCCEEDED` + `invalid_layer_count > 0` | 同一份 PRD 里这两句与 AT-18B（`read()` 为真但有坏图层 → 成功 + 计数）互斥。**以 AT-18B 与这里的代码为准**：读成功就是成功，坏图层只计数、不谎称可用。评审时不要按 7.3/11.2 那两句改代码 |
-| 7.3 未提工程内数据源 | `project.open` 在 `read()` 前拒远程数据源，`read()` 后逐层校验数据源，越界则移除该层并整体 `PATH_NOT_ALLOWED` | 更严，不是更松：PRD 2.3/10.2 要的是数据白名单，而数据源是工程文件替调用方写的路径，所以它们也得过 `allowed_data_roots`（已实测，见 `PROJECT_OPEN_FAILED` 之外的这条码） |
+| 7.3 未提工程内数据源 | `project.open` 在 `read()` 前拒远程数据源，`read()` 后逐层校验数据源，越界则移除该层并整体 `PATH_NOT_ALLOWED` | 比 PRD 更严：PRD 2.3/10.2 要的是数据白名单，而数据源是工程文件替调用方写的路径，所以它们也得过 `allowed_data_roots`（已实测，见 `PROJECT_OPEN_FAILED` 之外的这条码）。读前那一半只是尽力而为的清单，边界见 §1.2 |
 | 未定义：数据源是目录 | 数据源可以是目录（ESRI FileGDB），只要目录在 `allowed_data_roots` 内 | 保存目标仍然必须是文件；只有“工程里的数据源”放宽到目录，否则普通工程里一张 FileGDB 图层就会让整次打开失败 |
 | 未定义：容器格式内部的数据源 | 不检查：一个本地 `.vrt` 内部的 `<SourceFilename>` 不在这层策略内 | 已知边界，不是承诺；升级条件写在 `operations/layer.py` 的 `layer_source_uri` 的 `shortcut:` 注释里（有人真的把 VRT 当不可信输入时） |
 | 未定义：provider 说不出本地路径 | 这种图层算越界（移除 + 失败） | 宁可拒绝：白名单无法为一个说不出来源的层担保；工程里出现 `memory`、WMS/XYZ 等非文件 provider 时 `project.open` 会失败 |
+| 未定义：值本身就是 URL 的元数据 | 读前扫描会拒（`PATH_NOT_ALLOWED`） | 统一判据的已知误拒：判据不认元素名/属性名，任何值以 `scheme://` 开头就拒，所以 `<identifier>https://…</identifier>`、`Option value="https://…"` 这种工程打不开；正文里引用 URL（`<abstract>Downloaded from https://…</abstract>`）仍然放行。要打开这种工程，先把元数据里的 URL 去掉 |
+| 未定义：provider URI 里 `key=` 之后的远程地址 | 读前不拒；`read()` 之后逐层检查会移除该层并整体 `PATH_NOT_ALLOWED` | 判据只看值的开头（`type=xyz&url=https://…` 是 QGIS 写 XYZ/WMS 的方式），所以这一次请求会先发出去。要堵住它得做子串匹配，而子串匹配会把正文里引用 URL 的正常工程拒掉（A6 #3）——取舍记在这里，不是没看见 |
