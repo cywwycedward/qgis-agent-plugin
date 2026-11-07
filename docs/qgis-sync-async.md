@@ -104,13 +104,20 @@ progressChanged 报告 100 次（1.0 … 100.0 各一次；1.0 的步进每次�
   `FAILED(INTERNAL_ERROR: the task ended without a result)`。`finished(true)` 只表示 `run()` 返回了
   真值；结果能不能用由 `finalize_main` + 输出模型校验决定（`execute_worker` 真返回 `None` 时会在
   `finalize_main` 里抛，最终记 `INTERNAL_ERROR`，`message` 是 `AttributeError: unexpected failure`）。
-- **QGIS 一定回调 `finished()`**：3.44.13 的 `QgsTaskManager::taskStatusChanged` 在
-  `cleanupAndDeleteTask()` **之前**调 `task->finished(result)`，而 `mTasks.remove(id)` 在
+- **QGIS 一定回调 `finished()`（对真的启动了的任务）**：3.44.13 的 `QgsTaskManager::taskStatusChanged`
+  在 `cleanupAndDeleteTask()` **之前**调 `task->finished(result)`，而 `mTasks.remove(id)` 在
   `taskAboutToBeDeleted` 之后；`cancel()` 一个还没 `run()` 的任务直接 `terminated()` →
   `finished(false)`。实测（headless 3.44.13）：`addTask` 后立刻 `cancel()`，`run()` 没进，
   `finished()` 正好回调 1 次，且回调里 `manager.task(id)` 非 `None`。所以适配器里“任务已不在
   manager 里、`finished()` 却没来”的对账是空网，已删掉：`_active` 的条目走不到那里，而一旦
   真触发就会把一条已完成的任务写成 `FAILED`。
+- **在另一个任务的 `finished()` 里 `addTask`，任务可能被收下却永不启动**（A8 #1）：此时
+  `addTask` 返回正数 id、`manager.task(id)` 非 `None`，但 `status()` 一直是 `Queued`（0），
+  `run()` 与 `finished()` 都不来，记录永久停在 `SCHEDULED`、并发名额泄漏。实测（3.44.13）：
+  100 个任务的链，每个在 `finished()` 里加下一个 → 100 轮里 45 轮出现；改成
+  `QTimer.singleShot(0, …)` → 0/100。所以适配器不在完成回调的调用栈里提交任务：
+  `task_finished` 只投递 `_drain`，空位在下一轮事件循环才被填上，投递的回调重新读槽位与
+  每条记录的状态（取消与换代仍然先赢）。
 
 ## 6. PyQGIS 能碰什么、不能碰什么
 

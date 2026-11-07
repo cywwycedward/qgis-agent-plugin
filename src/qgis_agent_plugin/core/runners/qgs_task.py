@@ -15,6 +15,13 @@ of the task shell are guarded.  And a ``QgsTask`` is never kept: QGIS deletes it
 C++ side as soon as the task ends, so only its task id is held while it lives and
 nothing of it survives into the record.
 
+A slot freed by a completion is filled one event-loop turn later, through the same
+poster the engine uses.  Submitting a task from inside another task's ``finished()``
+callback is what 3.44.13 sometimes takes without ever running it: the task stays
+``Queued``, ``finished()`` never comes, and the slot is lost for the session (A8 #1).
+The posted drain re-reads the slot count and every waiting record before it starts
+anything, so a cancel or a project generation that arrived in between still wins.
+
 QGIS is imported inside ``_build_task_class``, which keeps this module importable
 in a bare interpreter like the rest of the core.
 """
@@ -42,6 +49,7 @@ from ..models import (
     FrameworkError,
     utc_now,
 )
+from .main_thread import Post, _post_to_event_queue
 
 if TYPE_CHECKING:
     from ..engine import OperationEngine
@@ -123,9 +131,11 @@ class OperationTaskRunner:
         task_manager: Any,
         task_factory: Callable[..., Any] | None = None,
         clock: Callable[[], float] | None = None,
+        post: Post | None = None,
     ) -> None:
         self._new_task = task_factory or task_class()
         self._clock = clock or time.monotonic
+        self._post = post or _post_to_event_queue
         self._manager = task_manager
         # Active tasks by execution id, and the calls still waiting for a slot in
         # submission order.  Both are emptied as work finishes, so neither is history.
@@ -180,6 +190,9 @@ class OperationTaskRunner:
         ``task`` is alive for the length of this call and is never kept: QGIS
         deletes its C++ side as soon as the task ends.  Whatever goes wrong in
         here, the slot is released and the record does not stay live (PRD 12.3).
+
+        The drain is posted, never called here: a submission made inside this
+        callback is one 3.44.13 may accept and never run (A8 #1).
         """
 
         submission = self._active.pop(execution_id, None)
@@ -194,7 +207,7 @@ class OperationTaskRunner:
             _LOGGER.exception("completion of %s failed", execution_id)
             self._abandon(submission, "the completion of this execution failed")
         finally:
-            self._drain()
+            self._post(self._drain)
 
     def _complete(
         self, submission: _Submission, run: OperationRun, task: Any, succeeded: bool
@@ -302,7 +315,12 @@ class OperationTaskRunner:
         store.transition(execution_id, ExecutionStatus.SCHEDULED)
 
     def _drain(self) -> None:
-        """Start waiting calls while a slot is free, in submission order (PRD 8.5)."""
+        """Start waiting calls while a slot is free, in submission order (PRD 8.5).
+
+        Runs one event-loop turn after the completion that freed the slot.  The slot
+        count and each record are read here, not at posting time, so a call cancelled
+        meanwhile is dropped and a project generation that moved on is refused.
+        """
 
         while self._waiting:
             head = self._waiting[0]

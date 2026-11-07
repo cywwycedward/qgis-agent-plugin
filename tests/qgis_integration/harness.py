@@ -170,6 +170,7 @@ FINALIZE_CANCEL: dict[str, Any] = {}
 
 @dataclass
 class ProbeLog:
+    prepared: list[str] = field(default_factory=list)
     starts: list[str] = field(default_factory=list)
     finalizes: list[str] = field(default_factory=list)
 
@@ -234,6 +235,7 @@ class SlowProbe(
     output_model = SlowResult
 
     def prepare_main(self, ctx: OperationContext, request: SlowParams) -> SlowSnapshot:
+        PROBE_LOG.prepared.append(request.label)
         return SlowSnapshot(
             label=request.label,
             steps=request.steps,
