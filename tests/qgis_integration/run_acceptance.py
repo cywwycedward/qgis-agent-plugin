@@ -31,6 +31,7 @@ warnings.simplefilter("ignore", FutureWarning)
 import cases  # noqa: E402
 import fixtures  # noqa: E402
 import harness  # noqa: E402
+import tally  # noqa: E402
 
 
 def environment() -> str:
@@ -75,7 +76,7 @@ def main(argv: list[str]) -> int:
 
     context = harness.Context(application, generated)
     context.load()
-    lines: list[str] = []
+    rows: list[tally.Row] = []
     try:
         for case_id, case in cases.CASES:
             verdict, evidence = "PASS", ""
@@ -92,23 +93,23 @@ def main(argv: list[str]) -> int:
                     f"{type(error).__name__}: {error} "
                     f"(at {Path(frame.filename).name}:{frame.lineno})"
                 )
-            lines.append(f"{case_id} {verdict} {evidence}")
-            print(lines[-1])
+            rows.append(tally.Row(case_id, verdict, evidence))
+            print(rows[-1].line())
             if context.plugin is None:
                 context.load()
     finally:
         context.unload()
         application.exitQgis()
 
-    counts = {
-        verdict: [line for line in lines if f" {verdict} " in line]
-        for verdict in ("PASS", "FAIL", "SKIP")
-    }
-    summary = ", ".join(f"{verdict} {len(found)}" for verdict, found in counts.items())
-    print(f"summary: {summary} of {len(lines)} cases")
+    # The verdict is a field of the row: the evidence is free text and may contain
+    # the words PASS, FAIL or SKIP without changing the tally (see tally.py).
+    summary = tally.summarise(rows)
+    print(f"summary: {summary}")
     print(f"artifacts: {root}")
-    (root / "results.txt").write_text("\n".join(lines) + "\n" + summary + "\n", encoding="utf-8")
-    return 0 if not counts["FAIL"] else 1
+    (root / "results.txt").write_text(
+        "\n".join(row.line() for row in rows) + "\n" + summary + "\n", encoding="utf-8"
+    )
+    return 1 if tally.failed(rows) else 0
 
 
 if __name__ == "__main__":
