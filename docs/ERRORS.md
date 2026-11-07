@@ -43,15 +43,15 @@
 | `INVALID_INPUT` | 引擎 | 入参 Pydantic 校验失败：未知字段、类型不符（含 `"true"` 当布尔）、空字符串、超长、`sub_layer` 字符不合规 | 按 `message` 里的字段名修参数；GIS 侧没有发生任何副作用 |
 | `INVALID_CRS` | `project.create` | `crs_authid` 构造不出有效 CRS | 换一个 authid；当前工程未被替换 |
 | `PROJECT_REPLACE_REQUIRED` | `project.create`、`project.open` | 当前工程有图层、有关联文件或 dirty，且没传 `discard_current=true` | 先 `project.save` 或 `project.get_info` 确认，再显式传 `true` |
-| `PROJECT_OPEN_FAILED` | `project.open` | `project.read()` 返回 `False`（文件损坏/不是工程文件），工程文件的 XML 嵌套超过 64 层或 XML 元素超过 200000 个（在 `read()` 之前拒绝，前者会让 QGIS 解析器爆栈），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法；这种档案不会交给 `read()`） | 重开失败**不保证**原工程还在；重新 `project.get_info` 或 `project.open` 一次 |
+| `PROJECT_OPEN_FAILED` | `project.open` | `project.read()` 返回 `False`（文件损坏/不是工程文件），工程 XML 嵌套超过 1000 层、标签超过 400000 个或不是合法 XML（在 `read()` 之前拒绝，前者会让 QGIS 解析器爆栈），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法、流对不上清单；这种档案不会交给 `read()`） | 重开失败**不保证**原工程还在；重新 `project.get_info` 或 `project.open` 一次 |
 | `PROJECT_SAVE_FAILED` | `project.save` | `project.write()` 返回 `False`（磁盘/权限/编码问题） | 目标文件可能已部分写入，不要假装保存成功；换路径或修权限 |
 | `PROJECT_PATH_REQUIRED` | `project.save` | 没给 `path`，且工程没有关联文件 | 传绝对 `.qgs`/`.qgz` 路径 |
 | `TARGET_EXISTS` | `project.save` | 目标已存在（含工程自己的关联文件）且 `overwrite` 不是 `true` | 确认要覆盖再传 `overwrite=true`；不接受隐式覆盖 |
-| `PATH_NOT_ALLOWED` | 路径策略 | 路径不存在、不是普通文件、软链接跳出、不在允许根目录内、是 URL/provider URI/`/vsi*`/Windows UNC（`\\host\share\…`）、父目录不合法；`project.open` 时工程文件不是 UTF-8，或工程文件 / `.qgz` 全部 `.qgs` 成员的总量超过 16 MB，或工程里某层的数据源是远程 URI，或某层的数据源不在 `allowed_data_roots` 内（这些层会被移除，整次 open 失败）；**默认空允许目录下所有文件访问都命中它** | 先配 `qgis_agent_plugin/allowed_*_roots`（见 `docs/INSTALL.md`）；消息里不会回显你的路径 |
+| `PATH_NOT_ALLOWED` | 路径策略 | 路径不存在、不是普通文件、软链接跳出、不在允许根目录内、是 URL/provider URI/`/vsi*`/Windows UNC（`\\host\share\…`）、父目录不合法；`project.open` 时工程文件不是 UTF-8，或工程文件 / `.qgz` 每个成员解压后的总量超过 16 MB，或工程文件里任何元素的文本带 `://`/`/vsi`/UNC 前缀（或 `<datasource>` 文本是远程 URI），或某层的数据源不在 `allowed_data_roots` 内（这些层会被移除，整次 open 失败）；**默认空允许目录下所有文件访问都命中它** | 先配 `qgis_agent_plugin/allowed_*_roots`（见 `docs/INSTALL.md`）；消息里不会回显你的路径 |
 | `INVALID_LAYER` | `layer.add`、`layer.sum_numeric_field` | 图层构造后 `isValid()` 为假；求和的对象不是有效矢量图层 | 检查数据源本身；工程图层数不会变 |
 | `LAYER_NOT_FOUND` | `layer.get_info`、`layer.set_visibility`、`layer.sum_numeric_field` | 工程里没有这个 `layer_id` | 用 `layer.list` 拿真实 ID；同名的不同图层 ID 不同 |
 | `LAYER_NOT_IN_TREE` | `layer.set_visibility` | 图层已注册但没有图层树节点（`add_to_legend=false` 加进来的） | 不要对这样的图层调可见性；只能 `layer.get_info` |
-| `INVALID_FIELD_TYPE` | `layer.sum_numeric_field` | 没有这个字段，或字段不是整型/浮点 | 换字段名；文本字段不能求和 |
+| `INVALID_FIELD_TYPE` | `layer.sum_numeric_field` | 没有这个字段，或字段不是整型/浮点，或字段里存在 NaN/Infinity（这种值让结果不是合法 JSON，所以整次求和拒绝） | 换字段名；文本字段不能求和；非有限值需要先清洗数据 |
 | `SNAPSHOT_LIMIT_EXCEEDED` | `layer.sum_numeric_field` | 要素数超过 `max_snapshot_features`（默认 10000） | 该 Operation 只用于线程/取消验收，不为大图层设计；不要指望它静默截断 |
 | `TOO_MANY_EXECUTIONS` | 引擎 `submit` | 排队数超过 `max_pending`（默认 32）。实测：第 33 个 `submit` 拿到 `FAILED` | 等已有调用结束（`get` 轮询）再提交；请求不会被静默丢弃，而是明确失败 |
 | `TASK_SUBMISSION_FAILED` | 引擎 / 后台适配器 | 没有装后台适配器，或 `QgsTaskManager.addTask()` 返回 0（QGIS 拒绝接手） | 重试一次；持续失败说明 QGIS 任务系统有问题，`message` 里有原因类别 |

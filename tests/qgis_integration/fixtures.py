@@ -5,8 +5,9 @@ file here is generated from scratch: a GeoPackage holding two layers (one with a
 numeric field that has nulls), a raster, a valid QGZ, a QGZ whose only data source
 has been deleted, a corrupt GeoPackage, a corrupt QGZ, a file that already exists
 for the "do not overwrite" case, a directory outside the allowed roots, a
-junction inside them that points out, and two projects that name a remote
-datasource.  ``build`` deletes and rebuilds its own
+junction inside them that points out, two projects that name a remote
+datasource, and the projects and archives that made ``QgsProject.read()`` crash or
+walked past the pre-read scan (A2-A5).  ``build`` deletes and rebuilds its own
 directory, so a rerun needs no cleanup.
 
 Deleting and rebuilding is only allowed inside a root this script made itself, and
@@ -62,21 +63,33 @@ class UnsafeRoot(Exception):
 REMOTE_VSICURL = "/vsicurl/http://127.0.0.1:9/never.tif"
 REMOTE_UNC = r"\\no-such-host-audit\share\data.gpkg"
 
+# A remote source whose port a case owns, so it can count the connections itself
+# (AT-39): the datasource hides the end of its tag in an attribute value.
+REMOTE_LISTENER = "/vsicurl/http://127.0.0.1:{port}/never.tif"
+
 # One member of the oversized project expands to this many bytes: over the scan's
 # limit by far, and a few hundred KB on disk because it is all spaces (AT-33).
 BOMB_MEMBER_BYTES = 300 * 1024 * 1024
 
 # Shapes ``QgsProject.read()`` cannot survive, and the shapes the old scan could not
-# answer in time (AT-35..AT-37): 8000 nested elements overflow the parser's stack,
-# 984 KB of unclosed ``<datasource>`` made the regex backtrack for 661 s (measured),
-# and seventeen one-megabyte members are each under the limit but add up past it.
+# answer in time (AT-35..AT-37, AT-41): 8000 nested elements overflow the parser's
+# stack whether the depth is written plainly, inside CDATA, inside a comment, or with
+# the end of each tag hidden in an attribute; 984 KB of unclosed ``<datasource>`` made
+# the regex backtrack for 661 s (measured); and seventeen one-megabyte members are
+# each under the limit but add up past it.
 DEEP_PROJECT_LEVELS = 8_000
 UNCLOSED_DATASOURCES = 82_000
 BUDGET_MEMBER_BYTES = 1024 * 1024
 BUDGET_MEMBERS = 17
-# Just under the 16 MB scan budget, and millions of elements: refused after one
-# ``bytes.count``, not walked element by element (AT-38).
+# Just under the 16 MB scan budget, and millions of tags: refused after one
+# ``bytes.count``, not parsed element by element (AT-38).
 TAG_SPAM_PAIRS = 2_396_000
+# Layer tree nesting a project may carry: 100 groups are depth 105 in the written
+# XML (measured) and must open; the scan's limit is 1000 (AT-43).
+NESTED_GROUPS = 100
+# Labelled layers a normal project may carry: each label adds two tags whose
+# attribute value holds a bare ">", which the old scan counted as nesting (AT-40).
+LABELLED_LAYERS = 30
 
 
 @dataclass(frozen=True)
@@ -105,6 +118,12 @@ class Fixtures:
     unclosed_project: Path
     many_members: Path
     tag_spam: Path
+    hidden_depth_cdata: Path
+    hidden_depth_comment: Path
+    hidden_depth_attribute: Path
+    encrypted_sibling: Path
+    labelled: Path
+    grouped: Path
     escape: Path | None
 
 
@@ -236,6 +255,39 @@ def build(root: Path) -> Fixtures:
     tag_spam = data / "tag spam.qgs"
     tag_spam.write_bytes(b"<qgis>" + b"<a></a>" * TAG_SPAM_PAIRS + b"</qgis>")
 
+    # The same 8000 levels written so that a byte scan cannot see them (AT-41).
+    hidden_depth_cdata = data / "hidden depth cdata.qgs"
+    hidden_depth_cdata.write_bytes(
+        b"<qgis>"
+        + b"<a><![CDATA[</q>]]>" * DEEP_PROJECT_LEVELS
+        + b"</a>" * DEEP_PROJECT_LEVELS
+        + b"</qgis>"
+    )
+    hidden_depth_comment = data / "hidden depth comment.qgs"
+    hidden_depth_comment.write_bytes(
+        b"<qgis>"
+        + b"<a><!-- </q> -->" * DEEP_PROJECT_LEVELS
+        + b"</a>" * DEEP_PROJECT_LEVELS
+        + b"</qgis>"
+    )
+    hidden_depth_attribute = data / "hidden depth attribute.qgs"
+    hidden_depth_attribute.write_bytes(
+        b"<qgis>" + b'<a x="/>">' * DEEP_PROJECT_LEVELS + b"</a>" * DEEP_PROJECT_LEVELS + b"</qgis>"
+    )
+
+    # A real project plus a sibling member carrying the zip encryption flag: read()
+    # unpacks every member and dies on this one (AT-42).
+    encrypted_sibling = data / "encrypted sibling.qgz"
+    _write_encrypted_sibling(encrypted_sibling, raster)
+
+    # Two ordinary projects the scan may not refuse: one with 30 labelled layers
+    # (each label writes a bare ">" inside an attribute) and one with 100 nested
+    # layer-tree groups (AT-40, AT-43).
+    labelled = data / "labelled.qgs"
+    _write_labelled_project(labelled, cities, CITIES_LAYER, LABELLED_LAYERS)
+    grouped = data / "grouped.qgs"
+    _write_grouped_project(grouped, cities, CITIES_LAYER, NESTED_GROUPS)
+
     return Fixtures(
         root=data,
         cities=cities,
@@ -259,6 +311,12 @@ def build(root: Path) -> Fixtures:
         unclosed_project=unclosed_project,
         many_members=many_members,
         tag_spam=tag_spam,
+        hidden_depth_cdata=hidden_depth_cdata,
+        hidden_depth_comment=hidden_depth_comment,
+        hidden_depth_attribute=hidden_depth_attribute,
+        encrypted_sibling=encrypted_sibling,
+        labelled=labelled,
+        grouped=grouped,
         escape=_junction(data / "escape", outside),
     )
 
@@ -361,11 +419,30 @@ def _rewrite_datasource(path: Path, source: str) -> None:
     ``read()`` builds and reaches.
     """
 
+    _replace_first_datasource(path, f"<datasource>{source}</datasource>")
+
+
+def write_attribute_remote(path: Path, local_raster: Path, port: int) -> None:
+    """A real project whose datasource hides the end of its tag in an attribute.
+
+    ``<datasource x="/>" ...>`` is legal XML: the attribute value is ``/>``, so a
+    scanner that ends the tag at the first ``>`` sees a self-closing tag and never
+    reads the text after it -- which is a ``/vsicurl`` source the case makes its own
+    listener observable on (A5 #1, AT-39).
+    """
+
+    _write_project(path, [], [local_raster])
+    _replace_first_datasource(
+        path, f'<datasource x="/>">{REMOTE_LISTENER.format(port=port)}</datasource>'
+    )
+
+
+def _replace_first_datasource(path: Path, replacement: str) -> None:
     head, marker, layers = path.read_text(encoding="utf-8").partition("<projectlayers>")
     rewritten, replaced = re.subn(
         r"<datasource>[^<]*</datasource>",
         # A function, not a template: a UNC path is full of backslash escapes.
-        lambda _match: f"<datasource>{source}</datasource>",
+        lambda _match: replacement,
         layers,
         count=1,
     )
@@ -420,14 +497,96 @@ def _write_encrypted_project(path: Path, local_raster: Path) -> None:
     """
 
     _write_project(path, [], [local_raster])
+    _set_encryption_flag(path)
+
+
+def _write_encrypted_sibling(path: Path, local_raster: Path) -> None:
+    """A valid project plus a non-``.qgs`` member marked encrypted (AT-42).
+
+    ``QgsProject.read()`` unpacks every member of the archive, not only the ``.qgs``
+    one, so this shape ended the process with an access violation (measured).
+    """
+
+    _write_project(path, [], [local_raster])
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("extra.db", b"a sibling member that is not the project")
+    _set_encryption_flag(path, "extra.db")
+
+
+def _set_encryption_flag(path: Path, member: str | None = None) -> None:
+    """Set the zip encryption flag on one member (the first one when unnamed).
+
+    ``zipfile`` cannot write an encrypted member, so the flag is set on an otherwise
+    plain header; extracting that member then raises RuntimeError, exactly as a
+    password-protected member does.
+    """
+
     data = bytearray(path.read_bytes())
-    for signature, offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
-        start = data.find(signature)
-        if start < 0:
-            raise RuntimeError(f"could not find a zip header in {path}")
-        flags = int.from_bytes(data[start + offset : start + offset + 2], "little") | 1
-        data[start + offset : start + offset + 2] = flags.to_bytes(2, "little")
+    patched = 0
+    for signature, flag_at, length_at, name_at in (
+        (b"PK\x03\x04", 6, 26, 30),
+        (b"PK\x01\x02", 8, 28, 46),
+    ):
+        cursor = 0
+        while (start := data.find(signature, cursor)) >= 0:
+            cursor = start + 1
+            length = int.from_bytes(data[start + length_at : start + length_at + 2], "little")
+            name = bytes(data[start + name_at : start + name_at + length]).decode("utf-8")
+            if member is not None and name != member:
+                continue
+            flags = int.from_bytes(data[start + flag_at : start + flag_at + 2], "little") | 1
+            data[start + flag_at : start + flag_at + 2] = flags.to_bytes(2, "little")
+            patched += 1
+            if member is None:
+                break
+    if not patched:
+        raise RuntimeError(f"could not find {member or 'a member'} in {path}")
     path.write_bytes(bytes(data))
+
+
+def _write_labelled_project(path: Path, source: Path, sub_layer: str, count: int) -> None:
+    """A real project with ``count`` layers that each carry a default single label.
+
+    QGIS 3.44 escapes ``<``, ``&`` and ``"`` but not ``>``: every label writes two
+    tags whose attribute value holds a bare ``>`` (AT-40).
+    """
+
+    from qgis.core import (
+        QgsPalLayerSettings,
+        QgsTextFormat,
+        QgsVectorLayer,
+        QgsVectorLayerSimpleLabeling,
+    )
+
+    project = QgsProject()
+    for index in range(count):
+        layer = QgsVectorLayer(f"{source}|layername={sub_layer}", f"labelled {index}", "ogr")
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "name"
+        settings.setFormat(QgsTextFormat())
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        project.addMapLayer(layer, True)
+    if not project.write(str(path)):
+        raise RuntimeError(f"could not write {path}")
+    project.clear()
+
+
+def _write_grouped_project(path: Path, source: Path, sub_layer: str, groups: int) -> None:
+    """A real project whose one layer sits at the bottom of ``groups`` nested groups."""
+
+    from qgis.core import QgsVectorLayer
+
+    project = QgsProject()
+    layer = QgsVectorLayer(f"{source}|layername={sub_layer}", "grouped", "ogr")
+    project.addMapLayer(layer, True)
+    node = project.layerTreeRoot()
+    for index in range(groups):
+        node = node.addGroup(f"group {index}")
+    node.addLayer(layer)
+    if not project.write(str(path)):
+        raise RuntimeError(f"could not write {path}")
+    project.clear()
 
 
 def _junction(link: Path, target: Path) -> Path | None:

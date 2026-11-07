@@ -18,6 +18,7 @@ for both would make a toggle look like it failed (PRD 7.7, AT-21B).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -395,7 +396,15 @@ class LayerSumNumericField(
             if value is None or value == NULL:
                 skipped += 1
                 continue
-            values.append(float(value))
+            number = float(value)
+            if not math.isfinite(number):
+                # A record whose ``total`` is NaN or Infinity is not JSON an RFC 8259
+                # parser reads (measured: json.dumps(..., allow_nan=False) raises), so
+                # the sum refuses rather than deliver a result the caller cannot parse.
+                raise FrameworkError(
+                    INVALID_FIELD_TYPE, "the field holds a non-finite (NaN or infinite) value"
+                )
+            values.append(number)
         return FieldValues(
             layer_id=request.layer_id,
             field_name=request.field_name,

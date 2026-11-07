@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import time
+import tracemalloc
 import types
 import zipfile
 from pathlib import Path
@@ -291,15 +292,47 @@ def encoded_project(directory: Path, name: str, datasource: str) -> Path:
     return target
 
 
-def set_encryption_flag(path: Path) -> None:
-    """Mark the archive's one member as encrypted, which ``zipfile`` cannot write."""
+def set_encryption_flag(path: Path, member: str | None = None) -> None:
+    """Mark one archive member (the first by default) as encrypted.
+
+    ``zipfile`` cannot write an encrypted member, so the general purpose flag is set
+    on an otherwise plain archive; extracting that member then raises RuntimeError,
+    exactly as a password-protected member does.
+    """
 
     data = bytearray(path.read_bytes())
-    for signature, offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
-        start = data.find(signature)
-        assert start >= 0, "the archive has no local or central header"
-        flags = int.from_bytes(data[start + offset : start + offset + 2], "little") | 1
-        data[start + offset : start + offset + 2] = flags.to_bytes(2, "little")
+    patched = 0
+    for signature, flag_at, length_at, name_at in (
+        (b"PK\x03\x04", 6, 26, 30),
+        (b"PK\x01\x02", 8, 28, 46),
+    ):
+        cursor = 0
+        while (start := data.find(signature, cursor)) >= 0:
+            cursor = start + 1
+            length = int.from_bytes(data[start + length_at : start + length_at + 2], "little")
+            name = bytes(data[start + name_at : start + name_at + length]).decode("utf-8")
+            if member is not None and name != member:
+                continue
+            flags = int.from_bytes(data[start + flag_at : start + flag_at + 2], "little") | 1
+            data[start + flag_at : start + flag_at + 2] = flags.to_bytes(2, "little")
+            patched += 1
+            if member is None:
+                break
+    assert patched >= 2, f"could not patch the headers of {member!r}"
+    path.write_bytes(bytes(data))
+
+
+def lie_about_member_size(path: Path, size: int) -> None:
+    """Shrink a member's size in the central directory, the shape A5 #5 measured.
+
+    The directory is what a budget reads; the member itself is untouched, so
+    ``archive.read()`` still inflates all of it (437 MiB peak in the audit).
+    """
+
+    data = bytearray(path.read_bytes())
+    start = data.find(b"PK\x01\x02")
+    assert start >= 0, "the archive has no central header"
+    data[start + 24 : start + 28] = size.to_bytes(4, "little")
     path.write_bytes(bytes(data))
 
 
@@ -549,8 +582,7 @@ def test_open_replaces_a_stateful_project_when_explicitly_allowed(
     # PRD 7.3: `open` has the same guard as `create`, so the authorized branch has
     # to be exercised here too, not only through `create`.
     root = project_dir(tmp_path)
-    target = root / "a.qgs"
-    target.write_text("", encoding="utf-8")
+    target = qgs_file(root, "a.qgs", str(root / "a.gpkg"))
     loaded = FakeProject(layers={"old": FakeLayer()}, file_name="C:/maps/old.qgs", dirty=True)
     ctx = context(loaded, roots=(root,))
 
@@ -872,11 +904,12 @@ def test_a_qgs_over_the_scan_limit_is_refused_without_reading_it(
     assert "too large" in failed.message
 
 
-def test_a_qgz_member_over_the_scan_limit_is_refused_before_it_is_unpacked(
+def test_a_qgz_member_over_the_scan_limit_is_refused_while_it_is_unpacked(
     qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A small archive can hold a member that expands to gigabytes; the declared
-    # size is checked before the member is decompressed into memory.
+    # A small archive can hold a member that expands to gigabytes.  The budget counts
+    # the bytes as they are decompressed and stops at the limit, so the member is
+    # never held whole (the check used to read the declared size; A5 #5).
     root = project_dir(tmp_path)
     target = root / "bomb.qgz"
     with (
@@ -885,10 +918,15 @@ def test_a_qgz_member_over_the_scan_limit_is_refused_before_it_is_unpacked(
     ):
         member.write(b" " * (project.MAX_PROJECT_BYTES + 1))
 
-    def read(self: zipfile.ZipFile, name: str) -> bytes:
-        raise AssertionError(f"the archive member {name} was unpacked before it was measured")
+    unpacked: list[int] = []
+    original = zipfile.ZipExtFile.read
 
-    monkeypatch.setattr(zipfile.ZipFile, "read", read)
+    def counting(self: zipfile.ZipExtFile, size: int = -1) -> bytes:
+        data = original(self, size)
+        unpacked.append(len(data))
+        return data
+
+    monkeypatch.setattr(zipfile.ZipExtFile, "read", counting)
     ctx = context(FakeProject(), roots=(root,))
 
     failed = refused(
@@ -899,6 +937,7 @@ def test_a_qgz_member_over_the_scan_limit_is_refused_before_it_is_unpacked(
     )
 
     assert "too large" in failed.message
+    assert sum(unpacked) <= project.MAX_PROJECT_BYTES + project._CHUNK
 
 
 def test_a_qgz_over_the_total_scan_budget_is_refused_before_members_are_unpacked(
@@ -999,14 +1038,13 @@ def test_a_project_nested_up_to_the_depth_bound_is_still_read(
 def test_a_one_megabyte_flat_project_is_scanned_linearly(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # A file that passes the element bound has to be walked to its end; a single
-    # linear pass means a megabyte of ordinary elements costs milliseconds, not a
-    # rescan per element.
+    # A file that passes the tag bound has to be parsed to its end; one linear parse
+    # means a megabyte of ordinary elements costs milliseconds, not a rescan each.
     root = project_dir(tmp_path)
     target = root / "flat.qgs"
     target.write_bytes(b"<qgis>" + b"<layer></layer>" * 69_915 + b"</qgis>")
     assert target.stat().st_size > 1024 * 1024
-    assert target.read_bytes().count(b"<") < project.MAX_PROJECT_ELEMENTS
+    assert target.read_bytes().count(b"<") < project.MAX_PROJECT_TAGS
     loaded = FakeProject()
     ctx = context(loaded, roots=(root,))
 
@@ -1018,14 +1056,14 @@ def test_a_one_megabyte_flat_project_is_scanned_linearly(
     assert elapsed < 1.0, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
 
 
-def test_a_project_with_more_elements_than_the_scan_will_walk_is_refused(
+def test_a_project_with_more_tags_than_the_scan_will_parse_is_refused(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # One Python step per element is the scan's cost, so tag spam that no QGIS project
-    # looks like is refused after a single ``bytes.count``, not a second-long walk.
+    # The parse costs one step per element, so tag spam that no QGIS project looks
+    # like is refused after a single ``bytes.count``, not a second-long parse.
     root = project_dir(tmp_path)
     target = root / "spam.qgs"
-    target.write_bytes(b"<qgis>" + b"<a></a>" * (project.MAX_PROJECT_ELEMENTS // 2 + 1))
+    target.write_bytes(b"<qgis>" + b"<a></a>" * (project.MAX_PROJECT_TAGS // 2 + 1))
     loaded = FakeProject()
     ctx = context(loaded, roots=(root,))
 
@@ -1039,8 +1077,283 @@ def test_a_project_with_more_elements_than_the_scan_will_walk_is_refused(
     elapsed = time.monotonic() - started
 
     assert loaded.read_path is None
-    assert "XML elements" in failed.message
+    assert "XML tags" in failed.message
     assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
+
+
+# The XML shapes that walked past four byte scanners.  Each one really nests
+# ``HIDDEN_DEPTH`` elements, and each one is legal XML: a fake close tag inside CDATA
+# or a comment is not a tag, and a bare ">" inside a quoted attribute does not end
+# one (measured: 184 KB was accepted and read() died with 0xC00000FD).
+HIDDEN_DEPTH = 2000
+DEPTH_SHAPES = {
+    "cdata": (b"<a><![CDATA[</q>]]>", b"</a>"),
+    "comment": (b"<a><!-- </q> -->", b"</a>"),
+    "attribute": (b'<a x="/>">', b"</a>"),
+}
+
+# Two tags QGIS 3.44 writes with a bare ">" inside an attribute value: the default
+# right-direction symbol, and the label's line symbol, whose escaped <symbol> XML is
+# one attribute value (measured on a project with one labelled layer).
+QGIS_LABEL_TAGS = (
+    b'<text-format wrapChar="" rightDirectionSymbol=">"/>',
+    b'<Option type="QString" name="lineSymbol" value="&lt;symbol type=&quot;line&quot; '
+    b'alpha=&quot;1&quot;>&lt;/symbol>"/>',
+)
+
+
+@pytest.mark.parametrize("shape", sorted(DEPTH_SHAPES))
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_depth_hidden_by_cdata_a_comment_or_an_attribute(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str, shape: str
+) -> None:
+    # The old counter was +1 per opening tag and -1 per closing one, over the raw
+    # bytes: a fake </q> in CDATA or a comment pressed it down, so 184 KB of real
+    # 8000-level nesting was accepted and read() overflowed the stack (measured).
+    opening, closing = DEPTH_SHAPES[shape]
+    body = b"<qgis>" + opening * HIDDEN_DEPTH + closing * HIDDEN_DEPTH + b"</qgis>"
+    root = project_dir(tmp_path)
+    if suffix == ".qgz":
+        target = qgz_bytes(root, f"hidden{suffix}", body)
+    else:
+        target = root / f"hidden{suffix}"
+        target.write_bytes(body)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path is None
+    assert "nests deeper" in failed.message
+    assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+@pytest.mark.parametrize(
+    "remote",
+    [REMOTE_SOURCE, r"\\no-such-host-audit\share\data.gpkg"],
+    ids=["vsi", "unc"],
+)
+def test_open_sees_a_datasource_whose_attribute_hides_its_tag_end(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str, remote: str
+) -> None:
+    # `<datasource x="/>" ...>` is legal XML; the first ">" is inside the attribute.
+    # The old scan took it for a self-closing tag, never looked at the text, and
+    # read() reached the /vsicurl source (measured, 9 TCP connections in 0.08 s).
+    xml = (
+        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
+        f'<datasource x="/>">{remote}</datasource>'
+        "</maplayer></projectlayers></qgis>"
+    )
+    root = project_dir(tmp_path)
+    if suffix == ".qgz":
+        target = qgz_bytes(root, f"hidden{suffix}", xml.encode("utf-8"))
+    else:
+        target = root / f"hidden{suffix}"
+        target.write_text(xml, encoding="utf-8")
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=remote)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+    assert remote not in failed.message
+
+
+def test_open_refuses_a_remote_uri_wherever_the_project_keeps_it(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # Renaming the element must not put the URI past the scan: every element's text
+    # is asked the same question the datasource element is.
+    root = project_dir(tmp_path)
+    xml = (
+        "<qgis><projectlayers><maplayer>"
+        f"<sourceLocation>{REMOTE_SOURCE}</sourceLocation>"
+        "</maplayer></projectlayers></qgis>"
+    )
+    target = root / "renamed.qgs"
+    target.write_text(xml, encoding="utf-8")
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+def test_open_refuses_a_datasource_in_a_namespace(qgis: types.ModuleType, tmp_path: Path) -> None:
+    # The element is a datasource to QGIS whatever prefix it carries, so the scan
+    # compares local names rather than bytes.
+    root = project_dir(tmp_path)
+    target = qgs_file(root, "namespaced.qgs", REMOTE_SOURCE)
+    target.write_text(
+        '<qgis xmlns:qgs="http://qgis.org/x"><qgs:datasource>'
+        f"{REMOTE_SOURCE}</qgs:datasource></qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+def test_a_project_that_is_not_well_formed_xml_is_refused_before_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # A file the parser cannot read is not a project; it is refused with the sentence
+    # read() would have produced, rather than handed to a parser that has crashed on
+    # this class of input before.
+    root = project_dir(tmp_path)
+    target = root / "broken.qgs"
+    target.write_bytes(b"<qgis><projectlayers></qgis>")
+    loaded = FakeProject(read_result=False)
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "may have changed" in failed.message
+
+
+def test_open_reads_a_project_with_the_attributes_qgis_itself_writes(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # QGIS escapes <, & and ", not >: a labelled layer carries two tags with a bare
+    # ">" inside an attribute.  The old scan ended a tag there and added a level that
+    # never came back, so 28 labelled layers were permanently refused (measured).
+    root = project_dir(tmp_path)
+    sample = b"".join(tag * 70 for tag in QGIS_LABEL_TAGS)
+    target = root / "labelled.qgs"
+    target.write_bytes(
+        b"<qgis><projectlayers><maplayer><srs><authid>EPSG:4326</authid></srs>"
+        b"<labeling><settings>" + sample + b"</settings></labeling>"
+        b"<datasource>" + str(root / "a.gpkg").encode() + b"</datasource>"
+        b"</maplayer></projectlayers></qgis>"
+    )
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert loaded.read_path == str(target)
+
+
+def test_open_refuses_an_archive_whose_sibling_member_is_encrypted(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # read() unpacks every member, not only the .qgs ones: an encrypted extra.db took
+    # the process down with 0xC0000005 (measured).  Every member is checked now.
+    root = project_dir(tmp_path)
+    target = root / "sibling.qgz"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("project.qgs", project_xml(str(root / "a.gpkg")))
+        archive.writestr("extra.db", b"a sibling member read() also unpacks")
+    set_encryption_flag(target, "extra.db")
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "may have changed" in failed.message
+
+
+def test_open_refuses_a_member_compressed_in_a_way_qgis_does_not_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``zipfile`` reads bzip2; QGIS's unzip is only known to read stored and deflated
+    # members, so an archive it may not survive is refused before read() gets it.
+    root = project_dir(tmp_path)
+    target = root / "bzip2.qgz"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_BZIP2) as archive:
+        archive.writestr("project.qgs", project_xml(str(root / "a.gpkg")))
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "may have changed" in failed.message
+
+
+def test_a_member_that_lies_about_its_size_is_not_read_in_one_piece(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The directory said 100 bytes and the member was 192 MB of spaces: the old budget
+    # believed the directory, then archive.read() inflated the whole member (measured
+    # peak 437 MiB for a 204 KB archive).  The scan reads in chunks and counts what it
+    # decompressed, so the member is never held whole.
+    root = project_dir(tmp_path)
+    target = root / "lying.qgz"
+    chunk = b" " * (1024 * 1024)
+    with (
+        zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive,
+        archive.open("project.qgs", "w") as member,
+    ):
+        for _ in range(192):
+            member.write(chunk)
+    assert target.stat().st_size < project.MAX_PROJECT_BYTES // 8
+    lie_about_member_size(target, 100)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    tracemalloc.start()
+    try:
+        failed = refused(
+            PROJECT_OPEN_FAILED,
+            lambda: project.ProjectOpen().execute_main(
+                ctx, project.ProjectOpenParams(path=str(target))
+            ),
+        )
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert loaded.read_path is None
+    assert "may have changed" in failed.message
+    assert peak < 64 * 1024 * 1024, f"the scan peaked at {peak / 1024 / 1024:.1f} MiB"
 
 
 def test_open_still_reads_a_project_whose_datasource_is_a_relative_path(

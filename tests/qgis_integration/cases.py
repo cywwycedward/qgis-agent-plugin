@@ -13,6 +13,7 @@ destructive case).
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 from functools import partial
@@ -45,6 +46,7 @@ from qgis_agent_plugin.core.models import (
     ENGINE_CLOSING,
     EXECUTION_NOT_FOUND,
     INTERNAL_ERROR,
+    INVALID_FIELD_TYPE,
     INVALID_INPUT,
     INVALID_LAYER,
     OUTPUT_VALIDATION_FAILED,
@@ -70,6 +72,7 @@ from qgis_agent_plugin.operations.layer import (
     LayerSumNumericField,
     SumNumericFieldParams,
 )
+from qgis_agent_plugin.operations.project import MAX_PROJECT_DEPTH
 from qgis_agent_plugin.plugin import read_settings
 
 LIVE_STATUSES = [
@@ -1273,7 +1276,8 @@ def at_33_open_refuses_an_oversized_member_before_unpacking_it(ctx: Context) -> 
     reset_project(ctx)
     return (
         f"a {on_disk} byte QGZ whose member declares 300 MB: FAILED(PATH_NOT_ALLOWED) in "
-        f"{elapsed * 1000:.0f} ms, before the member was unpacked; the old project kept its layer"
+        f"{elapsed * 1000:.0f} ms, after at most the 16 MB budget was decompressed; the old "
+        "project kept its layer"
     )
 
 
@@ -1411,9 +1415,9 @@ def at_37_open_refuses_a_qgz_over_the_total_budget(ctx: Context) -> str:
     return (
         f"a {on_disk} byte QGZ with {fixtures.BUDGET_MEMBERS} one-megabyte .qgs members "
         f"(each under 16 MB, {fixtures.BUDGET_MEMBERS} MB together): "
-        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms with no member unpacked; "
-        "the old per-member check accepted this shape and read every member (measured "
-        "peak 200 MB for 100 members)"
+        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms, after at most the 16 MB budget "
+        "was decompressed; the old per-member check accepted this shape and read every "
+        "member (measured peak 200 MB for 100 members)"
     )
 
 
@@ -1440,7 +1444,7 @@ def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
     error = record.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require("XML elements" in error.message, f"the message: {error.message!r}")
+    require("XML tags" in error.message, f"the message: {error.message!r}")
     require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s")
     equal(project_layer_ids(), before, "the project's layers after the refusal")
     equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
@@ -1448,7 +1452,226 @@ def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
     return (
         f"a {on_disk} byte project of {fixtures.TAG_SPAM_PAIRS} empty elements: "
         f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, one bytes.count over "
-        "the bytes; a per-element walk would have held the main thread for seconds"
+        "the bytes; a parse per element would have held the main thread for seconds"
+    )
+
+
+def at_39_open_refuses_a_datasource_hidden_by_an_attribute(ctx: Context) -> str:
+    """A ``>`` inside an attribute value is legal XML, not the end of the tag (A5 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at39 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    target = ctx.fixtures.root / "attribute source.qgs"
+    fixtures.write_attribute_remote(target, ctx.fixtures.raster, port)
+
+    connections = 0
+    started = time.monotonic()
+    try:
+        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+        elapsed = time.monotonic() - started
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            pass
+        else:
+            connections += 1
+            connection.close()
+    finally:
+        listener.close()
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on an attribute-hidden source")
+    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an attribute-hidden source")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("remote data source" in error.message, f"the message: {error.message!r}")
+    equal(connections, 0, "TCP connections made while the project was opened")
+    require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        '<datasource x="/>">/vsicurl/http://127.0.0.1:<a port this case listens on>: '
+        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms with {connections} TCP "
+        "connections; the old scan ended the tag at the first >, accepted, and read() made 9 "
+        "connections in 0.08 s (measured). The old project kept its layer"
+    )
+
+
+def at_40_open_reads_a_project_with_labelled_layers(ctx: Context) -> str:
+    """A ``>`` inside an attribute is what QGIS itself writes for every label (A5 #2)."""
+
+    reset_project(ctx)
+    on_disk = ctx.fixtures.labelled.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run("project.open", {"path": str(ctx.fixtures.labelled), "discard_current": True})
+    elapsed = time.monotonic() - started
+
+    equal(
+        record.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open on a project with labelled layers",
+    )
+    values = result_of(record)
+    equal(
+        values["layer_count"],
+        fixtures.LABELLED_LAYERS,
+        "the layers the labelled project holds",
+    )
+    equal(values["invalid_layer_count"], 0, "the invalid layers of the labelled project")
+    require(elapsed < 2.0, f"the {on_disk} byte project took {elapsed:.2f}s")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte project with {fixtures.LABELLED_LAYERS} labelled layers: SUCCEEDED "
+        f"with {values['layer_count']} layers in {elapsed * 1000:.0f} ms. The old counter "
+        "drifted +2 per labelled layer and refused 28 of them (measured); the parser counts "
+        "elements, and every label tag is one"
+    )
+
+
+def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
+    ctx: Context,
+) -> str:
+    """The three shapes that held the old depth counter down (A5 #3)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at41 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    timings: list[str] = []
+    for label, target in (
+        ("CDATA", ctx.fixtures.hidden_depth_cdata),
+        ("a comment", ctx.fixtures.hidden_depth_comment),
+        ("an attribute", ctx.fixtures.hidden_depth_attribute),
+    ):
+        on_disk = target.stat().st_size
+        started = time.monotonic()
+        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+        elapsed = time.monotonic() - started
+        equal(record.status, ExecutionStatus.FAILED, f"project.open on depth hidden by {label}")
+        equal(error_code(record), PROJECT_OPEN_FAILED, f"the code for {label}")
+        error = record.error
+        if error is None:
+            raise AssertionError("a failed record carries an error")
+        require("nests deeper" in error.message, f"the message for {label}: {error.message!r}")
+        require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s")
+        equal(project_layer_ids(), before, f"the project's layers after {label}")
+        equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
+        timings.append(f"{label} {on_disk} bytes {elapsed * 1000:.0f} ms")
+    reset_project(ctx)
+    return (
+        f"{'; '.join(timings)}: FAILED(PROJECT_OPEN_FAILED) with 'nests deeper' before read(). "
+        "The audit measured read() exit code -1073741571 (0xC00000FD) on all three; this "
+        "process is still answering and the old project kept its layer"
+    )
+
+
+def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context) -> str:
+    """``read()`` unpacks every member, not only the ``.qgs`` one (A5 #4)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at42 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    on_disk = ctx.fixtures.encrypted_sibling.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.encrypted_sibling), "discard_current": True},
+    )
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on an encrypted sibling member")
+    equal(error_code(record), PROJECT_OPEN_FAILED, "the code for an encrypted sibling member")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("may have changed" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 0.5, f"the {on_disk} byte archive took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte QGZ whose extra.db carries the encryption flag: "
+        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, before read(). The audit "
+        "measured read() exit code -1073741819 (0xC0000005) on this shape; this process is "
+        "still answering and the old project kept its layer"
+    )
+
+
+def at_43_open_reads_a_project_with_a_deep_group_tree(ctx: Context) -> str:
+    """A depth limit that a real group tree never reaches (A5 #2)."""
+
+    reset_project(ctx)
+    on_disk = ctx.fixtures.grouped.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run("project.open", {"path": str(ctx.fixtures.grouped), "discard_current": True})
+    elapsed = time.monotonic() - started
+
+    equal(
+        record.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open on a project with a deep layer-tree group",
+    )
+    values = result_of(record)
+    equal(values["layer_count"], 1, "the layers of the grouped project")
+    require(elapsed < 2.0, f"the {on_disk} byte project took {elapsed:.2f}s")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte project with {fixtures.NESTED_GROUPS} nested layer-tree groups "
+        f"(depth 105 in the written XML, measured): SUCCEEDED with {values['layer_count']} "
+        f"layer in {elapsed * 1000:.0f} ms; the scan's limit is {MAX_PROJECT_DEPTH} levels"
+    )
+
+
+def at_44_field_sum_refuses_a_non_finite_value(ctx: Context) -> str:
+    """NaN and Infinity are not JSON, so a sum over them refuses (A5 #6)."""
+
+    from qgis.core import QgsFeature, QgsProject, QgsVectorLayer
+
+    reset_project(ctx)
+    layer = QgsVectorLayer("Point?crs=EPSG:4326&field=n:double", "at44 non finite", "memory")
+    features = []
+    for value in (1.0, float("nan"), float("inf")):
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([value])
+        features.append(feature)
+    layer.dataProvider().addFeatures(features)
+    layer.updateExtents()
+    QgsProject.instance().addMapLayer(layer)
+
+    submitted = ctx.submit("layer.sum_numeric_field", {"layer_id": layer.id(), "field_name": "n"})
+    record = ctx.wait_terminal(submitted.execution_id)
+
+    equal(record.status, ExecutionStatus.FAILED, "the sum of a field holding NaN")
+    equal(error_code(record), INVALID_FIELD_TYPE, "the code for a non-finite value")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("non-finite" in error.message, f"the message: {error.message!r}")
+    require(record.result is None, "a failed sum delivered a result")
+    reset_project(ctx)
+    return (
+        "a memory layer with values (1.0, nan, inf): FAILED(INVALID_FIELD_TYPE) with 'the field "
+        "holds a non-finite ...' and no result. The audit measured total=nan in a SUCCEEDED "
+        "record, and json.dumps(..., allow_nan=False) refuses that record"
     )
 
 
@@ -1496,4 +1719,10 @@ CASES = (
     ("AT-36", at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds),
     ("AT-37", at_37_open_refuses_a_qgz_over_the_total_budget),
     ("AT-38", at_38_open_refuses_a_tag_spam_project_in_milliseconds),
+    ("AT-39", at_39_open_refuses_a_datasource_hidden_by_an_attribute),
+    ("AT-40", at_40_open_reads_a_project_with_labelled_layers),
+    ("AT-41", at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes),
+    ("AT-42", at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted),
+    ("AT-43", at_43_open_reads_a_project_with_a_deep_group_tree),
+    ("AT-44", at_44_field_sum_refuses_a_non_finite_value),
 )

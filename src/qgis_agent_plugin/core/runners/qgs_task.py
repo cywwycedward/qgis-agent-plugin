@@ -54,8 +54,6 @@ _LOGGER = logging.getLogger(__name__)
 # would leave a finished record short of what the worker actually reached.
 PROGRESS_INTERVAL_SECONDS = 0.1
 
-_UNSET = object()
-
 
 class OperationRun:
     """What one worker produced, kept apart from the ``QgsTask`` that carried it.
@@ -68,7 +66,7 @@ class OperationRun:
     def __init__(self, operation: BaseOperation, snapshot: Any) -> None:
         self._operation = operation
         self._snapshot = snapshot
-        self.result: Any = _UNSET
+        self.result: Any = None
         self.error: BaseException | None = None
 
     def run(self, control: TaskControl) -> bool:

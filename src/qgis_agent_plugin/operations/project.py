@@ -17,8 +17,9 @@ in a bare interpreter and the path/CRS rules stay testable without QGIS.
 
 from __future__ import annotations
 
+import io
+import xml.etree.ElementTree as ET
 import zipfile
-from html import unescape
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -47,21 +48,40 @@ from ..core.security import is_remote_uri, resolve_path
 # The two formats this plugin reads and writes; anything else is a caller mistake.
 PROJECT_SUFFIXES = (".qgs", ".qgz")
 
-# A ``.qgs``, or all the ``.qgs`` members of a ``.qgz`` together, larger than this is
-# refused rather than read: the scan runs on the main thread, and a small archive can
-# hold members that expand to gigabytes.  Real project files are far smaller.
+# A ``.qgs``, or every member of a ``.qgz`` together, larger than this is refused
+# rather than read: the scan runs on the main thread, and a small archive can hold
+# members that expand to gigabytes.  Real project files are far smaller.
 MAX_PROJECT_BYTES = 16 * 1024 * 1024
 
 # An XML nesting depth above this is refused before ``read()``.  ``QgsProject.read()``
-# parses the project recursively, and a 56 KB, 8000-level ``.qgs`` overflowed the C++
-# stack and killed the whole process with no error code and no record (measured,
-# 0xC00000FD).  A real project nests about six elements deep.
-MAX_PROJECT_DEPTH = 64
+# parses the project recursively; on this machine (QGIS 3.44.13, Windows x64, default
+# stack) 5500 nested elements still opened and 6000 killed the process with 0xC00000FD
+# (measured, one probe per depth).  100 nested layer-tree groups -- a real project
+# QGIS writes -- are depth 105, so this is ten times a project QGIS writes and five
+# times below the smallest depth that was measured to crash.
+MAX_PROJECT_DEPTH = 1000
 
-# The scan takes one step per element, so this bounds its worst case.  A 16 MB project
-# of real QGIS XML holds about a tenth of this; the files above it are tag spam, not
-# projects, and are refused after one ``bytes.count`` instead of a per-element walk.
-MAX_PROJECT_ELEMENTS = 200_000
+# The parser is asked about at most this many tags.  Every element has one start tag,
+# so ``bytes.count(b"<")`` is an upper bound on the element count: one memchr pass
+# bounds the parse before it starts (400000 tags parse in 0.12-0.19 s, measured).  An
+# ordinary 16 MB project holds 260000-390000 tags -- 42.6 to 61 bytes per tag in the
+# measured projects -- so this bound leaves a real project under it; tag spam is
+# refused by the count and never walked.
+MAX_PROJECT_TAGS = 400_000
+
+# What ``QgsProject.read()`` does with a ``.qgz``: it unpacks the whole archive, so a
+# member it cannot extract is not a member the scan may skip.  Encrypted members and
+# compression methods QGIS does not read are refused before ``read()`` sees the file.
+_ZIP_ENCRYPTED = 0x1
+_UNPACKABLE = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+
+# One read from an archive member.  The budget counts these bytes as they are
+# decompressed, never the size the manifest claims.
+_CHUNK = 1024 * 1024
+
+# What ``read()`` reports for a file it cannot parse; the scan uses the same sentence
+# rather than inventing an error of its own.
+_READ_FAILED = "the project file could not be read; the current project may have changed"
 
 
 def _project_path(raw: str) -> str:
@@ -275,151 +295,134 @@ def _refuse_remote_datasources(path: Path) -> None:
     """
 
     try:
-        _scan_project_text(_project_text(path))
+        for document in _project_documents(path):
+            _scan_project_xml(document)
     except FrameworkError:
         raise
     except (OSError, zipfile.BadZipFile):
-        # A file this scan cannot parse is what ``read()`` reports as
+        # A file this scan cannot open is what ``read()`` reports as
         # PROJECT_OPEN_FAILED; the scan is not a new failure source of its own.
         return
-    except Exception:  # noqa: BLE001 - a member the scan cannot extract
-        # An encrypted member, or a compression ``zipfile`` does not know: QGIS 3.44
-        # crashes inside ``read()`` on such an archive (measured, access violation),
-        # so it is not handed over.  The caller still gets the code ``read()`` would
-        # have produced, not INTERNAL_ERROR.
-        raise FrameworkError(
-            PROJECT_OPEN_FAILED,
-            "the project file could not be read; the current project may have changed",
-        ) from None
+    except Exception:  # noqa: BLE001 - a zipfile failure the checks did not predict
+        # The caller still gets the code ``read()`` would have produced, not an
+        # INTERNAL_ERROR that reads like a plugin defect.
+        raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
 
 
-def _project_text(path: Path) -> bytes:
-    """The bytes to scan: a ``.qgs``, or every ``.qgs`` member of a ``.qgz``.
+def _project_documents(path: Path) -> list[bytes]:
+    """The XML to parse: a ``.qgs``, or each ``.qgs`` member of a ``.qgz``.
 
-    The budget is the total, not each member: a 112 KB archive holding 100 one-megabyte
-    members passed the per-member check, was read into one list and joined into a
-    second copy, and peaked at 200 MB (measured).
+    Every member of an archive is decompressed, not only the ``.qgs`` ones: ``read()``
+    unpacks the whole archive, so a member it cannot extract ends the process
+    (measured, 0xC0000005 on an encrypted sibling member), and the budget has to count
+    the bytes actually decompressed rather than the sizes the manifest claims
+    (measured, 437 MiB peak for a 204 KB archive that declared 100 bytes).  The budget
+    is the total, not each member: 100 one-megabyte members of a 112 KB archive passed
+    a per-member check and were held twice over (measured, 200 MB).
     """
 
-    if path.suffix.lower() == ".qgz":
-        with zipfile.ZipFile(path) as archive:
-            members = [name for name in archive.namelist() if name.lower().endswith(".qgs")]
-            _refuse_if_too_large(sum(archive.getinfo(name).file_size for name in members))
-            chunks = [archive.read(name) for name in members]
-        return b"\n".join(chunks)
-    _refuse_if_too_large(path.stat().st_size)
-    return path.read_bytes()
+    if path.suffix.lower() != ".qgz":
+        _refuse_if_too_large(path.stat().st_size)
+        return [path.read_bytes()]
+
+    documents: list[bytes] = []
+    total = 0
+    with zipfile.ZipFile(path) as archive:
+        for member in archive.infolist():
+            if member.flag_bits & _ZIP_ENCRYPTED or member.compress_type not in _UNPACKABLE:
+                raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED)
+            kept = bytearray() if member.filename.lower().endswith(".qgs") else None
+            try:
+                with archive.open(member) as handle:
+                    while chunk := handle.read(_CHUNK):
+                        total += len(chunk)
+                        _refuse_if_too_large(total)
+                        if kept is not None:
+                            kept.extend(chunk)
+            except (RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                # A member the manifest did not announce as unreadable (encrypted, or
+                # a size its own stream does not honour) is not handed to ``read()``.
+                raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
+            if kept is not None:
+                documents.append(bytes(kept))
+    return documents
 
 
-_SLASH = 0x2F  # the byte ``text[i]`` returns, so no slice is built per tag
-_LOWER_D = 0x64
-_UPPER_D = 0x44
-_NAME_END = b" \t\r\n/>"
+def _scan_project_xml(text: bytes) -> None:
+    """Refuse the project XML that must not reach ``read()``, answered by a parser.
 
+    Four rounds of byte scanners were walked past by legal XML -- a ``>`` inside an
+    attribute value, a fake close tag inside a comment or CDATA, a depth counter that
+    a label QGIS itself writes inflated -- so the parser answers the questions now:
+    which elements the file holds, what their text is, and how deep they nest.
+    Comments and CDATA sections are not elements and add no depth, and a self-closing
+    ``<a x="/>" .../>`` is the one element it is.
 
-def _scan_project_text(text: bytes) -> None:
-    """Refuse the bytes that must not reach ``read()``, in one linear pass.
-
-    Three refusals share the pass: a NUL byte (the file is not UTF-8), XML nesting
-    deeper than ``MAX_PROJECT_DEPTH``, and a ``<datasource>`` naming a remote source.
-    A fourth, ``MAX_PROJECT_ELEMENTS``, is one ``bytes.count`` before the walk: it
-    bounds the per-element work on tag spam that is not a project at all.
-    Every ``find`` starts where the previous one stopped and every tag is skipped by
-    jumping past its ``>``, so the cost is linear in the byte count.  The regex this
-    replaced searched from every ``<datasource`` to the end of the file: 984 KB of
-    unclosed tags took 661 s on the main thread and matched nothing (measured).
-
-    The depth is an estimate, not a parse: a ``<`` inside CDATA or a comment counts as
-    an opening tag, so it can only refuse a file sooner, never let a deep one through.
+    The depth is refused while the file is parsed; a file that does not parse is not
+    a project, and it is refused with the sentence ``read()`` would have produced.  A
+    NUL byte still means the file is not UTF-8 (UTF-16), which QDomDocument would read
+    but this scan does not decode; the tag count is one ``bytes.count`` so tag spam is
+    refused before it is walked.
     """
 
     if b"\x00" in text:
         raise FrameworkError(PATH_NOT_ALLOWED, "the project file is not UTF-8; it was not opened")
-    if text.count(b"<") > MAX_PROJECT_ELEMENTS:
+    if text.count(b"<") > MAX_PROJECT_TAGS:
         raise FrameworkError(
             PROJECT_OPEN_FAILED,
-            f"the project file has more than {MAX_PROJECT_ELEMENTS} XML elements; "
-            "it was not opened",
+            f"the project file has more than {MAX_PROJECT_TAGS} XML tags; it was not opened",
         )
 
     depth = 0
-    source_start = -1
-    cursor = 0
-    length = len(text)
-    while True:
-        start = text.find(b"<", cursor)
-        if start < 0:
-            return
-        cursor = start + 1
-        if cursor >= length:
-            return
-        following = text[cursor]
-        if following == _SLASH:
-            end = text.find(b">", cursor)
-            if end < 0:
-                return
-            cursor = end + 1
-            depth = depth - 1 if depth else 0
-            if source_start >= 0 and _is_datasource(text, start + 2):
-                _refuse_if_remote(text[source_start:start])
-                source_start = -1
-        elif 0x41 <= following <= 0x5A or 0x61 <= following <= 0x7A:
-            end = text.find(b">", start + 1)
-            if end < 0:
-                return
-            cursor = end + 1
-            if text[end - 1] == _SLASH:
-                # ``<x/>`` opens and closes at once, so it adds no depth.
+    try:
+        for event, element in ET.iterparse(io.BytesIO(text), events=("start", "end")):
+            if event == "start":
+                depth += 1
+                if depth > MAX_PROJECT_DEPTH:
+                    raise FrameworkError(
+                        PROJECT_OPEN_FAILED,
+                        "the project file nests deeper than "
+                        f"{MAX_PROJECT_DEPTH} levels; it was not opened",
+                    )
                 continue
-            depth += 1
-            if depth > MAX_PROJECT_DEPTH:
-                raise FrameworkError(
-                    PROJECT_OPEN_FAILED,
-                    "the project file nests deeper than "
-                    f"{MAX_PROJECT_DEPTH} levels; it was not opened",
-                )
-            if (
-                source_start < 0
-                and following in (_LOWER_D, _UPPER_D)
-                and _is_datasource(text, start + 1)
-            ):
-                source_start = end + 1
+            depth -= 1
+            # An element's own text is complete when it ends; its children were
+            # already answered when they ended, so the subtree can be dropped here.
+            _refuse_if_remote_text(element)
+            element.clear()
+    except ET.ParseError:
+        raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
 
 
-def _is_datasource(text: bytes, start: int) -> bool:
-    """Whether the tag name at ``start`` is ``datasource``, in any case.
+def _refuse_if_remote_text(element: ET.Element) -> None:
+    """Refuse an element whose text would make ``read()`` reach the network.
 
-    Only tags whose first byte is ``d`` or ``D`` reach this, so the slice is built
-    once per datasource rather than once per tag.
+    ``datasource`` is the element QGIS takes a layer's source from, whatever its
+    namespace or case; the markers are also asked of every other element's text, so
+    renaming the carrier does not put the URI past the scan.  The parser has decoded
+    character references by now, so ``&#47;vsicurl&#47;`` reads as the path it names.
     """
 
-    return text[start : start + 10].lower() == b"datasource" and (
-        start + 10 == len(text) or text[start + 10] in _NAME_END
-    )
-
-
-def _refuse_if_remote(raw: bytes) -> None:
-    """Refuse a datasource whose text would make ``read()`` reach the network.
-
-    XML character references are what QGIS decodes before it builds the layer, and a
-    WMS/XYZ layer carries its endpoint inside the datasource rather than as the whole
-    string.  The bytes are checked too, so neither the decoding nor the entity
-    spelling is all that stands between the file and the network.
-    """
-
-    source = unescape(raw.decode("utf-8", "replace"))
-    remote = (
-        is_remote_uri(source)
-        or "://" in source
-        or b"/vsi" in raw
-        or b"://" in raw
-        or raw.lstrip()[:2] in (b"\\\\", b"//")
-    )
-    if remote:
+    text = element.text
+    if not text:
+        return
+    stripped = text.strip()
+    if (
+        "://" in text
+        or "/vsi" in text.lower()
+        or stripped.startswith(("\\\\", "//"))
+        or (_local_name(element.tag) == "datasource" and is_remote_uri(stripped))
+    ):
         raise FrameworkError(
             PATH_NOT_ALLOWED,
             "the project file names a remote data source; it was not opened",
         )
+
+
+def _local_name(tag: str) -> str:
+    """The element name without its namespace, in lower case."""
+
+    return tag.rsplit("}", 1)[-1].lower()
 
 
 def _refuse_if_too_large(size: int) -> None:

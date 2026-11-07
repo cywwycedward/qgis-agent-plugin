@@ -69,16 +69,40 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
   `\\?\…`）都在**任何 I/O 之前**拒掉：UNC 的解析本身就会连主机并带上当前 Windows 凭据，
   所以它和 URL 一样不能先进白名单再判。错误消息里**不含**原始路径。
 - `project.open` 的工程文件还会在 `read()` **之前**被扫一遍（`.qgs` 是 XML，`.qgz` 是 zip 里的
-  同一个 XML）：扫的是**原始字节**（不是解码后的文本），一遍线性走完，不用正则、不 decode。
-  命中 `<datasource>` 里的 `/vsi*`、URI scheme（含 XYZ/WMS 写在 `…&url=https://…` 里的那个）
-  或 UNC 前缀就立刻 `PATH_NOT_ALLOWED`；标签内的空白合法（`<datasource >` 与 `<datasource>`
-  是同一个元素），所以匹配也接受它。同一次扫描还判四件事：字节里出现 NUL 说明工程不是 UTF-8
-  （UTF-16/UTF-32），直接 `PATH_NOT_ALLOWED`，不尝试解码；XML 嵌套超过 64 层
-  （`QgsProject.read()` 在深层嵌套上会爆栈、整个进程消失）直接 `PROJECT_OPEN_FAILED`；
-  XML 元素超过 200000 个（不是 QGIS 写得出的工程）也 `PROJECT_OPEN_FAILED`，判据是一次
-  `bytes.count`，不逐个元素走；工程文件本身、或 `.qgz` 里所有 `.qgs` 成员的**总量**超过 16 MB
-  也直接拒（按 `getinfo().file_size` 求和，一个成员都不解压），不读进内存。
-  否则 `read()` 会先构造图层、先联网，再让逐层检查来“拒绝”。
+  同一个 XML）。这一层用的是**标准库 XML 解析器**（`xml.etree.ElementTree`），不是字节启发式：
+  前四轮的手写扫描被同样几种**合法 XML 形状**打穿（属性值里的 `>`、注释/CDATA 里的假闭合标签、
+  QGIS 自己写的 `>` 让深度计数器漂移），所以“有哪些数据源、嵌套多深”现在由解析器回答：
+  - 每个元素（按**本地名**，忽略命名空间前缀与大小写）的文本都问一次：出现 `://`、`/vsi`
+    （不区分大小写）或以 UNC 前缀（`\\`、`//`）开头 → `PATH_NOT_ALLOWED`，消息是
+    `the project file names a remote data source; it was not opened`。`<datasource>` 元素额外
+    用 `is_remote_uri` 判一次（覆盖 `zip:…` 这类没有 `//` 的 scheme）。解析器已经把字符引
+    用解码了，所以 `&#47;vsicurl&#47;…` 与它指向的路径同一种判法。**改成别的元素名或把 URI
+    放进元素文本的任意位置都跑不掉**；代价是**过度拒绝**：任何元素的文本里出现 `://` 都会被
+    当作远程，即使它只是一段注释性的文字。
+  - 深度来自解析事件（开标签 +1、闭标签 −1，**迭代**遍历，不递归）：注释/CDATA 里的尖括号
+    不是元素、不算深度，`<a x="/>" …>` 只开一层。上限 `1000`：实测 5500 层 `read()` 还能开、
+    6000 层才 `0xC00000FD` 崩溃，而 QGIS 自己写的 100 层嵌套分组图层树只有 105 层深；
+    超过就 `PROJECT_OPEN_FAILED`，消息里说 `nests deeper than 1000 levels`。
+  - 解析前先看一次 `bytes.count(b"<")`：超过 `400000` 个标签直接 `PROJECT_OPEN_FAILED`
+    （消息 `more than 400000 XML tags`）。它是元素数的上界（每个元素恰好一个开标签），
+    所以把解析耗时钉在有界范围（实测 400000 个标签解析 0.12–0.19 s）；真实 16 MB 工程的标签
+    密度是 42.6–61 字节/标签，即 26–39 万个标签，落在这个上限内。
+  - 字节里出现 NUL 说明工程不是 UTF-8（UTF-16/UTF-32），直接 `PATH_NOT_ALLOWED`，不尝试解码
+    （QDomDocument 读得了这种文件，但本插件不支持）。
+  - 解析不了的 XML 不是工程：`PROJECT_OPEN_FAILED`，用的是 `read()` 失败时同一句消息，
+    **不会**再交给 `read()`。
+  - 工程文件本身、或 `.qgz` 里**每个**成员解压后的**总量**超过 16 MB 也直接拒：
+    `PATH_NOT_ALLOWED`，消息 `the project file is too large`。预算按**实际解压出来的字节**计
+    （分块读，边读边累加，超了就停），不信 zip 清单里声明的大小；`.qgz` 的**每个**成员都要读
+    一遍（非 `.qgs` 的读完就丢），因为 `read()` 解压的是整个档案。
+  - `.qgz` 里声明了加密标志（`flag_bits & 0x1`）或压缩方法不是 stored/deflate 的成员，在
+    `read()` **之前** `PROJECT_OPEN_FAILED`；成员边读边校验，清单没说但流里对不上的（CRC、
+    声明尺寸）同样拒。理由是 QGIS 3.44 在加密成员上直接崩（实测 `0xC0000005`），
+    而这种档案不该交给它。
+
+  总的来说：这一层只能**更严**，不能更松；它拒绝的形状都会在错误消息里说明是“远程数据源”、
+  “嵌套太深”、“标签太多”、“太大”或“读不出来”之一。`read()` 之后还有逐层的数据源白名单检查
+  （见 §3），工程里说不出的本地路径同样过不了（层会被移除）。
 - **容器格式不在这一层策略内**：一个合法本地的 `.vrt` 内部可以写
   `<SourceFilename>/vsicurl/https://…</SourceFilename>`，`layer.add` 与 `project.open`
   看到的都是那个 `.vrt` 文件本身。这是已知的边界（升级条件见 `operations/layer.py`
@@ -146,28 +170,33 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 数据源是另一回事：`read()` 会把它们全部构造出来，远程地址就在主线程上发 HTTP、UNC 就在
 主线程上做一次带 Windows 凭据的 SMB 连接。所以两步：
 
-1. **先扫字节，不碰数据源**：`read()` 之前把工程文件的原始字节走一遍（一次线性扫描，不用
-   正则、不 decode），取 `<datasource>` 元素，命中 `/vsi*`、URI scheme（XYZ/WMS 把它写在
-   `…&url=https://…` 里，也算）或 UNC 前缀 → 直接 `PATH_NOT_ALLOWED`，消息是
-   `the project file names a remote data source; it was not opened`。
-   这一步只读字节，**当前工程原样保留**（已实测：两个含 `/vsicurl` / UNC 数据源的工程各
-   0–16 ms 返回，旧工程与它的图层都还在）。另外五种情况同样在读之前拒：
+1. **先用 XML 解析器问工程里有什么，不碰数据源**：`read()` 之前用标准库 `ElementTree` 解析
+   工程 XML，每个元素的文本里出现 `://`、`/vsi`、UNC 前缀（`\\`、`//`），或 `<datasource>`
+   元素的文本过 `is_remote_uri`（XYZ/WMS 把 `…&url=https://…` 写在文本里，也算）→ 直接
+   `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not opened`。
+   这一步只读字节、只建一棵用完即弃的树，**当前工程原样保留**（已实测：含 `/vsicurl` / UNC
+   数据源的工程 0–16 ms 返回，旧工程与它的图层都还在；一个把 `>` 藏在数据源属性里的工程
+   返回 16 ms、监听端口 **0 次 TCP 连接**，旧扫描会给它 9 次）。另外几种情况同样在读之前拒：
    - 文件不是 UTF-8（字节里有 NUL，例如 UTF-16 工程）→ `PATH_NOT_ALLOWED`，消息
-     `the project file is not UTF-8; it was not opened`。QDomDocument 会读这种文件，而按 UTF-8
-     解码后的文本扫描什么也找不到，所以判据是字节本身；
-   - XML 嵌套超过 64 层 → `PROJECT_OPEN_FAILED`，消息里说 `nests deeper than 64 levels`。
-     `QgsProject.read()` 递归解析工程 XML，8000 层（56 KB）会让 C++ 栈溢出，进程直接消失
-     （实测 0xC00000FD，没有错误码、没有记录）；真实工程的嵌套在十层以内。深度是估计值，
-     CDATA/注释里的 `<` 也会被算成开标签，所以只会更早拒绝，不会漏；
-   - XML 元素超过 200000 个 → `PROJECT_OPEN_FAILED`，消息里说 `more than 200000 XML elements`。
-     扫描每个元素走一步，这个上限把最坏耗时定在有界范围（实测：16 MB 的重复空元素工程
-     用它拒在 5 ms 量级；真实工程远达不到这个元素数，16 MB 的工程文件本身也远大于实际）；
-   - 工程文件本身，或 `.qgz` 里**所有** `.qgs` 成员解压后的总量，超过 16 MB → `PATH_NOT_ALLOWED`，
-     消息 `the project file is too large; it was not opened`（解压前先用 `getinfo().file_size`
-     求和判，一个成员都不读）。逐个成员判不够：100 个 1 MB 成员的 112 KB 档案能吃掉 200 MB；
-   - `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）→ `PROJECT_OPEN_FAILED`，用的是
-     `read()` 失败时同一句消息。**这种档案不会交给 `read()`**：QGIS 3.44 在它上面会直接崩掉
-     （实测，退出码 0xC0000005）。
+     `the project file is not UTF-8; it was not opened`；
+   - XML 嵌套超过 1000 层 → `PROJECT_OPEN_FAILED`，消息里说 `nests deeper than 1000 levels`。
+     深度是按解析事件数的，注释/CDATA 里的尖括号不算。`QgsProject.read()` 递归解析工程 XML：
+     实测本机 5500 层还能开、6000 层让进程带 `0xC00000FD` 消失；QGIS 自己写的 100 层嵌套
+     分组图层树只有 105 层深，所以 1000 是“普通工程绝碰不到”的余量（已实测：30 个带标注
+     图层的真工程 `SUCCEEDED`，100 层分组也是 `SUCCEEDED`）；
+   - XML 标签超过 400000 个 → `PROJECT_OPEN_FAILED`，消息里说 `more than 400000 XML tags`。
+     判据是一次 `bytes.count(b"<")`（元素数的上界），把解析耗时钉在有界范围（实测 400000 个
+     标签 0.12–0.19 s；真实 16 MB 工程的标签密度是 42.6–61 字节/标签，即 26–39 万个）；
+   - 工程文件的字节不可解析（不是合法 XML）→ `PROJECT_OPEN_FAILED`，用的是 `read()` 失败时
+     同一句消息，文件**不会**再交给 `read()`；
+   - 工程文件本身，或 `.qgz` 里**每个**成员解压后的总量，超过 16 MB → `PATH_NOT_ALLOWED`，
+     消息 `the project file is too large; it was not opened`。预算按**实际解压出的字节**分块
+     累加（不信 zip 清单声明的尺寸），超了就停；非 `.qgs` 成员也会读一遍再丢，因为 `read()`
+     解压的是整个档案。逐个成员判不够：100 个 1 MB 成员的 112 KB 档案能吃掉 200 MB；
+   - `.qgz` 里有加密（`flag_bits & 0x1`）或压缩方法不是 stored/deflate 的成员，或者流里
+     对不上清单（CRC、尺寸）→ `PROJECT_OPEN_FAILED`，用的是 `read()` 失败时同一句消息。
+     **这种档案不会交给 `read()`**：QGIS 3.44 在它上面会直接崩掉（实测，退出码 `0xC0000005`，
+     非 `.qgs` 的兄弟成员一样能打崩）。
 2. **再逐层比对根目录**：`read()` 之后用 provider 自己的 `decodeUri()` 取真实路径，问
    `allowed_data_roots`。
    - 有数据源落在根外（或 provider 说不出一个本地路径，或 `decodeUri()` 自己抛异常）→ 这些
@@ -189,9 +218,9 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里的数据源是远程 URI、`/vsi*`、UNC（**`read()` 之前**就拒）；或工程文件不是 UTF-8、工程文件或 `.qgz` 全部 `.qgs` 成员的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里任何元素的文本带 `://`、`/vsi`、UNC 前缀，或 `<datasource>` 文本是个远程 URI（**`read()` 之前**就拒）；或工程文件不是 UTF-8、工程文件或 `.qgz` 每个成员解压后的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
-| `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或工程文件的 XML 嵌套超过 64 层、XML 元素超过 200000 个（都在 `read()` 之前拒绝：前者会让 QGIS 解析器爆栈、进程消失，后者是标签垃圾不是工程），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
+| `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或工程 XML 嵌套超过 1000 层、标签超过 400000 个、不是合法 XML（都在 `read()` 之前拒绝：前者会让 QGIS 解析器爆栈、进程消失，后两者不是工程），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
 成功路径同样会触发 `QgsProject.aboutToBeCleared`（`read()` 会清空旧工程），所以 `project_epoch` 加 1、
 旧代数的排队调用立即 `CANCELLED`；**本次调用自己照常成功**（实测：两个键都指向数据与工程所在目录，
@@ -351,7 +380,7 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | `INVALID_INPUT` | 任一参数缺失/为空/类型不符（在 `submit` 返回前就判掉，不排队） |
 | `LAYER_NOT_FOUND` | 工程里没有这个 ID |
 | `INVALID_LAYER` | 不是 `QgsVectorLayer`，或图层 `isValid()` 为假 |
-| `INVALID_FIELD_TYPE` | 没有该字段，或字段不是数值型（文本字段已实测） |
+| `INVALID_FIELD_TYPE` | 没有该字段；字段不是数值型（文本字段已实测）；或字段里存在 NaN/Infinity（见下） |
 | `SNAPSHOT_LIMIT_EXCEEDED` | 要素数超过 `max_snapshot_features`（默认 10000）；**不做静默截断**（10001 个要素已实测） |
 | `STALE_PROJECT` | 任务结束时 `project_epoch` 已经变了：结果算完也不交 |
 | `TASK_SUBMISSION_FAILED` | 没装后台适配器，或 `QgsTaskManager.addTask()` 返回 0 |
@@ -361,6 +390,12 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 
 - 只有这一段是后台的：`prepare_main`（主线程读要素、跳过 null、拷成 float 元组）、
   `execute_worker`（后台求和）、`finalize_main`（主线程只比对 epoch）。
+- **非有限值直接拒**：SQLite/GeoPackage 的 `DOUBLE` 可以存 NaN/Infinity，QGIS 原样交出来。
+  这种值会让 `total` 变成 `NaN`，而 `NaN` 不是合法 JSON（RFC 8259），`model_dump(mode="json")`
+  会把它带进记录，按 RFC 8259 解析的调用方拿到的是一条坏记录而不是一条错误——所以
+  `prepare_main` 遇到 `math.isfinite(value)` 为假的要素就 `INVALID_FIELD_TYPE`，消息是
+  `the field holds a non-finite (NaN or infinite) value`，结果一个都不交（已实测：`(1.0, nan, inf)`
+  的内存图层 → `FAILED(INVALID_FIELD_TYPE)`，`result` 为 null）。
 - 进度走 `QgsTask.setProgress`，记录最多每 100 ms 写一次，且**不写 100**——100 只由
   `SUCCEEDED` 那一步写，否则一个 3 ms 的任务会留下“100% 但已取消”的记录。首条报告会立刻写
   （并推进到 `RUNNING`），完成前还会补写最后一次被节流的值；一条可用报告都没有时（快照里只剩
