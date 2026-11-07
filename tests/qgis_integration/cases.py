@@ -247,6 +247,13 @@ def at_06_submit_field_sum(ctx: Context) -> str:
     equal(record.status, ExecutionStatus.SUCCEEDED, "the field sum after the event loop")
     equal(record.progress, 100, "progress of the finished sum")
     require(bool(watch.added), "no QgsTask was ever submitted")
+    pump_until(
+        ctx.app,
+        lambda: bool(watch.deleted),
+        timeout=10.0,
+        what="QGIS to delete the finished task",
+    )
+    equal(watch.deleted, watch.added, "the tasks QGIS deleted after they ended")
     require(not ctx.runner._active, "the adapter kept the finished submission")
 
     values = result_of(record)
@@ -255,9 +262,10 @@ def at_06_submit_field_sum(ctx: Context) -> str:
     equal(values["skipped_null"], fixtures.POP_NULLS, "the number of null values skipped")
     equal(values["snapshot_project_epoch"], ctx.lifecycle.current_epoch, "the snapshot epoch")
     return (
-        f"QgsTask added (id {watch.added[0]}), status {record.status}, progress readable "
-        f"({during.progress} while live, 100 at the end); pop sum {values['total']} "
-        f"over {values['count']} values, {values['skipped_null']} nulls — matches the baseline"
+        f"QgsTask added (id {watch.added[0]}) and deleted by QGIS (id {watch.deleted[0]}), "
+        f"status {record.status}, progress readable ({during.progress} while live, 100 at the "
+        f"end); pop sum {values['total']} over {values['count']} values, "
+        f"{values['skipped_null']} nulls — matches the baseline"
     )
 
 
@@ -350,11 +358,17 @@ def at_08b_cancel_scheduled(ctx: Context) -> str:
         equal(
             ctx.status(execution_id),
             ExecutionStatus.SCHEDULED,
-            "the record while QGIS holds a task that has not run",
+            "the record while QGIS holds the task and it has reported no progress",
         )
+        submission = ctx.runner._active.get(execution_id)
+        require(submission is not None, "the adapter does not hold the submission")
+        task = ctx.manager.task(submission.task_id)
+        require(task is not None, "the QgsTask is not in this plugin's manager")
+        require(not task.isCanceled(), "the real task was already cancelled")
         receipt = ctx.engine.cancel(execution_id)
         require(receipt.accepted, "the cancel of a scheduled task was refused")
         equal(ctx.status(execution_id), ExecutionStatus.CANCEL_REQUESTED, "status after the cancel")
+        require(task.isCanceled(), "the cancel never reached the real QgsTask")
         pump(ctx.app, 0.1)
         equal(
             ctx.status(execution_id),
@@ -369,8 +383,11 @@ def at_08b_cancel_scheduled(ctx: Context) -> str:
     require(record.result is None, "a cancelled task delivered a result")
     require("at08b" not in PROBE_LOG.finalizes, "a cancelled execution was finalised")
     return (
-        "SCHEDULED (the worker was held at its entry gate, no progress reported) -> "
-        "CANCEL_REQUESTED (staying there until QGIS reported) -> CANCELLED"
+        "SCHEDULED (the record, while the real QgsTask was held at the probe's entry gate and "
+        "reported no progress; QgsTask.cancel() then reached that task, isCanceled false -> "
+        "true) -> CANCEL_REQUESTED (staying there until QGIS reported) -> CANCELLED. Scope: "
+        "run() had already started on a worker thread, so the cancel-before-run() path inside "
+        "the C++ task is not covered (see the report, deviation 3)"
     )
 
 
@@ -708,6 +725,8 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
 
 
 def at_18_corrupt_project(ctx: Context) -> str:
+    """Both sides of PRD 7.3: a corrupt QGZ is refused, a valid one is read."""
+
     record = ctx.run(
         "project.open",
         {"path": str(ctx.fixtures.corrupt_project), "discard_current": True},
@@ -721,10 +740,22 @@ def at_18_corrupt_project(ctx: Context) -> str:
         "may have changed" in error.message,
         f"the message does not warn about the project state: {error.message!r}",
     )
-    equal(ctx.run("project.get_info").status, ExecutionStatus.SUCCEEDED, "the session after that")
+
+    valid = ctx.run("project.open", {"path": str(ctx.fixtures.project), "discard_current": True})
+    equal(valid.status, ExecutionStatus.SUCCEEDED, "project.open on a valid QGZ")
+    values = result_of(valid)
+    equal(values["layer_count"], 2, "the layers the valid QGZ holds")
+    equal(values["invalid_layer_count"], 0, "the invalid layers of the valid QGZ")
+    listed = result_of(ctx.run("layer.list"))["layers"]
+    equal(
+        {row["name"]: row["kind"] for row in listed},
+        {"cities": "vector", "cities_tif": "raster"},
+        "the layers the QGZ really loaded: the GeoPackage and the GeoTIFF",
+    )
     return (
-        f"FAILED(PROJECT_OPEN_FAILED) with the warning {error.message!r}; the process and "
-        "the session kept answering"
+        f"corrupt QGZ -> FAILED(PROJECT_OPEN_FAILED) with the warning {error.message!r}; the valid "
+        "QGZ -> SUCCEEDED with 2 layers, 0 invalid, one vector from the GeoPackage and one "
+        "raster from the GeoTIFF; the session kept answering"
     )
 
 

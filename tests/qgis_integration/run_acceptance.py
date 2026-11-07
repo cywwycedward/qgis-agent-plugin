@@ -3,8 +3,11 @@
 ``python run_acceptance.py [work directory]``.  Without an argument a temporary
 directory whose own name contains a space is created, the fixtures are generated
 into it, and the run uses a throwaway QGIS profile inside it, so no operator
-setting and no user project is touched (PRD 12.1).  The exit code is 1 if any case
-failed, 0 otherwise; a skipped case never counts as a pass (PRD 12.3).
+setting and no user project is touched (PRD 12.1).  A work directory given as an
+argument is only used when it is strictly inside the system temporary directory and
+either empty or already carries this run's marker; anything else is refused with
+exit code 2 rather than emptied.  The exit code is 1 if any case failed, 0
+otherwise; a skipped case never counts as a pass (PRD 12.3).
 """
 
 from __future__ import annotations
@@ -42,18 +45,21 @@ def environment() -> str:
 
 
 def main(argv: list[str]) -> int:
-    root = (
-        Path(argv[1]).resolve()
-        if len(argv) > 1
-        else Path(tempfile.mkdtemp(prefix="f7 acceptance "))
-    )
+    temporary = Path(tempfile.gettempdir())
+    root = Path(argv[1]) if len(argv) > 1 else Path(tempfile.mkdtemp(prefix="f7 acceptance "))
+    try:
+        root = fixtures.claim_root(root, temporary)
+    except fixtures.UnsafeRoot as error:
+        print(f"REFUSING: {error}")
+        return 2
+
     profile = root / "profile"
     runtime = root / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     # QGIS drops symbology-style.db into the working directory, so the fixtures are
     # generated from the throwaway one rather than from the repository.
     os.chdir(runtime)
-    generated = fixtures.build(root / "data")
+    generated = fixtures.build(root)
     application = harness.start_application(runtime, profile)
 
     settings_file = harness.settings_file()

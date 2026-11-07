@@ -8,6 +8,12 @@ for the "do not overwrite" case, a directory outside the allowed roots, and a
 junction inside them that points out.  ``build`` deletes and rebuilds its own
 directory, so a rerun needs no cleanup.
 
+Deleting and rebuilding is only allowed inside a root this script made itself, and
+only inside the system temporary directory: ``claim_root`` writes the marker file
+and refuses everything else, so a mistyped work directory can never be emptied
+(PRD 12.1: a run may only destroy test data).  Nothing outside that root is ever
+removed.
+
 Nothing binary is committed: the acceptance runner points this at a temporary
 directory whose own name contains a space, which is how the "path with spaces"
 fixture exists at all.
@@ -39,6 +45,14 @@ POP_NULLS = 2
 CITIES_LAYER = "cities"
 ROADS_LAYER = "roads"
 
+# The marker a work root carries once this script owns it; nothing is ever removed
+# from a directory that does not hold it.
+MARKER = ".f7-acceptance"
+
+
+class UnsafeRoot(Exception):
+    """The work root is not this run's own: outside the temp directory, or not ours."""
+
 
 @dataclass(frozen=True)
 class Fixtures:
@@ -57,15 +71,39 @@ class Fixtures:
     escape: Path | None
 
 
-def build(root: Path) -> Fixtures:
-    """Regenerate the whole fixture set under ``root`` and describe it."""
+def claim_root(root: Path, temporary: Path) -> Path:
+    """Return the work root this run may destroy, or refuse to touch it (PRD 12.1).
+
+    The fixtures are rebuilt from scratch on every run, so the root has to be this
+    script's own: strictly inside the system temporary directory, and carrying
+    :data:`MARKER`.  A directory that does not hold the marker is refused instead of
+    emptied -- a mistyped work directory must never lose the operator's files.
+    """
 
     root = root.resolve()
+    temporary = temporary.resolve()
+    if root == temporary or temporary not in root.parents:
+        raise UnsafeRoot(f"the work directory must be strictly inside {temporary}: {root}")
     if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+        if not root.is_dir():
+            raise UnsafeRoot(f"the work directory is not a directory: {root}")
+        if any(root.iterdir()) and not (root / MARKER).is_file():
+            raise UnsafeRoot(f"the work directory holds files this run did not create: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / MARKER).write_text("f7 acceptance work directory\n", encoding="utf-8")
+    return root
 
-    cities = root / "cities.gpkg"
+
+def build(root: Path) -> Fixtures:
+    """Regenerate the fixture set inside an already claimed work root."""
+
+    root = root.resolve()
+    data = _fresh(root / "data")
+    # A sibling of the allowed root, so a path here is genuinely outside the roots the
+    # acceptance run allows (AT-19) while still inside a directory this run owns.
+    outside = _fresh(root / "outside")
+
+    cities = data / "cities.gpkg"
     _write_layer(
         cities,
         CITIES_LAYER,
@@ -82,40 +120,35 @@ def build(root: Path) -> Fixtures:
     # A second table in the same GeoPackage: the ``sub_layer`` case of layer.add.
     _write_layer(cities, ROADS_LAYER, "LineString", ["road_id:integer"], [(7,)], append_layer=True)
 
-    spaced = root / "city data.gpkg"
+    spaced = data / "city data.gpkg"
     spaced.write_bytes(cities.read_bytes())
 
-    corrupt_gpkg = root / "corrupt.gpkg"
+    corrupt_gpkg = data / "corrupt.gpkg"
     corrupt_gpkg.write_bytes(b"this is not a geopackage, only bytes with that suffix")
 
-    raster = root / "cities.tif"
+    raster = data / "cities.tif"
     _write_raster(raster)
 
-    project = root / "project.qgz"
+    project = data / "project.qgz"
     _write_project(project, [(cities, CITIES_LAYER, "cities")], [raster])
 
     # A project whose only data source is deleted after it was saved: QGIS still
     # reads the file, and the registered layer is no longer valid (AT-18B).
-    vanishing = root / "vanishing.gpkg"
+    vanishing = data / "vanishing.gpkg"
     vanishing.write_bytes(cities.read_bytes())
-    missing = root / "missing.qgz"
+    missing = data / "missing.qgz"
     _write_project(missing, [(vanishing, CITIES_LAYER, "vanishing")], [])
     gc.collect()
     vanishing.unlink()
 
-    corrupt_project = root / "corrupt.qgz"
+    corrupt_project = data / "corrupt.qgz"
     corrupt_project.write_bytes(b"this is not a zipped project, only bytes with that suffix")
 
-    existing_project = root / "existing.qgs"
+    existing_project = data / "existing.qgs"
     existing_project.write_bytes(b"an existing project file whose bytes must not change")
 
-    outside = root.parent / (root.name + " outside")
-    if outside.exists():
-        shutil.rmtree(outside)
-    outside.mkdir()
-
     return Fixtures(
-        root=root,
+        root=data,
         cities=cities,
         spaced=spaced,
         corrupt_gpkg=corrupt_gpkg,
@@ -125,8 +158,23 @@ def build(root: Path) -> Fixtures:
         corrupt_project=corrupt_project,
         existing_project=existing_project,
         outside=outside,
-        escape=_junction(root / "escape", outside),
+        escape=_junction(data / "escape", outside),
     )
+
+
+def _fresh(path: Path) -> Path:
+    """Empty one directory this run owns, and recreate it.
+
+    The only directory :func:`claim_root` ever accepted is marked, so the parent of
+    ``path`` carries the marker; anything else is refused rather than deleted.
+    """
+
+    if not (path.parent / MARKER).is_file():
+        raise UnsafeRoot(f"refusing to rebuild a directory this run did not create: {path}")
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
 
 
 def _write_layer(
