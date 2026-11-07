@@ -225,7 +225,9 @@ def test_the_default_crs_and_flags_are_the_prd_defaults() -> None:
     request = project.ProjectCreateParams.model_validate({})
     assert request.crs_authid == "EPSG:4326"
     assert request.discard_current is False
-    assert project.ProjectSaveParams.model_validate({}).overwrite is False
+    save = project.ProjectSaveParams.model_validate({})
+    assert save.path is None
+    assert save.overwrite is False
 
 
 @pytest.mark.parametrize("raw", ["maps/a.qgs", "", "a.gz", "C:/maps/a.txt", "C:/maps/a"])
@@ -380,6 +382,22 @@ def test_open_refuses_to_replace_a_project_with_content(
     target = root / "a.qgs"
     target.write_text("", encoding="utf-8")
     loaded = FakeProject(dirty=True)
+    ctx = context(loaded, roots=(root,))
+    request = project.ProjectOpenParams(path=str(target))
+
+    refused(PROJECT_REPLACE_REQUIRED, lambda: project.ProjectOpen().execute_main(ctx, request))
+    assert loaded.read_path is None
+
+
+def test_open_refuses_to_reopen_the_associated_file_without_discarding(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # Reloading the project's own file still throws away the in-memory project, so
+    # the associated file must not exempt the replacement guard (PRD 7.3, 10.3).
+    root = project_dir(tmp_path)
+    target = root / "current.qgs"
+    target.write_text("", encoding="utf-8")
+    loaded = FakeProject(file_name=str(target), dirty=True)
     ctx = context(loaded, roots=(root,))
     request = project.ProjectOpenParams(path=str(target))
 
