@@ -510,6 +510,32 @@ def write_vsi_directory_project(path: Path, source: Path, sub_layer: str) -> Non
         raise RuntimeError(f"{path} does not name its source inside vsi_data")
 
 
+def write_subdataset_project(path: Path, local_raster: Path) -> None:
+    """A real project whose one layer is a local GDAL subdataset.
+
+    GDAL's raster provider does not split the spelling: the written ``<datasource>`` is
+    ``GTIFF_DIR:1:<file>`` whole, which a per-layer check that took it for a path read as
+    outside the roots and removed the layer from (A12 #2).  The project is written from
+    the plain file and the text is replaced afterwards, as ``_write_remote_project`` does:
+    building the layer from the spelling is what ``read()`` does during the case.
+    """
+
+    _write_project(path, [], [local_raster])
+    _rewrite_datasource(path, f"GTIFF_DIR:1:{local_raster}")
+
+
+def write_subdataset_remote_project(path: Path, local_raster: Path, port: int) -> None:
+    """A real project whose one subdataset names a remote file inside its own syntax.
+
+    ``NETCDF:"/vsicurl/http://…":temperature`` is the shape GDAL opens by itself and the
+    marker is not at the start of the value, so a scan that asked only the start let
+    ``read()`` fetch it (A12 #1).
+    """
+
+    _write_project(path, [], [local_raster])
+    _rewrite_datasource(path, f'NETCDF:"{REMOTE_LISTENER.format(port=port)}":temperature')
+
+
 def _replace_first_datasource(path: Path, replacement: str) -> None:
     """Rewrite the first map layer's datasource, in a ``.qgs`` or inside a ``.qgz``."""
 

@@ -717,6 +717,54 @@ def test_open_keeps_a_layer_whose_source_is_gone_but_inside_the_roots(
     assert loaded.removed == []
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    ["GTIFF_DIR:1:{path}", 'NETCDF:"{path}":temperature'],
+    ids=["gtiif-dir", "netcdf"],
+)
+def test_open_reads_a_project_whose_layer_is_a_local_subdataset(
+    qgis: types.ModuleType, tmp_path: Path, spelling: str
+) -> None:
+    # GDAL's raster provider does not split a subdataset: decodeUri answers the whole
+    # spelling as the "path", so the allow-list was asked about a spelling.  Before
+    # A12 #2 this project came back PATH_NOT_ALLOWED and the layer was removed, while
+    # every file it names is inside the roots.
+    root = project_dir(tmp_path)
+    source = spelling.format(path=root / "pages.tif")
+    target = qgs_file(root, "subdataset.qgs", source)
+    loaded = FakeProject(layers_after_read={"pages": FakeLayer(source=source, provider="gdal")})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert loaded.removed == []
+
+
+def test_open_refuses_a_subdataset_whose_file_is_outside_the_roots(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The file inside the spelling is what the allow-list asks about, so a subdataset
+    # pointing outside the roots is still a breach -- and still removes its layer.
+    root = project_dir(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = f"GTIFF_DIR:1:{outside / 'pages.tif'}"
+    target = qgs_file(root, "outside.qgs", source)
+    loaded = FakeProject(layers_after_read={"pages": FakeLayer(source=source, provider="gdal")})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.removed == ["pages"]
+    assert "1 layer data source(s)" in failed.message
+
+
 def test_open_refuses_a_layer_whose_provider_names_no_local_path(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
@@ -849,16 +897,30 @@ def test_open_refuses_a_remote_source_before_the_project_is_read(
     assert remote not in failed.message
 
 
-def test_a_provider_uri_that_carries_its_url_after_a_prefix_is_not_refused_before_read(
-    qgis: types.ModuleType, tmp_path: Path
+@pytest.mark.parametrize(
+    "source",
+    [
+        "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png",
+        'NETCDF:"/vsicurl/http://127.0.0.1:9/never.nc":temperature',
+        "GTIFF_DIR:1:/vsicurl/http://127.0.0.1:9/never.tif",
+        # The marker sits past the 64 characters the scan keeps of a value, so the
+        # start rule alone cannot see it: only the containment flag can (A12 #1).
+        'NETCDF:"C:/' + "dataset/" * 10 + 'http://127.0.0.1:9/never.nc":temperature',
+        # And the marker is split across a child element, as A7 #1's address was: the
+        # flag follows ``QDomElement::text()`` order, child included.
+        'NETCDF:"C:/' + "dataset/" * 10 + 'htt<x/>p://127.0.0.1:9/never.nc":temperature',
+    ],
+    ids=["xyz-url", "netcdf-url", "gtiif-dir-url", "marker-past-the-head", "marker-split"],
+)
+def test_open_refuses_a_datasource_that_carries_a_url(
+    qgis: types.ModuleType, tmp_path: Path, source: str
 ) -> None:
-    # The boundary of the pre-read list (docs/OPERATIONS.md 1.2): only the *start* of a
-    # value is asked, so an XYZ layer's ``type=xyz&url=https://...`` is not refused
-    # before read() -- a substring check would also refuse a description quoting a URL
-    # (A6 #3).  The per-layer check after read() still removes the layer and fails the
-    # open, so the code is the same one; only the request has been made by then.
+    # A7 #1's lesson, applied to the one value that becomes a provider's data source: a
+    # remote file can sit inside the value rather than at its start, and GDAL opens
+    # ``NETCDF:"/vsicurl/http://…"`` itself -- a 5 KB project of that shape made read()
+    # send 5 TCP connections (measured, A12 #1).  The containment rule is asked of the
+    # ``<datasource>`` value and of nothing else, so the prose case below still opens.
     root = project_dir(tmp_path)
-    source = "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png"
     target = qgs_file(root, "tiles.qgs", source)
     loaded = FakeProject(layers_after_read={"tiles": FakeLayer(source=source)})
     ctx = context(loaded, roots=(root,))
@@ -870,9 +932,10 @@ def test_a_provider_uri_that_carries_its_url_after_a_prefix_is_not_refused_befor
         ),
     )
 
-    assert loaded.read_path == str(target)
-    assert loaded.removed == ["tiles"]
-    assert "1 layer data source(s)" in failed.message
+    assert loaded.read_path is None
+    assert loaded.removed == []
+    assert "remote data source" in failed.message
+    assert "127.0.0.1" not in failed.message
 
 
 @pytest.mark.parametrize("suffix", [".qgs", ".qgz"])

@@ -83,11 +83,19 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
     只问 `<datasource>` 文本的那版扫描放行了这种工程，实测同一个 5 KB 文件让 `project.open`
     发 **9 次 TCP**、返回 `SUCCEEDED`；对端接受连接但永不回应时主线程停 **180.1 s**，仍报
     `SUCCEEDED`（A11 #1）。
-  - **只看值的开头，不做子串匹配**：`D:/vsi_data/x.gpkg`、`./vsi_data/…`、名字里带
+  - **别的值只看值的开头，不做子串匹配**：`D:/vsi_data/x.gpkg`、`./vsi_data/…`、名字里带
     `data/vsicache` 的图层、正文里引用 URL 的 `<abstract>Downloaded from https://…</abstract>`
-    都不再被误拒（A6 #3、A7 #3）。代价是**值本身就是 URL** 的元数据
+    都不被误拒（A6 #3、A7 #3）。代价是**值本身就是 URL** 的元数据
     （`<identifier>https://…</identifier>`、`Option value="https://…"`）会被拒，这是这条统一
     判据的已知误拒，记在 §12。
+  - **`<datasource>` 的值再加一条“包含”判据**：它是唯一会变成 provider 数据源的值，所以
+    `://` 出现在值里**任何位置**都拒（消息仍是 `the project file names a remote data source`）。
+    理由是 GDAL 把远程文件写在它自己的本地语法里：`NETCDF:"/vsicurl/http://…":var`、
+    `GTIFF_DIR:1:/vsicurl/http://…`，以及 XYZ/WMS 的 `type=xyz&url=https://…`——只看开头会
+    放行它们，实测一个 5 KB 工程让 `read()` 发出 **5 次 TCP**（A12 #1）。这条判据**只**给
+    `<datasource>`：正文里的 URL 仍放行（A6 #3），`./vsi_data/…` 这种本地目录仍放行（A7 #3），
+    所以 `/vsi` 与 UNC 仍只按**前缀**判。判据看的是整段值，不是截断后的前 64 个字符，所以
+    第 65 个字符之后的 `://` 也逃不掉。
   - 本地 scheme 先剥掉再判：`file:./points.csv`（QGIS 自己写的 Delimited Text 图层）、
     `file:///C:/…` 与 `attachment:///styles.db`（QGIS 3.44 给每个带工程样式的工程都写一条）
     是本地路径；`file://host/…` 剥不掉，仍按 `scheme://` 拒；别的 scheme 一律当远程。
@@ -132,9 +140,10 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
     声明尺寸）同样拒。理由是 QGIS 3.44 在加密成员上直接崩（实测 `0xC0000005`），
     而这种档案不该交给它。
 
-  总的来说：这一层是**读前尽力而为的清单**，不是“QGIS 会去取什么”的完备枚举。它只问每个值的
-  **开头**，所以值中间才出现远程地址的形状它看不见：provider URI `type=xyz&url=https://…`
-  （XYZ/WMS 的写法）不再在读前被拒，`read()` 之后逐层的数据源检查仍会移除该层并让整次 open
+  总的来说：这一层是**读前尽力而为的清单**，不是“QGIS 会去取什么”的完备枚举。除了
+  `<datasource>` 里那个 `://`，它只问每个值的**开头**，所以值中间才出现远程地址的形状它看不见：
+  `<datasource>` 之外的值中间的 UNC 主机名（`\\host\share\…` 只按前缀判）、容器格式内部
+  引用的远程文件（见下面那条），`read()` 之后逐层的数据源检查仍会移除该层并让整次 open
   `PATH_NOT_ALLOWED`（见 §3），但那一次请求已经发出去了；布局以外的取数落点（符号层里的图片、
   装饰项、……）没有逐个枚举，同样不在承诺内。它拒绝的形状都会在错误消息里说明是“远程数据源”、
   “嵌套太深”、“标签太多”、“太大”或“读不出来”之一。`read()` 之后还有逐层的数据源白名单检查
@@ -255,6 +264,9 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
      非 `.qgs` 的兄弟成员一样能打崩）。
 2. **再逐层比对根目录**：`read()` 之后用 provider 自己的 `decodeUri()` 取真实路径，问
    `allowed_data_roots`。
+   - GDAL 的子数据集写法（`NETCDF:"C:/x.nc":var`、`GTIFF_DIR:1:C:/x.tif`）`decodeUri()` 返回的
+     是**整串**，不是那个文件：判定先拆出里面那个文件再问根目录，所以文件在根内的本地子数据集
+     图层不会被移除（A12 #2）；拆不出来的（引号里是 `/vsicurl/…`、或者路径在根外）照旧算越界。
    - 有数据源落在根外（或 provider 说不出一个本地路径，或 `decodeUri()` 自己抛异常）→ 这些
      图层用 `removeMapLayer()` 从工程里移除，然后整次 `project.open` 以 `PATH_NOT_ALLOWED`
      失败，`message` 里带被移除的图层数。**不是**“加载成功 + 只报个字段”：那等于白名单被绕过。
@@ -496,4 +508,4 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 未定义：容器格式内部的数据源 | 不检查：一个本地 `.vrt` 内部的 `<SourceFilename>` 不在这层策略内 | 已知边界，不是承诺；升级条件写在 `operations/layer.py` 的 `layer_source_uri` 的 `shortcut:` 注释里（有人真的把 VRT 当不可信输入时） |
 | 未定义：provider 说不出本地路径 | 这种图层算越界（移除 + 失败） | 宁可拒绝：白名单无法为一个说不出来源的层担保；工程里出现 `memory`、WMS/XYZ 等非文件 provider 时 `project.open` 会失败 |
 | 未定义：值本身就是 URL 的元数据 | 读前扫描会拒（`PATH_NOT_ALLOWED`） | 统一判据的已知误拒：判据不认元素名/属性名，任何值以 `scheme://` 开头就拒，所以 `<identifier>https://…</identifier>`、`Option value="https://…"` 这种工程打不开；正文里引用 URL（`<abstract>Downloaded from https://…</abstract>`）仍然放行。要打开这种工程，先把元数据里的 URL 去掉 |
-| 未定义：provider URI 里 `key=` 之后的远程地址 | 读前不拒；`read()` 之后逐层检查会移除该层并整体 `PATH_NOT_ALLOWED` | 判据只看值的开头（`type=xyz&url=https://…` 是 QGIS 写 XYZ/WMS 的方式），所以这一次请求会先发出去。要堵住它得做子串匹配，而子串匹配会把正文里引用 URL 的正常工程拒掉（A6 #3）——取舍记在这里，不是没看见 |
+| 未定义：`<datasource>` 里 `key=` 之后的远程地址 | 读前拒（`PATH_NOT_ALLOWED`） | A12 #1 起 `<datasource>` 的值按“包含”判 `://`：`type=xyz&url=https://…`（XYZ/WMS 的写法）与 GDAL 的 `NETCDF:"/vsicurl/http://…":var` 都在 `read()` 之前拒。这条判据不扩大到别的值，所以正文里引用 URL 的正常工程仍放行（A6 #3） |
