@@ -18,7 +18,7 @@ in a bare interpreter and the path/CRS rules stay testable without QGIS.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import AfterValidator, BaseModel, Field, StrictBool, StrictStr
 
@@ -31,6 +31,7 @@ from ..core.contracts import (
 from ..core.models import (
     INTERNAL_ERROR,
     INVALID_CRS,
+    PATH_NOT_ALLOWED,
     PROJECT_OPEN_FAILED,
     PROJECT_PATH_REQUIRED,
     PROJECT_REPLACE_REQUIRED,
@@ -166,6 +167,18 @@ class ProjectOpen(
             )
 
         layers = ctx.project.mapLayers()
+        outside = _sources_outside_the_allowed_roots(ctx, layers)
+        if outside:
+            # The project file named these sources, so ``read()`` already reached
+            # them; removing them is what keeps the new project inside the policy
+            # the caller was promised (PRD 10.2, see docs/OPERATIONS.md §3).
+            for layer_id in outside:
+                ctx.project.removeMapLayer(layer_id)
+            raise FrameworkError(
+                PATH_NOT_ALLOWED,
+                f"{len(outside)} layer data source(s) are outside allowed_data_roots; "
+                "they were removed and the project was not opened",
+            )
         return ProjectOpenResult(
             file_path=str(path),
             crs_authid=ctx.project.crs().authid(),
@@ -230,6 +243,35 @@ class ProjectGetInfo(
             layer_count=len(project.mapLayers()),
             project_epoch=ctx.lifecycle.current_epoch,
         )
+
+
+def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, Any]) -> list[str]:
+    """The layers whose own data source the path policy would refuse.
+
+    The allow-list has to be asked about every source a project names, not only
+    about the project file: ``read()`` reaches whatever the file points at.  The
+    provider decodes its own URI, because a source is not a path string -- ``ogr``
+    spells one as ``path|layername=name``.  A provider that cannot name a local
+    path is treated as outside: an unreadable source is not a trusted one.
+    """
+
+    from qgis.core import QgsProviderRegistry
+
+    outside: list[str] = []
+    for layer_id, layer in layers.items():
+        metadata = QgsProviderRegistry.instance().providerMetadata(layer.providerType())
+        decoded = metadata.decodeUri(layer.source()) if metadata is not None else None
+        raw = decoded.get("path") if decoded else None
+        if not raw:
+            outside.append(layer_id)
+            continue
+        try:
+            # Save-shaped on purpose: a project naming a source that is gone is
+            # AT-18B (read, invalid_layer_count > 0), not a breach of the roots.
+            resolve_path(raw, ctx.policy.allowed_data_roots, must_exist=False)
+        except FrameworkError:
+            outside.append(layer_id)
+    return outside
 
 
 def _refuse_replacement_unless_discarding(ctx: OperationContext, discard_current: bool) -> None:
