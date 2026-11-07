@@ -761,6 +761,8 @@ def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
     their own ``execute_main``, which the fakes above cannot reproduce.
     """
 
+    pytest.importorskip("qgis", reason="a real project signal needs a QGIS interpreter")
+
     from qgis.core import QgsApplication, QgsProject
 
     from qgis_agent_plugin.operations.project import ProjectCreate, ProjectOpen
