@@ -37,19 +37,25 @@ from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.operations import project
 
 ROOT = Path(__file__).resolve().parents[1]
+# Absolute and well formed, never touched: only the input models see it.
+A_PROJECT_FILE = str(ROOT / "maps" / "a.qgs")
 
 
 class FakeCrs:
     """Valid exactly for the authids a real QGIS resolves; anything else is not."""
 
+    _KNOWN = frozenset({"EPSG:4326", "EPSG:3857"})
+
     def __init__(self, authid: str) -> None:
         self._authid = authid
 
     def isValid(self) -> bool:
-        return self._authid in {"EPSG:4326", "EPSG:3857"}
+        return self._authid.upper() in self._KNOWN
 
     def authid(self) -> str:
-        return self._authid
+        """QGIS reports the canonical form whatever alias the caller used."""
+
+        return self._authid.upper()
 
 
 @pytest.fixture
@@ -66,15 +72,11 @@ def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
 
 class FakeLayer:
-    def __init__(self, *, valid: bool = True, editable: bool = False) -> None:
+    def __init__(self, *, valid: bool = True) -> None:
         self._valid = valid
-        self._editable = editable
 
     def isValid(self) -> bool:
         return self._valid
-
-    def isEditable(self) -> bool:
-        return self._editable
 
 
 class FakeProject:
@@ -194,10 +196,13 @@ def test_an_unknown_input_field_is_refused() -> None:
 
 @pytest.mark.parametrize("value", ["true", "false", 0, 1])
 def test_a_boolean_field_refuses_a_non_boolean(value: object) -> None:
-    with pytest.raises(ValidationError):
-        project.ProjectCreateParams.model_validate({"discard_current": value})
-    with pytest.raises(ValidationError):
-        project.ProjectSaveParams.model_validate({"overwrite": value})
+    for model, field, extra in (
+        (project.ProjectCreateParams, "discard_current", {}),
+        (project.ProjectOpenParams, "discard_current", {"path": A_PROJECT_FILE}),
+        (project.ProjectSaveParams, "overwrite", {}),
+    ):
+        with pytest.raises(ValidationError):
+            model.model_validate({field: value, **extra})
 
 
 def test_an_empty_crs_is_refused() -> None:
@@ -212,17 +217,18 @@ def test_the_default_crs_and_flags_are_the_prd_defaults() -> None:
     assert project.ProjectSaveParams.model_validate({}).overwrite is False
 
 
-@pytest.mark.parametrize(
-    "raw", ["maps/a.qgs", "", "a.gz", "C:/maps/a.txt", "C:/maps/a"]
-)
+@pytest.mark.parametrize("raw", ["maps/a.qgs", "", "a.gz", "C:/maps/a.txt", "C:/maps/a"])
 def test_a_project_path_must_be_absolute_with_a_project_suffix(raw: str) -> None:
-    with pytest.raises(ValidationError):
-        project.ProjectOpenParams.model_validate({"path": raw})
+    for model in (project.ProjectOpenParams, project.ProjectSaveParams):
+        with pytest.raises(ValidationError):
+            model.model_validate({"path": raw})
 
 
 def test_a_project_suffix_is_case_insensitive(tmp_path: Path) -> None:
-    request = project.ProjectOpenParams.model_validate({"path": str(tmp_path / "a.QGZ")})
-    assert request.path.endswith("a.QGZ")
+    opened = project.ProjectOpenParams.model_validate({"path": str(tmp_path / "a.QGZ")})
+    assert opened.path.endswith("a.QGZ")
+    saved = project.ProjectSaveParams.model_validate({"path": str(tmp_path / "b.QGS")})
+    assert saved.path is not None and saved.path.endswith("b.QGS")
 
 
 # --- project.create ---------------------------------------------------------
@@ -234,9 +240,8 @@ def test_a_project_suffix_is_case_insensitive(tmp_path: Path) -> None:
         {"layers": {"a": FakeLayer()}},
         {"file_name": "C:/maps/current.qgs"},
         {"dirty": True},
-        {"layers": {"a": FakeLayer(editable=True)}},
     ],
-    ids=["layers", "associated file", "unsaved changes", "open edit session"],
+    ids=["layers", "associated file", "unsaved changes"],
 )
 def test_create_refuses_to_replace_a_project_with_content(
     qgis: types.ModuleType, project_state: dict[str, Any]
@@ -267,6 +272,19 @@ def test_create_replaces_the_project_when_explicitly_allowed(qgis: types.ModuleT
     assert result.file_path is None
     assert result.layer_count == 0
     assert loaded.crs_set is not None
+
+
+def test_create_reports_the_canonical_crs_authid(qgis: types.ModuleType) -> None:
+    loaded = FakeProject()
+    iface = FakeIface(loaded)
+    ctx = context(loaded, iface=iface)
+
+    result = project.ProjectCreate().execute_main(
+        ctx, project.ProjectCreateParams(crs_authid="epsg:3857")
+    )
+
+    assert result.crs_authid == "EPSG:3857"
+    assert loaded.crs_authid == "EPSG:3857"
 
 
 def test_create_refuses_an_unusable_crs_before_replacing(qgis: types.ModuleType) -> None:
@@ -347,9 +365,7 @@ def test_open_reports_a_failed_read(qgis: types.ModuleType, tmp_path: Path) -> N
     ctx = context(loaded, roots=(root,))
     request = project.ProjectOpenParams(path=str(target))
 
-    failed = refused(
-        PROJECT_OPEN_FAILED, lambda: project.ProjectOpen().execute_main(ctx, request)
-    )
+    failed = refused(PROJECT_OPEN_FAILED, lambda: project.ProjectOpen().execute_main(ctx, request))
     assert "may have changed" in failed.message
 
 
@@ -366,9 +382,7 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
     )
     ctx = context(loaded, roots=(root,))
 
-    result = project.ProjectOpen().execute_main(
-        ctx, project.ProjectOpenParams(path=str(target))
-    )
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
     assert Path(result.file_path) == target.resolve()
     assert loaded.read_path == str(target.resolve())
@@ -414,9 +428,7 @@ def test_save_writes_a_new_file(qgis: types.ModuleType, tmp_path: Path) -> None:
     loaded = FakeProject(dirty=True)
     ctx = context(loaded, roots=(root,))
 
-    result = project.ProjectSave().execute_main(
-        ctx, project.ProjectSaveParams(path=str(target))
-    )
+    result = project.ProjectSave().execute_main(ctx, project.ProjectSaveParams(path=str(target)))
 
     assert Path(result.file_path) == target.resolve()
     assert loaded.writes == [str(target.resolve())]
@@ -444,9 +456,7 @@ def test_save_falls_back_to_the_associated_file(qgis: types.ModuleType, tmp_path
     loaded = FakeProject(file_name=str(target))
     ctx = context(loaded, roots=(root,))
 
-    result = project.ProjectSave().execute_main(
-        ctx, project.ProjectSaveParams(overwrite=True)
-    )
+    result = project.ProjectSave().execute_main(ctx, project.ProjectSaveParams(overwrite=True))
 
     assert Path(result.file_path) == target.resolve()
 

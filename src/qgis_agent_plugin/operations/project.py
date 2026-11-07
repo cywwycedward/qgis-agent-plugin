@@ -6,10 +6,10 @@ destructive from the PRD 7.1 table, so a caller can see the risk without reading
 the code.
 
 ``create`` and ``open`` share one guard: a project that holds anything worth
-keeping -- layers, an associated file, unsaved changes, an open edit session --
-is only replaced when the caller says ``discard_current=true`` (PRD 7.2, 7.3,
-10.3).  ``save`` has the matching guard for files: an existing target is only
-replaced with ``overwrite=true`` (PRD 7.4, 7.5, AT-17).
+keeping -- layers, an associated file, unsaved changes -- is only replaced when
+the caller says ``discard_current=true`` (PRD 7.2, 7.3, 10.3).  ``save`` has the
+matching guard for files: an existing target is only replaced with
+``overwrite=true`` (PRD 7.4, 10.3, AT-17).
 
 QGIS is imported inside the one method that needs it, so this module still loads
 in a bare interpreter and the path/CRS rules stay testable without QGIS.
@@ -18,7 +18,7 @@ in a bare interpreter and the path/CRS rules stay testable without QGIS.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, Field, StrictBool, StrictStr
 
@@ -135,7 +135,9 @@ class ProjectCreate(
 
         ctx.project.setCrs(crs)
         return ProjectCreateResult(
-            crs_authid=request.crs_authid,
+            # The caller's string may be a valid alias (``epsg:4326``); report the
+            # canonical authid the project now holds, as ``open``/``get_info`` do.
+            crs_authid=crs.authid(),
             file_path=ctx.project.fileName() or None,
             layer_count=len(ctx.project.mapLayers()),
         )
@@ -231,27 +233,18 @@ class ProjectGetInfo(
 
 
 def _refuse_replacement_unless_discarding(ctx: OperationContext, discard_current: bool) -> None:
-    """Only an explicit ``discard_current=true`` may replace a project with content."""
+    """Only an explicit ``discard_current=true`` may replace a project with content.
+
+    PRD 7.2 also names an open edit session; a buffer is only open on a layer, so
+    the layer count already covers it and there is no fourth check to look for.
+    """
 
     if discard_current:
         return
     project = ctx.project
-    layers = project.mapLayers()
-    if (
-        layers
-        or project.fileName()
-        or project.isDirty()
-        or any(_is_editing(layer) for layer in layers.values())
-    ):
+    if project.mapLayers() or project.fileName() or project.isDirty():
         raise FrameworkError(
             PROJECT_REPLACE_REQUIRED,
             "the current project holds layers, a file or unsaved changes; "
             "pass discard_current=true to replace it",
         )
-
-
-def _is_editing(layer: Any) -> bool:
-    """Whether a layer has an open edit session; raster layers have no such state."""
-
-    is_editable = getattr(layer, "isEditable", None)
-    return bool(is_editable and is_editable())
