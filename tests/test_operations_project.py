@@ -64,6 +64,7 @@ def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
     core: Any = types.ModuleType("qgis.core")
     core.QgsCoordinateReferenceSystem = FakeCrs
+    core.QgsProviderRegistry = FakeProviderRegistry
     package: Any = types.ModuleType("qgis")
     package.core = core
     monkeypatch.setitem(sys.modules, "qgis", package)
@@ -71,12 +72,48 @@ def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return core
 
 
+class FakeProviderMetadata:
+    """Only what ``project.open`` asks: decode a provider URI into its path."""
+
+    def decodeUri(self, uri: str) -> dict[str, str]:  # noqa: N802 - a PyQGIS name
+        path = uri.split("|", 1)[0]
+        return {"path": path} if path else {}
+
+
+class FakeProviderRegistry:
+    """``QgsProviderRegistry.instance().providerMetadata(id)``, reduced to two providers."""
+
+    _instance: FakeProviderRegistry | None = None
+
+    def __init__(self) -> None:
+        self.metadata = {"ogr": FakeProviderMetadata(), "gdal": FakeProviderMetadata()}
+
+    @classmethod
+    def instance(cls) -> FakeProviderRegistry:
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def providerMetadata(  # noqa: N802 - a PyQGIS name
+        self, provider: str
+    ) -> FakeProviderMetadata | None:
+        return self.metadata.get(provider)
+
+
 class FakeLayer:
-    def __init__(self, *, valid: bool = True) -> None:
+    def __init__(self, *, valid: bool = True, source: str = "", provider: str = "ogr") -> None:
         self._valid = valid
+        self._source = source
+        self._provider = provider
 
     def isValid(self) -> bool:
         return self._valid
+
+    def source(self) -> str:
+        return self._source
+
+    def providerType(self) -> str:
+        return self._provider
 
 
 class FakeProject:
@@ -100,6 +137,7 @@ class FakeProject:
         self.write_result = write_result
         self.read_path: str | None = None
         self.writes: list[str] = []
+        self.removed: list[str] = []
         self.crs_set: FakeCrs | None = None
 
     def mapLayers(self) -> dict[str, FakeLayer]:  # noqa: N802 - a PyQGIS name
@@ -125,6 +163,10 @@ class FakeProject:
         self.file_name = path
         self.layers = dict(self.layers_after_read)
         return True
+
+    def removeMapLayer(self, layer_id: str) -> None:  # noqa: N802 - a PyQGIS name
+        self.removed.append(layer_id)
+        self.layers.pop(layer_id, None)
 
     def write(self, path: str) -> bool:
         self.writes.append(path)
@@ -161,13 +203,19 @@ def context(
     *,
     iface: FakeIface | None = None,
     roots: tuple[Path, ...] = (),
+    data_roots: tuple[Path, ...] | None = None,
     epoch: int = 0,
 ) -> OperationContext:
     return OperationContext(
         iface=iface or FakeIface(project_),
         project=project_,
         lifecycle=FakeLifecycle(epoch),
-        policy=Settings(allowed_project_roots=roots),
+        policy=Settings(
+            allowed_project_roots=roots,
+            # Most cases allow one root for both keys; the project.open cases need
+            # the data roots to be told apart from the project roots.
+            allowed_data_roots=roots if data_roots is None else data_roots,
+        ),
     )
 
 
@@ -466,9 +514,9 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
         # Two usable layers and one broken one: the counts differ, so counting the
         # wrong side (the usable ones) cannot pass this test.
         layers_after_read={
-            "good": FakeLayer(),
-            "also_good": FakeLayer(),
-            "broken": FakeLayer(valid=False),
+            "good": FakeLayer(source=str(root / "a.gpkg")),
+            "also_good": FakeLayer(source=str(root / "a.gpkg")),
+            "broken": FakeLayer(valid=False, source=str(root / "a.gpkg")),
         },
         crs_authid="EPSG:3857",
     )
@@ -481,6 +529,78 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
     assert result.layer_count == 3
     assert result.invalid_layer_count == 1
     assert result.crs_authid == "EPSG:3857"
+
+
+def test_open_refuses_a_project_that_points_outside_the_allowed_roots(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # A project file names its layers' sources, so ``read()`` reaches them even
+    # though every path the caller typed was allowed (PRD 10.2).
+    root = project_dir(tmp_path)
+    target = root / "leak.qgz"
+    target.write_text("", encoding="utf-8")
+    secret = tmp_path / "elsewhere" / "secret.gpkg"
+    secret.parent.mkdir()
+    secret.write_text("x", encoding="utf-8")
+    loaded = FakeProject(
+        layers_after_read={"leaked": FakeLayer(source=f"{secret}|layername=secret")}
+    )
+    ctx = context(loaded, roots=(root,))
+    request = project.ProjectOpenParams(path=str(target))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(ctx, request),
+    )
+
+    # The layer is not merely reported: it may not stay loaded either.
+    assert loaded.removed == ["leaked"]
+    assert loaded.layers == {}
+    assert "1 layer data source(s)" in failed.message
+    # The message never repeats the path it refused.
+    assert "secret.gpkg" not in failed.message
+
+
+def test_open_keeps_a_layer_whose_source_is_gone_but_inside_the_roots(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # AT-18B: a deleted source inside the roots is a partial load, not a breach of
+    # the policy, so the existence of the source is deliberately not what is asked.
+    root = project_dir(tmp_path)
+    target = root / "a.qgz"
+    target.write_text("", encoding="utf-8")
+    loaded = FakeProject(
+        layers_after_read={"gone": FakeLayer(valid=False, source=str(root / "gone.gpkg"))}
+    )
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert result.invalid_layer_count == 1
+    assert loaded.removed == []
+
+
+def test_open_refuses_a_layer_whose_provider_names_no_local_path(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # A source nobody can decode is not a source this policy can vouch for.
+    root = project_dir(tmp_path)
+    target = root / "a.qgz"
+    target.write_text("", encoding="utf-8")
+    loaded = FakeProject(
+        layers_after_read={"remote": FakeLayer(source="memory?geometry=Point", provider="memory")}
+    )
+    ctx = context(loaded, roots=(root,))
+    request = project.ProjectOpenParams(path=str(target))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(ctx, request),
+    )
+
+    assert loaded.removed == ["remote"]
+    assert "1 layer data source(s)" in failed.message
 
 
 # --- project.save -----------------------------------------------------------

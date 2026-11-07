@@ -47,7 +47,7 @@
 | `PROJECT_SAVE_FAILED` | `project.save` | `project.write()` 返回 `False`（磁盘/权限/编码问题） | 目标文件可能已部分写入，不要假装保存成功；换路径或修权限 |
 | `PROJECT_PATH_REQUIRED` | `project.save` | 没给 `path`，且工程没有关联文件 | 传绝对 `.qgs`/`.qgz` 路径 |
 | `TARGET_EXISTS` | `project.save` | 目标已存在（含工程自己的关联文件）且 `overwrite` 不是 `true` | 确认要覆盖再传 `overwrite=true`；不接受隐式覆盖 |
-| `PATH_NOT_ALLOWED` | 路径策略 | 路径不存在、不是普通文件、软链接跳出、不在允许根目录内、是 URL/provider URI/`/vsi*`、父目录不合法；**默认空允许目录下所有文件访问都命中它** | 先配 `qgis_agent_plugin/allowed_*_roots`（见 `docs/INSTALL.md`）；消息里不会回显你的路径 |
+| `PATH_NOT_ALLOWED` | 路径策略 | 路径不存在、不是普通文件、软链接跳出、不在允许根目录内、是 URL/provider URI/`/vsi*`/Windows UNC（`\\host\share\…`）、父目录不合法；`project.open` 时工程里某层的数据源不在 `allowed_data_roots` 内（这些层会被移除，整次 open 失败）；**默认空允许目录下所有文件访问都命中它** | 先配 `qgis_agent_plugin/allowed_*_roots`（见 `docs/INSTALL.md`）；消息里不会回显你的路径 |
 | `INVALID_LAYER` | `layer.add`、`layer.sum_numeric_field` | 图层构造后 `isValid()` 为假；求和的对象不是有效矢量图层 | 检查数据源本身；工程图层数不会变 |
 | `LAYER_NOT_FOUND` | `layer.get_info`、`layer.set_visibility`、`layer.sum_numeric_field` | 工程里没有这个 `layer_id` | 用 `layer.list` 拿真实 ID；同名的不同图层 ID 不同 |
 | `LAYER_NOT_IN_TREE` | `layer.set_visibility` | 图层已注册但没有图层树节点（`add_to_legend=false` 加进来的） | 不要对这样的图层调可见性；只能 `layer.get_info` |
@@ -57,7 +57,7 @@
 | `TASK_SUBMISSION_FAILED` | 引擎 / 后台适配器 | 没有装后台适配器，或 `QgsTaskManager.addTask()` 返回 0（QGIS 拒绝接手） | 重试一次；持续失败说明 QGIS 任务系统有问题，`message` 里有原因类别 |
 | `STALE_PROJECT` | 后台适配器 / `finalize_main` | 任务运行期间工程被替换（`project_epoch` 变了），结果被拒绝 | 结果作废；在新工程上重新提交 |
 | `OUTPUT_VALIDATION_FAILED` | 引擎 | Operation 的返回值不符它自己声明的输出模型 | 构建缺陷，不是调用方的问题；报 bug |
-| `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常，或状态机拒绕。`message` 是下列几种之一：`<异常类型名>: unexpected failure`（异常原文只进日志）、`QGIS did not create a new project`（`iface.newProject()` 返回 `False`）、`the task ended without a result`（`finished(false)` 且无异常、无取消）、`the completion of this execution failed`（完成回调自己抛了）、`<execution-id>: <旧状态> -> <新状态> is not a transition` 或 `<execution-id>: <状态> is final and cannot change`（`ExecutionStore` 拒绝的写入） | 先看本机日志里的堆栈；`message` 里带 execution id 的两条是状态机拒绕，属于引擎缺陷（不是调用方的问题） |
+| `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常，或状态机拒绕。`message` 是下列几种之一：`<异常类型名>: unexpected failure`（异常原文只进日志）、`QGIS did not create a new project`（`iface.newProject()` 返回 `False`）、`the task ended without a result`（`finished(false)` 且无异常、无取消）、`the task ended without a completion`（适配器发现任务已不在 manager 里，且 `finished()` 从未回调）、`the completion of this execution failed`（完成回调自己抛了）、`<execution-id>: <旧状态> -> <新状态> is not a transition` 或 `<execution-id>: <状态> is final and cannot change`（`ExecutionStore` 拒绝的写入） | 先看本机日志里的堆栈；`message` 里带 execution id 的两条是状态机拒绕，属于引擎缺陷（不是调用方的问题） |
 
 补充：`unload()` 期间引擎先把每条活动后台记录写成 `CANCEL_REQUESTED`，所以卸载之后
 这些调用只会归档成 `CANCELLED` 或 `FAILED`，不会再进 `finalize_main` 去改工程（PRD 9.3.3）。
@@ -70,7 +70,7 @@
 
 | 当时的状态 | 结果 |
 | --- | --- |
-| `QUEUED`（主线程或后台） | `accepted=true`，记录**立即** `CANCELLED`；之后的事件回调会跳过它 |
+| `QUEUED`（主线程或后台） | `accepted=true`，记录**立即** `CANCELLED`；之后的事件回调会跳过它；后台的排队调用还会被从适配器的等待队列里摘掉，不占位 |
 | 后台 `SCHEDULED` / `RUNNING` | `accepted=true`，记录转 `CANCEL_REQUESTED`，并调 `QgsTask.cancel()`；等任务自己报告终止才变 `CANCELLED` |
 | `FINALIZING` | `accepted=false`，`reason="FINALIZING"`：结果正在提交，不允许出现“写完了却报取消” |
 | 已是终态 | `accepted=false`，`reason="ALREADY_TERMINAL"` |

@@ -68,6 +68,7 @@ class Fixtures:
     corrupt_project: Path
     existing_project: Path
     outside: Path
+    leak: Path
     escape: Path | None
 
 
@@ -147,6 +148,13 @@ def build(root: Path) -> Fixtures:
     existing_project = data / "existing.qgs"
     existing_project.write_bytes(b"an existing project file whose bytes must not change")
 
+    # A project inside the allowed roots whose only layer names a source outside
+    # them: the project file passes the path policy, its data source does not.
+    secret = outside / "secret.gpkg"
+    secret.write_bytes(cities.read_bytes())
+    leak = data / "leak.qgz"
+    _write_project(leak, [(secret, CITIES_LAYER, "leaked")], [])
+
     return Fixtures(
         root=data,
         cities=cities,
@@ -158,6 +166,7 @@ def build(root: Path) -> Fixtures:
         corrupt_project=corrupt_project,
         existing_project=existing_project,
         outside=outside,
+        leak=leak,
         escape=_junction(data / "escape", outside),
     )
 

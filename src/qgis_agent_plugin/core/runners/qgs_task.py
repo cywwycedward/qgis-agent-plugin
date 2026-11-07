@@ -15,8 +15,8 @@ of the task shell are guarded.  And a ``QgsTask`` is never kept: QGIS deletes it
 C++ side as soon as the task ends, so only its task id is held while it lives and
 nothing of it survives into the record.
 
-QGIS is imported inside ``_build_task_class`` and ``_task_manager``, which keeps
-this module importable in a bare interpreter like the rest of the core.
+QGIS is imported inside ``_build_task_class``, which keeps this module importable
+in a bare interpreter like the rest of the core.
 """
 
 from __future__ import annotations
@@ -122,8 +122,8 @@ class OperationTaskRunner:
     def __init__(
         self,
         *,
+        task_manager: Any,
         task_factory: Callable[..., Any] | None = None,
-        task_manager: Any = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
         self._new_task = task_factory or task_class()
@@ -133,8 +133,7 @@ class OperationTaskRunner:
         # submission order.  Both are emptied as work finishes, so neither is history.
         self._active: dict[str, _Submission] = {}
         self._waiting: deque[_Submission] = deque()
-        if task_manager is not None:
-            task_manager.progressChanged.connect(self._progress_reported)
+        task_manager.progressChanged.connect(self._progress_reported)
 
     def __call__(
         self,
@@ -145,6 +144,7 @@ class OperationTaskRunner:
     ) -> None:
         """The engine's seam: one accepted background call, still ``QUEUED``."""
 
+        self._reconcile()
         submission = _Submission(engine, record.execution_id, operation, request)
         if len(self._active) >= engine._settings.max_active_background:
             # The call keeps its QUEUED record until a slot frees (PRD 8.5, AT-08C).
@@ -153,23 +153,43 @@ class OperationTaskRunner:
         self._start(submission)
 
     def cancel(self, engine: OperationEngine, execution_id: str) -> None:
-        """Ask one task to stop; the engine has already written the request (PRD 8.5).
+        """Ask one task to stop, or drop one call still waiting for a slot.
 
         Never ``QgsTaskManager.cancelAll()``: that is the whole QGIS session's queue,
         not this plugin's own tasks.
         """
 
         submission = self._active.get(execution_id)
-        manager = self._manager
-        if submission is None or manager is None:
+        if submission is None:
+            # A call still in the waiting deque has no task to ask: removing its entry
+            # is what keeps the deque from growing on every submit-and-cancel.
+            for waiting in tuple(self._waiting):
+                if waiting.execution_id == execution_id:
+                    self._waiting.remove(waiting)
             return
-        task = manager.task(submission.task_id)
+        task = self._manager.task(submission.task_id)
         if task is None:
             return
         try:
             task.cancel()
         except Exception:  # noqa: BLE001 - a task QGIS already dropped may not raise here
             _LOGGER.exception("cancel of task %s failed", submission.task_id)
+
+    def _reconcile(self) -> None:
+        """Settle a task the manager no longer holds and never sent a completion for.
+
+        ``finished()`` is the only report this adapter normally gets, and QGIS owns a
+        task from ``addTask`` on.  Without this check a dropped task would keep its
+        record live and hold one of the two slots for the rest of the session, so the
+        manager is asked about each live task once per new submission (PRD 12.3).
+        """
+
+        for execution_id, submission in list(self._active.items()):
+            if self._manager.task(submission.task_id) is not None:
+                continue
+            del self._active[execution_id]
+            _LOGGER.warning("task %s ended without a completion", submission.task_id)
+            self._abandon(submission, "the task ended without a completion")
 
     def task_finished(
         self, execution_id: str, run: OperationRun, task: Any, succeeded: bool
@@ -191,7 +211,7 @@ class OperationTaskRunner:
             self._complete(submission, run, task, succeeded)
         except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 8.4, 11.3)
             _LOGGER.exception("completion of %s failed", execution_id)
-            self._abandon(submission)
+            self._abandon(submission, "the completion of this execution failed")
         finally:
             self._drain()
 
@@ -224,10 +244,10 @@ class OperationTaskRunner:
         else:
             self._finish_results(submission, self._running(store, execution_id, record), run.result)
 
-    def _abandon(self, submission: _Submission) -> None:
-        """Settle a record whose completion handler broke (PRD 12.3).
+    def _abandon(self, submission: _Submission, message: str) -> None:
+        """Settle a record whose completion never arrived or broke (PRD 12.3).
 
-        The task has ended, so a record still in a live state could never be moved
+        The task is gone, so a record still in a live state could never be moved
         again; every non-terminal status has an edge to FAILED (PRD 8.2).
         """
 
@@ -238,7 +258,7 @@ class OperationTaskRunner:
                     store,
                     submission.execution_id,
                     INTERNAL_ERROR,
-                    "the completion of this execution failed",
+                    message,
                 )
         except Exception:  # noqa: BLE001 - nothing may escape into the Qt slot
             _LOGGER.exception("could not settle %s", submission.execution_id)
@@ -277,7 +297,7 @@ class OperationTaskRunner:
             self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(error))
             return
         try:
-            task_id = self._task_manager().addTask(task)
+            task_id = self._manager.addTask(task)
         except Exception:  # noqa: BLE001 - a PyQGIS refusal is still a submission failure
             _LOGGER.exception("%s: addTask raised", operation.name)
             task_id = 0
@@ -382,15 +402,6 @@ class OperationTaskRunner:
             if submission.task_id == task_id:
                 return submission
         return None
-
-    def _task_manager(self) -> Any:
-        if self._manager is None:
-            from qgis.core import QgsTaskManager
-
-            manager = QgsTaskManager()
-            manager.progressChanged.connect(self._progress_reported)
-            self._manager = manager
-        return self._manager
 
     @staticmethod
     def _running(store: ExecutionStore, execution_id: str, record: Any) -> Any:

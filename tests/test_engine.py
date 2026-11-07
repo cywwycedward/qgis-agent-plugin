@@ -242,6 +242,7 @@ class Harness:
         *operations: BaseOperation,
         settings: Settings | None = None,
         background_runner: BackgroundRunner | None = None,
+        background_cancel: Any = None,
     ) -> None:
         self.registry = OperationRegistry()
         for operation in operations:
@@ -254,6 +255,7 @@ class Harness:
             self.lifecycle,
             post=self.queue,
             background_runner=background_runner,
+            background_cancel=background_cancel,
         )
         # The store is the engine's own; the tests read it to prove a refused call
         # left nothing behind and to reach states only F5 can produce.
@@ -403,6 +405,39 @@ def test_a_cancelled_background_call_is_never_handed_to_the_adapter() -> None:
     harness.queue.tick()
     assert handed == []
     assert harness.store.get(record.execution_id).status is CANCELLED
+
+
+def test_cancelling_a_queued_background_call_tells_the_adapter() -> None:
+    stopped: list[str] = []
+
+    def stopper(engine: OperationEngine, execution_id: str) -> None:
+        stopped.append(execution_id)
+
+    harness = Harness(Sum(), background_runner=no_adapter, background_cancel=stopper)
+    record = harness.engine.submit("test.sum", {})
+
+    receipt = harness.engine.cancel(record.execution_id)
+
+    # A background call that never reached a task is still the adapter's waiting
+    # entry, and only the adapter can take it out of that queue.
+    assert receipt.status is CANCELLED
+    assert stopped == [record.execution_id]
+
+
+def test_cancelling_a_queued_main_thread_call_does_not_touch_the_adapter() -> None:
+    stopped: list[str] = []
+
+    def stopper(engine: OperationEngine, execution_id: str) -> None:
+        stopped.append(execution_id)
+
+    harness = Harness(Echo(), background_cancel=stopper)
+    record = harness.engine.submit("test.echo", {})
+
+    harness.engine.cancel(record.execution_id)
+
+    # The cancel seam belongs to background work: a queued main-thread call is only
+    # the event-loop callback the runner skips.
+    assert stopped == []
 
 
 def test_a_stale_callback_does_not_run_a_call_that_already_moved_on() -> None:

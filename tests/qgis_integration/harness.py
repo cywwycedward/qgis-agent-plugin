@@ -442,7 +442,7 @@ class Context:
     # -- lifecycle ---------------------------------------------------------
 
     def load(self) -> Any:
-        from qgis_agent_plugin.plugin import classFactory
+        from qgis_agent_plugin import classFactory
 
         plugin = classFactory(self.iface)
         plugin.initGui()

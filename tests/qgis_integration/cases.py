@@ -1098,6 +1098,56 @@ def at_27_v1_half(ctx: Context) -> str:
     )
 
 
+def at_28_layer_add_sub_layer(ctx: Context) -> str:
+    """PRD 7.6: one named table in a GeoPackage, reached through the OGR encoder."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    source = ctx.fixtures.spaced  # its own name contains a space on purpose
+    layer_id = ctx.add_layer(source, "at28 roads", sub_layer=fixtures.ROADS_LAYER)
+    layer = QgsProject.instance().mapLayer(layer_id)
+    if layer is None:
+        raise AssertionError("layer.add reported SUCCEEDED but registered no layer")
+
+    equal(layer.providerType(), "ogr", "the provider of a sub-layer add")
+    equal(layer.isValid(), True, "the layer is usable")
+    # The GeoPackage holds five cities points and one roads line, so the count is
+    # what proves the encoder selected the named table and not the first one.
+    equal(layer.featureCount(), 1, "the features of the roads table")
+    equal(
+        result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))["provider"],
+        "ogr",
+        "the provider layer.get_info reports",
+    )
+    return (
+        f"layer.add(sub_layer='{fixtures.ROADS_LAYER}') on {source.name!r} SUCCEEDED, provider "
+        f"ogr, featureCount 1 (cities holds 5): the OGR encoder chose the named table"
+    )
+
+
+def at_29_open_refuses_a_source_outside_the_roots(ctx: Context) -> str:
+    """A project file may not smuggle in data the path policy refuses (PRD 10.2)."""
+
+    record = ctx.run("project.open", {"path": str(ctx.fixtures.leak), "discard_current": True})
+
+    equal(
+        record.status,
+        ExecutionStatus.FAILED,
+        "project.open on a project whose layer source is outside the roots",
+    )
+    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an outside data source")
+    names = [layer.name() for layer in project_layers().values()]
+    require("leaked" not in names, f"the outside layer is still loaded: {names}")
+    equal(len(project_layers()), 0, "the layers left in the project")
+    reset_project(ctx)
+    return (
+        "the QGZ itself is inside allowed_project_roots, its only layer names a GeoPackage in a "
+        "sibling directory: FAILED(PATH_NOT_ALLOWED), the layer was removed from the project, "
+        "and no layer stayed registered"
+    )
+
+
 CASES = (
     ("AT-01", at_01_duplicate_registration),
     ("AT-02", at_02_invalid_input),
@@ -1131,4 +1181,6 @@ CASES = (
     ("AT-26", at_26_wrong_thread),
     ("AT-27", at_27_pydantic_v2),
     ("AT-27-v1", at_27_v1_half),
+    ("AT-28", at_28_layer_add_sub_layer),
+    ("AT-29", at_29_open_refuses_a_source_outside_the_roots),
 )
