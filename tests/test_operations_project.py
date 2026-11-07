@@ -377,7 +377,13 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
     target.write_text("", encoding="utf-8")
     loaded = FakeProject(
         read_result=True,
-        layers_after_read={"good": FakeLayer(), "broken": FakeLayer(valid=False)},
+        # Two usable layers and one broken one: the counts differ, so counting the
+        # wrong side (the usable ones) cannot pass this test.
+        layers_after_read={
+            "good": FakeLayer(),
+            "also_good": FakeLayer(),
+            "broken": FakeLayer(valid=False),
+        },
         crs_authid="EPSG:3857",
     )
     ctx = context(loaded, roots=(root,))
@@ -386,7 +392,7 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
 
     assert Path(result.file_path) == target.resolve()
     assert loaded.read_path == str(target.resolve())
-    assert result.layer_count == 2
+    assert result.layer_count == 3
     assert result.invalid_layer_count == 1
     assert result.crs_authid == "EPSG:3857"
 
