@@ -30,13 +30,33 @@ _VSI = "/vsi"
 _UNC = ("\\\\", "//", "\\\\?\\", "//?/")
 
 
-def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> Path:
+def is_remote_uri(raw: str) -> bool:
+    """Whether ``raw`` names network I/O or a virtual file system, not a local file.
+
+    Public because ``project.open`` asks the same question of the sources a project
+    file names, before ``read()`` would reach them (PRD 10.2).
+    """
+
+    return raw.lower().startswith(_VSI) or raw.startswith(_UNC) or bool(_URI.match(raw))
+
+
+def resolve_path(
+    raw: str,
+    roots: Sequence[str | Path],
+    *,
+    must_exist: bool,
+    allow_directory: bool = False,
+) -> Path:
     """Return the normalised path, or raise ``PATH_NOT_ALLOWED``.
 
     ``must_exist=True`` is a read: the target has to be an existing regular file.
     ``must_exist=False`` is a save: the target may be absent, but its parent must
     exist and be inside the same roots, and the overwrite decision stays with the
     operation (``TARGET_EXISTS`` is not this module's concern).
+
+    ``allow_directory`` is for a data source, not for a project file: a source may
+    be a directory (an ESRI FileGDB is one), and the allow-list asks the same
+    question of it -- resolved, inside a root -- but does not require a file.
     """
 
     _refuse_remote(raw)
@@ -49,7 +69,7 @@ def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> 
 
     if must_exist:
         target = _resolve_existing(path)
-        if not target.is_file():
+        if not target.is_file() and not (allow_directory and target.is_dir()):
             _refuse()
     else:
         parent = _resolve_existing(path.parent)
@@ -58,7 +78,7 @@ def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> 
         # resolve() also normalises a trailing ``.``/``..``, which would otherwise
         # look like it lived inside the root while naming its parent.
         target = (parent / path.name).resolve()
-        if target.is_dir():
+        if target.is_dir() and not allow_directory:
             _refuse()
 
     if not any(target == root or root in target.parents for root in allowed):
@@ -78,7 +98,7 @@ def _resolve_existing(path: Path) -> Path:
 def _refuse_remote(raw: str) -> None:
     """Refuse URLs, provider schemes and virtual file systems before any I/O."""
 
-    if raw.lower().startswith(_VSI) or raw.startswith(_UNC) or _URI.match(raw):
+    if is_remote_uri(raw):
         _refuse()
 
 

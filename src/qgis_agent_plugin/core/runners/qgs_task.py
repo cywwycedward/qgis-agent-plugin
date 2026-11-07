@@ -144,7 +144,6 @@ class OperationTaskRunner:
     ) -> None:
         """The engine's seam: one accepted background call, still ``QUEUED``."""
 
-        self._reconcile()
         submission = _Submission(engine, record.execution_id, operation, request)
         if len(self._active) >= engine._settings.max_active_background:
             # The call keeps its QUEUED record until a slot frees (PRD 8.5, AT-08C).
@@ -174,22 +173,6 @@ class OperationTaskRunner:
             task.cancel()
         except Exception:  # noqa: BLE001 - a task QGIS already dropped may not raise here
             _LOGGER.exception("cancel of task %s failed", submission.task_id)
-
-    def _reconcile(self) -> None:
-        """Settle a task the manager no longer holds and never sent a completion for.
-
-        ``finished()`` is the only report this adapter normally gets, and QGIS owns a
-        task from ``addTask`` on.  Without this check a dropped task would keep its
-        record live and hold one of the two slots for the rest of the session, so the
-        manager is asked about each live task once per new submission (PRD 12.3).
-        """
-
-        for execution_id, submission in list(self._active.items()):
-            if self._manager.task(submission.task_id) is not None:
-                continue
-            del self._active[execution_id]
-            _LOGGER.warning("task %s ended without a completion", submission.task_id)
-            self._abandon(submission, "the task ended without a completion")
 
     def task_finished(
         self, execution_id: str, run: OperationRun, task: Any, succeeded: bool
@@ -245,7 +228,7 @@ class OperationTaskRunner:
             self._finish_results(submission, self._running(store, execution_id, record), run.result)
 
     def _abandon(self, submission: _Submission, message: str) -> None:
-        """Settle a record whose completion never arrived or broke (PRD 12.3).
+        """Settle a record whose completion broke (PRD 12.3).
 
         The task is gone, so a record still in a live state could never be moved
         again; every non-terminal status has an edge to FAILED (PRD 8.2).

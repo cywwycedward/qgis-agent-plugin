@@ -4,8 +4,9 @@ PRD 12.1 forbids pointing the destructive cases at a user's own projects, so eve
 file here is generated from scratch: a GeoPackage holding two layers (one with a
 numeric field that has nulls), a raster, a valid QGZ, a QGZ whose only data source
 has been deleted, a corrupt GeoPackage, a corrupt QGZ, a file that already exists
-for the "do not overwrite" case, a directory outside the allowed roots, and a
-junction inside them that points out.  ``build`` deletes and rebuilds its own
+for the "do not overwrite" case, a directory outside the allowed roots, a
+junction inside them that points out, and two projects that name a remote
+datasource.  ``build`` deletes and rebuilds its own
 directory, so a rerun needs no cleanup.
 
 Deleting and rebuilding is only allowed inside a root this script made itself, and
@@ -22,6 +23,7 @@ fixture exists at all.
 from __future__ import annotations
 
 import gc
+import re
 import shutil
 import subprocess
 import warnings
@@ -54,6 +56,12 @@ class UnsafeRoot(Exception):
     """The work root is not this run's own: outside the temp directory, or not ours."""
 
 
+# A project file that names a remote source: one connection attempt each if it is
+# read before it is checked (AT-30).  The port is closed and the host does not exist.
+REMOTE_VSICURL = "/vsicurl/http://127.0.0.1:9/never.tif"
+REMOTE_UNC = r"\\no-such-host-audit\share\data.gpkg"
+
+
 @dataclass(frozen=True)
 class Fixtures:
     """Every generated file, by the role a case needs it for."""
@@ -69,6 +77,8 @@ class Fixtures:
     existing_project: Path
     outside: Path
     leak: Path
+    remote_vsicurl: Path
+    remote_unc: Path
     escape: Path | None
 
 
@@ -155,6 +165,13 @@ def build(root: Path) -> Fixtures:
     leak = data / "leak.qgz"
     _write_project(leak, [(secret, CITIES_LAYER, "leaked")], [])
 
+    # Two projects inside the allowed roots whose only layer names a remote source:
+    # reading either one before checking it would cost a connection (AT-30).
+    remote_vsicurl = data / "remote vsicurl.qgs"
+    _write_remote_project(remote_vsicurl, raster, REMOTE_VSICURL)
+    remote_unc = data / "remote unc.qgs"
+    _write_remote_project(remote_unc, raster, REMOTE_UNC)
+
     return Fixtures(
         root=data,
         cities=cities,
@@ -167,6 +184,8 @@ def build(root: Path) -> Fixtures:
         existing_project=existing_project,
         outside=outside,
         leak=leak,
+        remote_vsicurl=remote_vsicurl,
+        remote_unc=remote_unc,
         escape=_junction(data / "escape", outside),
     )
 
@@ -247,6 +266,28 @@ def _write_project(path: Path, vectors: list[tuple[Path, str, str]], rasters: li
     if not project.write(str(path)):
         raise RuntimeError(f"could not write {path}")
     project.clear()
+
+
+def _write_remote_project(path: Path, local_raster: Path, remote: str) -> None:
+    """A real project whose one layer's ``<datasource>`` is rewritten to ``remote``.
+
+    Building the layer from ``remote`` would itself reach it, which is the one thing
+    a fixture may not do; writing a local project and replacing the text afterwards
+    leaves a file QGIS would happily open.
+    """
+
+    _write_project(path, [], [local_raster])
+    text = path.read_text(encoding="utf-8")
+    rewritten, replaced = re.subn(
+        r"<datasource>[^<]*</datasource>",
+        # A function, not a template: a UNC path is full of backslash escapes.
+        lambda _match: f"<datasource>{remote}</datasource>",
+        text,
+        count=1,
+    )
+    if replaced != 1:
+        raise RuntimeError(f"could not place the remote datasource in {path}")
+    path.write_text(rewritten, encoding="utf-8")
 
 
 def _junction(link: Path, target: Path) -> Path | None:

@@ -254,17 +254,29 @@ engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz", "discard_
 engine.run_sync("project.create", {"crs_authid": "epsg:3857", "discard_current": True})
 ```
 
-已实测（`project.create` 是“已实测（GUI 未跑）”：headless 里没有 `iface.newProject()`，用等价替身
-“`QgsProject.instance().clear()` + 返回 `True`”；`project.open` 不经过 `iface`）：
+已实测（headless 真 QGIS；`project.create` 是“已实测（GUI 未跑）”：headless 里没有 `iface.newProject()`，
+用等价替身“`QgsProject.instance().clear()` + 返回 `True`”；`project.open` 不经过 `iface`）。
+`demo.qgz` 里是一个图层，数据源在 `C:\temp\data`：
 
 ```text
+两键都配（allowed_project_roots=C:\temp\projects，allowed_data_roots=C:\temp\data）
 open demo.qgz   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
                                "invalid_layer_count": 0}   ；lifecycle epoch 0 -> 1，记录 epoch 仍是 0
+
+只配 allowed_project_roots，allowed_data_roots 留空
+open demo.qgz   -> FAILED     PATH_NOT_ALLOWED | 1 layer data source(s) are outside
+                               allowed_data_roots; they were removed and the project was replaced
+                  之后：fileName() 已是 ...\demo.qgz，mapLayers() 为空，isDirty() = false
+
 create          -> SUCCEEDED  {"crs_authid": "EPSG:3857", "file_path": null, "layer_count": 0}
                                ；lifecycle epoch 1 -> 2，记录 epoch 仍是 1
 create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dirty": true,
                         "layer_count": 0, "project_epoch": 2}
 ```
+
+第二段是旧版文档没写的那一半：`project.open` 要两个键（工程文件用 `allowed_project_roots`，
+工程里每一层的数据源用 `allowed_data_roots`），而且这一步失败**不回滚**——工程文件已经
+`read()` 进去了，只留下“去掉越界层之后的剩货”，`message` 也这么写。
 
 三条要注意的事：
 

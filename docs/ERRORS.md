@@ -57,7 +57,7 @@
 | `TASK_SUBMISSION_FAILED` | 引擎 / 后台适配器 | 没有装后台适配器，或 `QgsTaskManager.addTask()` 返回 0（QGIS 拒绝接手） | 重试一次；持续失败说明 QGIS 任务系统有问题，`message` 里有原因类别 |
 | `STALE_PROJECT` | 后台适配器 / `finalize_main` | 任务运行期间工程被替换（`project_epoch` 变了），结果被拒绝 | 结果作废；在新工程上重新提交 |
 | `OUTPUT_VALIDATION_FAILED` | 引擎 | Operation 的返回值不符它自己声明的输出模型 | 构建缺陷，不是调用方的问题；报 bug |
-| `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常，或状态机拒绕。`message` 是下列几种之一：`<异常类型名>: unexpected failure`（异常原文只进日志）、`QGIS did not create a new project`（`iface.newProject()` 返回 `False`）、`the task ended without a result`（`finished(false)` 且无异常、无取消）、`the task ended without a completion`（适配器发现任务已不在 manager 里，且 `finished()` 从未回调）、`the completion of this execution failed`（完成回调自己抛了）、`<execution-id>: <旧状态> -> <新状态> is not a transition` 或 `<execution-id>: <状态> is final and cannot change`（`ExecutionStore` 拒绝的写入） | 先看本机日志里的堆栈；`message` 里带 execution id 的两条是状态机拒绕，属于引擎缺陷（不是调用方的问题） |
+| `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常，或状态机拒绕。`message` 是下列几种之一：`<异常类型名>: unexpected failure`（异常原文只进日志）、`QGIS did not create a new project`（`iface.newProject()` 返回 `False`）、`the task ended without a result`（`finished(false)` 且无异常、无取消）、`the completion of this execution failed`（完成回调自己抛了）、`<execution-id>: <旧状态> -> <新状态> is not a transition` 或 `<execution-id>: <状态> is final and cannot change`（`ExecutionStore` 拒绝的写入） | 先看本机日志里的堆栈；`message` 里带 execution id 的两条是状态机拒绕，属于引擎缺陷（不是调用方的问题） |
 
 补充：`unload()` 期间引擎先把每条活动后台记录写成 `CANCEL_REQUESTED`，所以卸载之后
 这些调用只会归档成 `CANCELLED` 或 `FAILED`，不会再进 `finalize_main` 去改工程（PRD 9.3.3）。

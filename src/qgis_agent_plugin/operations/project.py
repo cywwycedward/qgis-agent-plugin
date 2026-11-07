@@ -17,6 +17,9 @@ in a bare interpreter and the path/CRS rules stay testable without QGIS.
 
 from __future__ import annotations
 
+import re
+import zipfile
+from html import unescape
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -40,10 +43,14 @@ from ..core.models import (
     FrameworkError,
     Params,
 )
-from ..core.security import resolve_path
+from ..core.security import is_remote_uri, resolve_path
 
 # The two formats this plugin reads and writes; anything else is a caller mistake.
 PROJECT_SUFFIXES = (".qgs", ".qgz")
+
+# What a project file says about each layer's data.  A ``.qgs`` is this XML and a
+# ``.qgz`` is a zip whose ``.qgs`` member is the same XML; only that text is read.
+_DATASOURCE = re.compile(r"<datasource>(.*?)</datasource>", re.DOTALL | re.IGNORECASE)
 
 
 def _project_path(raw: str) -> str:
@@ -157,6 +164,7 @@ class ProjectOpen(
     def execute_main(self, ctx: OperationContext, request: ProjectOpenParams) -> ProjectOpenResult:
         path = resolve_path(request.path, ctx.policy.allowed_project_roots, must_exist=True)
         _refuse_replacement_unless_discarding(ctx, request.discard_current)
+        _refuse_remote_datasources(path)
 
         # `read()` rather than `iface.addProject()`, which may prompt: a refusal
         # has to be an error code, never a modal dialog (PRD 7.3).
@@ -177,7 +185,7 @@ class ProjectOpen(
             raise FrameworkError(
                 PATH_NOT_ALLOWED,
                 f"{len(outside)} layer data source(s) are outside allowed_data_roots; "
-                "they were removed and the project was not opened",
+                "they were removed and the project was replaced",
             )
         return ProjectOpenResult(
             file_path=str(path),
@@ -245,14 +253,56 @@ class ProjectGetInfo(
         )
 
 
+def _refuse_remote_datasources(path: Path) -> None:
+    """Refuse a project that names a remote data source before ``read()`` opens it.
+
+    ``QgsProject.read()`` builds every layer the file names, so a remote URI in the
+    file is an HTTP request or an SMB authentication attempt on the main thread --
+    before any per-layer check could run (PRD 10.2).  Only the file's bytes are read
+    here, and nothing is built.
+    """
+
+    try:
+        sources = _project_datasources(path)
+    except (OSError, zipfile.BadZipFile):
+        # A file this scan cannot parse is what ``read()`` reports as
+        # PROJECT_OPEN_FAILED; there is nothing here to refuse ahead of it.
+        return
+    for source in sources:
+        # A WMS/XYZ layer carries its endpoint inside the datasource rather than as
+        # the whole string, so a scheme anywhere in it is the same network reach.
+        # XML character references are what QGIS decodes before it builds the layer.
+        source = unescape(source)
+        if is_remote_uri(source) or "://" in source:
+            raise FrameworkError(
+                PATH_NOT_ALLOWED,
+                "the project file names a remote data source; it was not opened",
+            )
+
+
+def _project_datasources(path: Path) -> list[str]:
+    """The ``<datasource>`` text of a ``.qgs`` or of the ``.qgs`` member of a ``.qgz``."""
+
+    if path.suffix.lower() == ".qgz":
+        with zipfile.ZipFile(path) as archive:
+            members = [name for name in archive.namelist() if name.lower().endswith(".qgs")]
+            text = "\n".join(archive.read(name).decode("utf-8", "replace") for name in members)
+    else:
+        text = path.read_bytes().decode("utf-8", "replace")
+    return [source.strip() for source in _DATASOURCE.findall(text)]
+
+
 def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, Any]) -> list[str]:
     """The layers whose own data source the path policy would refuse.
 
     The allow-list has to be asked about every source a project names, not only
     about the project file: ``read()`` reaches whatever the file points at.  The
     provider decodes its own URI, because a source is not a path string -- ``ogr``
-    spells one as ``path|layername=name``.  A provider that cannot name a local
-    path is treated as outside: an unreadable source is not a trusted one.
+    spells one as ``path|layername=name``.  A source that is a directory is a source
+    (an ESRI FileGDB), so only a file is not required.  A provider that cannot name
+    a local path, or cannot decode its own URI, is treated as outside: an unreadable
+    source is not a trusted one, and one provider's exception may not erase the
+    answer the other layers already gave.
     """
 
     from qgis.core import QgsProviderRegistry
@@ -260,7 +310,11 @@ def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, 
     outside: list[str] = []
     for layer_id, layer in layers.items():
         metadata = QgsProviderRegistry.instance().providerMetadata(layer.providerType())
-        decoded = metadata.decodeUri(layer.source()) if metadata is not None else None
+        try:
+            decoded = metadata.decodeUri(layer.source()) if metadata is not None else None
+        except Exception:  # noqa: BLE001 - any decoder failure is an untrusted source
+            outside.append(layer_id)
+            continue
         raw = decoded.get("path") if decoded else None
         if not raw:
             outside.append(layer_id)
@@ -268,7 +322,7 @@ def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, 
         try:
             # Save-shaped on purpose: a project naming a source that is gone is
             # AT-18B (read, invalid_layer_count > 0), not a breach of the roots.
-            resolve_path(raw, ctx.policy.allowed_data_roots, must_exist=False)
+            resolve_path(raw, ctx.policy.allowed_data_roots, must_exist=False, allow_directory=True)
         except FrameworkError:
             outside.append(layer_id)
     return outside

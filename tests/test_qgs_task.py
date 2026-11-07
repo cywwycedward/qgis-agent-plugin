@@ -783,6 +783,21 @@ def test_an_unexpected_failure_keeps_its_type_and_not_its_text(
     assert "the worker broke" in caplog.text
 
 
+def test_shutdown_drops_the_calls_still_waiting_for_a_slot(counting: Counting) -> None:
+    harness = Harness(counting)
+    harness.submit(counting.name, {"amount": 1})
+    harness.submit(counting.name, {"amount": 2})
+    waiting = harness.submit(counting.name, {"amount": 3})
+    assert len(harness.runner._waiting) == 1
+
+    harness.engine.shutdown()
+
+    # The record is terminal, and the adapter's deque may not keep an entry that
+    # nothing after unload will ever drain.
+    assert harness.record(waiting).status is CANCELLED
+    assert list(harness.runner._waiting) == []
+
+
 def test_a_completion_the_runner_does_not_own_is_refused_politely(
     counting: Counting,
 ) -> None:
@@ -809,27 +824,3 @@ def test_a_task_that_ends_without_a_result_is_failed(counting: Counting) -> None
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INTERNAL_ERROR
-
-
-def test_a_task_the_manager_dropped_without_a_completion_is_failed(
-    counting: Counting,
-) -> None:
-    harness = Harness(counting)
-    first = harness.submit(counting.name, {"amount": 1})
-    second = harness.submit(counting.name, {"amount": 2})
-    stale = harness.runner._active[first.execution_id].task_id
-    # QGIS drops the task without ever calling finished(): nothing else will report,
-    # and the record would hold one of the two slots for the rest of the session.
-    del harness.manager.tasks[stale]
-
-    third = harness.submit(counting.name, {"amount": 3})
-
-    record = harness.record(first)
-    assert record.status is FAILED
-    assert record.error is not None
-    assert record.error.code == INTERNAL_ERROR
-    assert record.error.message == "the task ended without a completion"
-    # The slot it held is free again, so the new call started instead of waiting.
-    assert harness.record(third).status is SCHEDULED
-    assert harness.record(second).status is SCHEDULED
-    assert first.execution_id not in harness.runner._active

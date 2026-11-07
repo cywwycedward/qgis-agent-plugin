@@ -97,8 +97,8 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 
 | 键 | 默认 | 语义 |
 | --- | --- | --- |
-| `allowed_data_roots` | 空列表 | 允许 `layer.add` 读取的绝对目录。空 = 一个都不许 |
-| `allowed_project_roots` | 空列表 | 允许 `project.open` / `project.save` 的绝对目录。空 = 一个都不许 |
+| `allowed_data_roots` | 空列表 | 允许 `layer.add` 读取的绝对目录，以及 `project.open` 检查工程里每层数据源用的目录（数据源可以是文件或目录）。空 = 一个都不许 |
+| `allowed_project_roots` | 空列表 | 允许 `project.open` / `project.save` 的绝对目录。空 = 一个都不许。`project.open` **两个键都要配**：工程里的每层数据源还得在 `allowed_data_roots` 内，否则打开含图层的工程会 `PATH_NOT_ALLOWED`（且当前工程已被替换，见 `docs/OPERATIONS.md` §3） |
 | `max_active_background` | 2 | 同时运行的后台 `QgsTask` 数；超出的排队 |
 | `max_pending` | 32 | 排队上限（主线程 + 后台合计），超出返回 `TOO_MANY_EXECUTIONS` |
 | `max_terminal_records` | 200 | 终态记录保留条数 |

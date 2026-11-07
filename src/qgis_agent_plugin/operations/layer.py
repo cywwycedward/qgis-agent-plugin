@@ -139,6 +139,11 @@ def layer_source_uri(source: Path, sub_layer: str | None) -> str:
     provider's own encoder: how its URI joins a path and a layer name, and how it
     escapes each part, is the provider's rule -- re-deriving the
     ``path|layername=name`` shape by hand is a guess about that rule.
+
+    shortcut: this vets the file the caller named, not the sources that file
+    itself names -- a local ``.vrt`` may carry a ``/vsicurl/`` or WMS source
+    inside it; upgrade to reading a container's own sources if untrusted VRTs
+    become an input.
     """
 
     if sub_layer is None:

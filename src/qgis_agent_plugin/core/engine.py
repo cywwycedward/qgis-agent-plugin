@@ -200,7 +200,11 @@ class OperationEngine:
             return
         self._closing = True
         for execution_id in self._store.ids(_QUEUED):
-            self._store.transition(execution_id, ExecutionStatus.CANCELLED)
+            record = self._store.transition(execution_id, ExecutionStatus.CANCELLED)
+            if record.strategy is ExecutionStrategy.BACKGROUND:
+                # A queued background call is still the adapter's waiting entry, and
+                # after this session closes nothing would ever drain it.
+                self._cancel_task(execution_id)
         self._stop_background()
 
     def on_project_replaced(self) -> None:
