@@ -103,9 +103,25 @@ _VALUE_HEAD = 64
 # but no ``//``, and both are values QGIS writes into a project.
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
+# A GDAL subdataset source, which ``decodeUri`` returns whole (see ``_subdataset_path``):
+# an upper-case driver prefix, then the file quoted or behind a ``WORD:<index>:`` prefix.
+_SUBDATASET = re.compile(r"\A[A-Z][A-Z0-9_]+:")
+_SUBDATASET_INDEX = re.compile(r"\A(?:\d+|off):", re.IGNORECASE)
+_ABSOLUTE_PATH = re.compile(r"\A(?:[A-Za-z]:[\\/]|[\\/])")
+
+# A data source is the one value judged by containment: GDAL spells a remote file
+# inside its own local syntax (``NETCDF:"/vsicurl/http://…":var``) and the marker can
+# sit past the head this scan keeps.  ``_MARKER_TAIL`` is how many characters of the
+# value are kept, so a marker split across two character-data events is still seen.
+_MARKER = "://"
+_MARKER_TAIL = len(_MARKER) - 1
+
 # What ``read()`` reports for a file it cannot parse; the scan uses the same sentence
 # rather than inventing an error of its own.
 _READ_FAILED = "the project file could not be read; the current project may have changed"
+
+# The refusal both remote rules share: which value named the host stays out of it.
+_REMOTE_SOURCE = "the project file names a remote data source; it was not opened"
 
 
 def _project_path(raw: str) -> str:
@@ -434,15 +450,22 @@ class _Head:
     """The start of one value: leading whitespace skipped, at most ``_VALUE_HEAD`` chars.
 
     The scan judges only the start of a value, so this is all it keeps of an element's
-    text; keeping the whole text would mean re-joining it once per nesting level.
+    text; keeping the whole text would mean re-joining it once per nesting level.  A
+    data source is judged by containment as well, so the last characters of the part
+    past the head are kept and ``saw_marker`` remembers whether ``_MARKER`` sits there:
+    one flag, not a second copy of the text.
     """
 
-    __slots__ = ("started", "text")
+    __slots__ = ("saw_marker", "started", "tail", "text")
 
     def __init__(self) -> None:
         self.text = ""
         # Whether the value's first non-whitespace character has been kept already.
         self.started = False
+        # The last characters kept, so a marker split across two events is still seen.
+        self.tail = ""
+        # Whether the part of the value that is past the head holds a remote marker.
+        self.saw_marker = False
 
     def add(self, data: str) -> None:
         if not self.started:
@@ -453,6 +476,22 @@ class _Head:
         room = _VALUE_HEAD - len(self.text)
         if room > 0:
             self.text += data[:room]
+            if len(self.text) == _VALUE_HEAD:
+                self.tail = self.text[-_MARKER_TAIL:]
+            data = data[room:]
+        if not data or self.saw_marker:
+            return
+        joined = self.tail + data
+        self.saw_marker = _MARKER in joined
+        self.tail = joined[-_MARKER_TAIL:]
+
+    def absorb(self, child: _Head) -> None:
+        """Take a finished child's value, as ``QDomElement::text()`` concatenates it."""
+
+        self.add(child.text)
+        self.saw_marker = self.saw_marker or child.saw_marker
+        if child.tail:
+            self.tail = child.tail
 
 
 class _ProjectScan:
@@ -469,6 +508,10 @@ class _ProjectScan:
     parent's, and ``/v<x/>sicurl/htt<y/>p:...`` -- five nodes, none of them a marker
     -- is the address ``read()`` reached (measured, A7 #1).  Only the start of the
     text is judged, so only ``_VALUE_HEAD`` characters of it are kept.
+
+    One element name is in the scan after all: a ``<datasource>`` is judged by
+    containment too, because it is the value that becomes a provider's data source
+    (``_refuse_if_remote_source``, A12 #1).
     """
 
     def __init__(self) -> None:
@@ -491,8 +534,10 @@ class _ProjectScan:
         self.depth -= 1
         head = self.open.pop()
         if self.open:
-            self.open[-1].add(head.text)
+            self.open[-1].absorb(head)
         _refuse_if_remote_value(head.text)
+        if _local_name(name) == "datasource":
+            _refuse_if_remote_source(head)
 
     def data(self, text: str) -> None:
         if self.open:
@@ -541,6 +586,8 @@ def _refuse_if_remote_value(value: str) -> None:
     What this is not: a proof that nothing else in a project file is fetched.  It is
     the list of shapes known today, asked of every value, and the layers a project
     names get a second check after ``read()`` (``_sources_outside_the_allowed_roots``).
+    A ``<datasource>`` is asked the containment question on top of this one, because
+    it is the value that becomes a provider's data source (``_refuse_if_remote_source``).
     """
 
     text = value.strip()
@@ -553,10 +600,36 @@ def _refuse_if_remote_value(value: str) -> None:
         or _SCHEME.match(text) is not None
     )
     if remote:
-        raise FrameworkError(
-            PATH_NOT_ALLOWED,
-            "the project file names a remote data source; it was not opened",
-        )
+        raise FrameworkError(PATH_NOT_ALLOWED, _REMOTE_SOURCE)
+
+
+def _refuse_if_remote_source(head: _Head) -> None:
+    """Refuse a data source that names network I/O anywhere in its value.
+
+    A ``<datasource>`` is the one value that becomes a provider's data source, and GDAL
+    spells a remote file inside its own local syntax: ``NETCDF:"/vsicurl/http://…":var``
+    and ``GTIFF_DIR:1:/vsicurl/http://…`` are what a raster's ``<datasource>`` holds.  The
+    start rule above sees them only when the marker falls in the value's first
+    ``_VALUE_HEAD`` characters; a 5 KB project of that shape was let through and
+    ``read()`` sent 5 TCP connections before any per-layer check ran (measured, A12 #1).
+
+    So the marker is asked by containment here, and only here: a description quoting a
+    URL is still read (A6 #3), and a local path inside a directory named ``vsi_data``
+    still is too (A7 #3), which is why ``/vsi`` stays a prefix question.  A local scheme
+    is peeled first, as the start rule peels it, so ``file:///C:/points.csv`` -- a CSV
+    layer QGIS writes that way -- is not a marker.
+    """
+
+    text = head.text.strip()
+    local = _local_path_of(text)
+    if head.saw_marker or _MARKER in (local if local is not None else text):
+        raise FrameworkError(PATH_NOT_ALLOWED, _REMOTE_SOURCE)
+
+
+def _local_name(tag: str) -> str:
+    """The element name without its namespace, in lower case."""
+
+    return tag.rpartition("}")[2].lower()
 
 
 def _local_path_of(text: str) -> str | None:
@@ -588,6 +661,32 @@ def _refuse_if_too_large(size: int) -> None:
         raise FrameworkError(PATH_NOT_ALLOWED, "the project file is too large; it was not opened")
 
 
+def _subdataset_path(raw: str) -> str | None:
+    """The local file a GDAL subdataset source names, or None for any other source.
+
+    GDAL's raster provider does not split a subdataset: ``decodeUri`` returns
+    ``NETCDF:"C:/x.nc":temperature`` and ``GTIFF_DIR:1:C:/x.tif`` whole, so the
+    allow-list was asked about a spelling rather than a file, and a project whose every
+    file was inside the roots came back ``PATH_NOT_ALLOWED`` with its layer removed
+    (A12 #2).
+
+    The shapes are GDAL's own: a ``WORD:`` prefix, then the file either quoted
+    (``NETCDF:"…":var``, ``HDF4_EOS:EOS_GRID:"…":grid:field``) or after a
+    ``WORD:<index>:`` prefix (``GTIFF_DIR:1:C:/x.tif``), or bare
+    (``NETCDF:C:/x.nc``).  Anything else is not a subdataset and keeps its old meaning:
+    a source this cannot read stays outside, and ``resolve_path`` judges what it returns.
+    """
+
+    if _SUBDATASET.match(raw) is None:
+        return None
+    rest = raw.split(":", 1)[1]
+    if '"' in rest:
+        return rest.split('"')[1] or None
+    if _SUBDATASET_INDEX.match(rest) is not None:
+        rest = rest.split(":", 1)[1]
+    return rest if _ABSOLUTE_PATH.match(rest) is not None else None
+
+
 def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, Any]) -> list[str]:
     """The layers whose own data source the path policy would refuse.
 
@@ -615,6 +714,8 @@ def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, 
         if not raw:
             outside.append(layer_id)
             continue
+        # The allow-list has to see the file a subdataset names, not its spelling.
+        raw = _subdataset_path(raw) or raw
         try:
             # Save-shaped on purpose: a project naming a source that is gone is
             # AT-18B (read, invalid_layer_count > 0), not a breach of the roots.

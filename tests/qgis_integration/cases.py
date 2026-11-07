@@ -1945,6 +1945,113 @@ def at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory(ctx: Conte
     )
 
 
+def at_50_open_refuses_a_subdataset_that_names_a_remote_file(ctx: Context) -> str:
+    """A remote file inside a datasource's own syntax is refused before read() (A12 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at50 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+
+    connections = 0
+    evidence: list[str] = []
+    try:
+        for suffix in (".qgs", ".qgz"):
+            target = ctx.fixtures.root / f"subdataset remote{suffix}"
+            fixtures.write_subdataset_remote_project(target, ctx.fixtures.raster, port)
+            started = time.monotonic()
+            record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+            elapsed = time.monotonic() - started
+            equal(
+                record.status,
+                ExecutionStatus.FAILED,
+                f"project.open on a remote subdataset {suffix}",
+            )
+            equal(
+                error_code(record),
+                PATH_NOT_ALLOWED,
+                f"the code for a remote subdataset {suffix}",
+            )
+            error = record.error
+            if error is None:
+                raise AssertionError("a failed record carries an error")
+            require("remote data source" in error.message, f"the message: {error.message!r}")
+            require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
+            evidence.append(f"{suffix} in {elapsed * 1000:.0f} ms")
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                break
+            connections += 1
+            connection.close()
+    finally:
+        listener.close()
+
+    equal(connections, 0, "TCP connections made while the projects were opened")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        '<datasource>NETCDF:"/vsicurl/http://127.0.0.1:<a port this case listens on>'
+        '/never.tif":temperature</datasource>: FAILED(PATH_NOT_ALLOWED) for '
+        f"{' and '.join(evidence)} with {connections} TCP connections. The marker is not at the "
+        "start of the value, so the scan that asked only the start let read() fetch it (5 "
+        "connections, measured, A12 #1)"
+    )
+
+
+def at_51_open_reads_a_project_whose_layer_is_a_local_subdataset(ctx: Context) -> str:
+    """A local GDAL subdataset is inside the roots when its own file is (A12 #2)."""
+
+    reset_project(ctx)
+    target = ctx.fixtures.root / "local subdataset.qgs"
+    fixtures.write_subdataset_project(target, ctx.fixtures.raster)
+    outside_file = ctx.fixtures.outside / "cities.tif"
+    outside_file.write_bytes(ctx.fixtures.raster.read_bytes())
+    outside_target = ctx.fixtures.root / "outside subdataset.qgs"
+    fixtures.write_subdataset_project(outside_target, outside_file)
+
+    started = time.monotonic()
+    record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+    elapsed = time.monotonic() - started
+    equal(record.status, ExecutionStatus.SUCCEEDED, "project.open on a local subdataset")
+    values = result_of(record)
+    require(values["layer_count"] == 1, f"the layers of the project: {values['layer_count']}")
+    equal(values["invalid_layer_count"], 0, "the invalid layers of the project")
+    kept = project_layer_ids()
+    require(len(kept) == 1, f"the registered layers: {kept}")
+
+    outside_record = ctx.run("project.open", {"path": str(outside_target), "discard_current": True})
+    equal(
+        outside_record.status,
+        ExecutionStatus.FAILED,
+        "project.open on a subdataset whose file is outside the roots",
+    )
+    equal(
+        error_code(outside_record),
+        PATH_NOT_ALLOWED,
+        "the code for a subdataset whose file is outside the roots",
+    )
+    equal(project_layer_ids(), [], "the project's layers after the outside refusal")
+    reset_project(ctx)
+    return (
+        "a project whose layer is GTIFF_DIR:1:<inside the roots>/cities.tif: SUCCEEDED with "
+        f"{values['layer_count']} layer in {elapsed * 1000:.0f} ms and the layer kept; the same "
+        "spelling pointing outside the roots: FAILED(PATH_NOT_ALLOWED) with the layer removed. "
+        "decodeUri answers the whole spelling, so before A12 #2 the inside project was refused "
+        "and its layer removed although every file it names was inside the roots"
+    )
+
+
 CASES = (
     ("AT-01", at_01_duplicate_registration),
     ("AT-02", at_02_invalid_input),
@@ -2000,4 +2107,6 @@ CASES = (
     ("AT-47", at_47_open_reads_projects_the_old_scan_called_remote),
     ("AT-48", at_48_open_refuses_a_source_split_across_child_elements),
     ("AT-49", at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory),
+    ("AT-50", at_50_open_refuses_a_subdataset_that_names_a_remote_file),
+    ("AT-51", at_51_open_reads_a_project_whose_layer_is_a_local_subdataset),
 )
