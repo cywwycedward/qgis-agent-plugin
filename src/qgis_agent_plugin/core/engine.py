@@ -215,9 +215,18 @@ class OperationEngine:
         self._stop_background()
 
     def _stop_background(self) -> None:
-        """Report the cancel request, then ask the adapter to stop every live task."""
+        """Report the cancel request, then ask the adapter to stop every live task.
 
-        live = self._store.ids(_ACTIVE_BACKGROUND)
+        Only background records: a main-thread call that reaches this is on this
+        very stack (``project.open`` fires ``aboutToBeCleared`` from inside its
+        own ``execute_main``) and cannot be cancelled, only finished (PRD 9.2, 9.3.2).
+        """
+
+        live = [
+            execution_id
+            for execution_id in self._store.ids(_ACTIVE_BACKGROUND)
+            if self._store.get(execution_id).strategy is ExecutionStrategy.BACKGROUND
+        ]
         for execution_id in live:
             self._store.transition(execution_id, ExecutionStatus.CANCEL_REQUESTED)
         for execution_id in live:

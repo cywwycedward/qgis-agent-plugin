@@ -1,7 +1,8 @@
 """The engine: a refused call leaves no record, an accepted one ends in a record.
 
 The Qt event queue is stood in for by a list the test drains, which is also how the
-thread rule is checked: nothing here needs QGIS or Qt (AT-04, AT-09, AT-24, AT-26).
+thread rule is checked; the last test starts a headless ``QgsApplication``, because
+``aboutToBeCleared`` only exists for real (AT-04, AT-09, AT-16, AT-18, AT-24, AT-26).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import json
 import logging
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -27,7 +29,7 @@ from qgis_agent_plugin.core.contracts import (
     TaskControl,
 )
 from qgis_agent_plugin.core.engine import BackgroundRunner, OperationEngine
-from qgis_agent_plugin.core.execution_store import ExecutionStore
+from qgis_agent_plugin.core.execution_store import TERMINAL_STATUSES, ExecutionStore
 from qgis_agent_plugin.core.models import (
     ENGINE_CLOSING,
     EXECUTION_NOT_FOUND,
@@ -144,6 +146,26 @@ class Sum(
         self, ctx: OperationContext, request: ValueParams, result: str
     ) -> ValueResult:
         return ValueResult(value=result)
+
+
+class Replacing(
+    BaseQuery[ValueParams, ValueResult],
+    MainThreadOperationMixin[ValueParams, ValueResult],
+):
+    """A main-thread call that replaces the project while it is still running."""
+
+    name = "test.replace"
+    description = "trigger a project replacement from inside execute_main"
+    input_model = ValueParams
+    output_model = ValueResult
+
+    def __init__(self, replace: Callable[[], None]) -> None:
+        self._replace = replace
+
+    def execute_main(self, ctx: OperationContext, request: ValueParams) -> ValueResult:
+        CALLED.append(self.name)
+        self._replace()
+        return ValueResult(value=request.value)
 
 
 def no_adapter(*args: Any) -> None:
@@ -596,6 +618,52 @@ def test_a_queued_call_is_cancelled_when_the_project_was_replaced() -> None:
     assert harness.store.get(record.execution_id).status is CANCELLED
 
 
+def live_background(harness: Harness, *path: ExecutionStatus) -> ExecutionRecord:
+    """A background call of this generation, moved along ``path``."""
+
+    record = harness.engine.submit("test.sum", {})
+    for status in path:
+        record = harness.store.transition(record.execution_id, status)
+    return record
+
+
+@pytest.mark.parametrize("live", [SCHEDULED, RUNNING])
+def test_a_project_replacement_leaves_a_running_main_thread_call_alone(
+    live: ExecutionStatus,
+) -> None:
+    def replace() -> None:
+        harness.lifecycle.bump()
+        harness.engine.on_project_replaced()
+
+    harness = Harness(Replacing(replace), Sum(), background_runner=no_adapter)
+    background = live_background(harness, PREPARING, SCHEDULED, live)
+
+    record = harness.engine.run_sync("test.replace", {})
+
+    # PRD 9.2: the generation is dropped, not the call that is dropping it -- the
+    # open/create that fires aboutToBeCleared comes from inside its own execute_main.
+    assert record.status is SUCCEEDED
+    assert record.result == {"value": "hello"}
+    assert harness.lifecycle.current_epoch == 1
+    # The old generation's live background task is still asked to stop (PRD 9.2).
+    assert harness.store.get(background.execution_id).status is CANCEL_REQUESTED
+
+
+def test_shutdown_leaves_a_running_main_thread_call_alone() -> None:
+    def stop() -> None:
+        harness.engine.shutdown()
+
+    harness = Harness(Replacing(stop), Sum(), background_runner=no_adapter)
+    background = live_background(harness, PREPARING, SCHEDULED, RUNNING)
+
+    record = harness.engine.run_sync("test.replace", {})
+
+    # PRD 9.3.2 cancels main-thread work that has not started; the call on this
+    # stack is not it, and only the background task may get a cancel request.
+    assert record.status is SUCCEEDED
+    assert harness.store.get(background.execution_id).status is CANCEL_REQUESTED
+
+
 def test_the_record_captures_the_epoch_of_the_call() -> None:
     harness = Harness(Echo())
     harness.lifecycle.bump()
@@ -668,3 +736,82 @@ def test_a_liveness_check_that_raises_cannot_escape_the_slot(
     with caplog.at_level(logging.ERROR):
         posted[0]()
     assert "main-thread step for x failed" in caplog.text
+
+
+# --- the real signal ---------------------------------------------------------
+
+
+class HeadlessIface:
+    """``iface.newProject`` without a GUI: QGIS's own ``clear()`` fires the signal."""
+
+    def __init__(self, project: Any) -> None:
+        self._project = project
+
+    def newProject(self, promptToSaveFlag: bool = False) -> bool:  # noqa: N802 - the QGIS name
+        self._project.clear()
+        return True
+
+
+def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AT-16 and AT-18's success half, on the signal a real project emits.
+
+    ``project.open`` and ``project.create`` fire ``aboutToBeCleared`` from inside
+    their own ``execute_main``, which the fakes above cannot reproduce.
+    """
+
+    from qgis.core import QgsApplication, QgsProject
+
+    from qgis_agent_plugin.operations.project import ProjectCreate, ProjectOpen
+
+    # A headless application is enough for the real signal; keeping the working
+    # directory in tmp_path keeps the profile files QGIS writes out of the repo.
+    monkeypatch.chdir(tmp_path)
+    application = QgsApplication([], False)
+    application.initQgis()
+    project = QgsProject.instance()
+    try:
+        project.clear()
+        fixture = tmp_path / "empty.qgs"
+        assert project.write(str(fixture))
+
+        lifecycle = ProjectLifecycle()
+        registry = OperationRegistry()
+        registry.register(ProjectOpen())
+        registry.register(ProjectCreate())
+        engine = OperationEngine(
+            registry,
+            Settings(allowed_project_roots=(tmp_path,)),
+            lifecycle,
+            iface=HeadlessIface(project),
+            project=project,
+        )
+
+        def replaced() -> None:
+            # What plugin.Plugin._project_about_to_be_cleared does, on the real signal.
+            lifecycle.bump()
+            engine.on_project_replaced()
+
+        project.aboutToBeCleared.connect(replaced)
+        try:
+            opened = engine.run_sync(
+                "project.open", {"path": str(fixture), "discard_current": True}
+            )
+            created = engine.run_sync("project.create", {"discard_current": True})
+
+            assert opened.status is SUCCEEDED
+            assert created.status is SUCCEEDED
+            # Each replacement bumped the generation, and a record keeps the epoch
+            # it was created under: one behind the project its own call made.
+            assert lifecycle.current_epoch > 0
+            assert opened.project_epoch < created.project_epoch < lifecycle.current_epoch
+            assert [
+                execution_id
+                for execution_id in engine._store.ids(set(ExecutionStatus))
+                if engine._store.get(execution_id).status not in TERMINAL_STATUSES
+            ] == []
+        finally:
+            project.aboutToBeCleared.disconnect(replaced)
+    finally:
+        application.exitQgis()
