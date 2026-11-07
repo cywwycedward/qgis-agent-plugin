@@ -224,12 +224,26 @@ class OperationEngine:
     def _validated_input(
         self, operation: BaseOperation, arguments: dict[str, Any]
     ) -> BaseModel:
+        """Validate the caller's arguments, never letting an exception out.
+
+        Anything raised from here has already passed the control plane, so it has to
+        become a ``FAILED`` record or that call would stay ``QUEUED`` forever and eat
+        one of the 32 queue slots (PRD 6.5, 8.5).  A model whose validator raises
+        something pydantic does not wrap is as unexpected as an operation's bug.
+        """
+
         try:
             return operation.input_model.model_validate(arguments)
+        except FrameworkError:
+            # An operation's own refusal keeps its code.
+            raise
         except ValidationError as error:
             raise FrameworkError(
                 INVALID_INPUT, f"{operation.name}: invalid input at {_paths(error)}"
             ) from None
+        except Exception as error:  # noqa: BLE001 - any other failure is a FAILED record
+            _LOGGER.exception("input validation for %s raised", operation.name)
+            raise FrameworkError(INTERNAL_ERROR, _unexpected(error)) from error
 
     def _run_queued(
         self, execution_id: str, operation: BaseOperation, request: BaseModel

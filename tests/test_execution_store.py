@@ -95,15 +95,17 @@ class Clock:
 def make_record(
     status: ExecutionStatus = QUEUED, execution_id: str = "x", **fields: object
 ) -> ExecutionRecord:
-    return ExecutionRecord(
-        execution_id=execution_id,
-        operation="test.echo",
-        kind=OperationKind.QUERY,
-        strategy=ExecutionStrategy.MAIN_THREAD,
-        status=status,
-        created_at=utc_now(),
-        project_epoch=0,
-        **fields,
+    return ExecutionRecord.model_validate(
+        {
+            "execution_id": execution_id,
+            "operation": "test.echo",
+            "kind": OperationKind.QUERY,
+            "strategy": ExecutionStrategy.MAIN_THREAD,
+            "status": status,
+            "created_at": utc_now(),
+            "project_epoch": 0,
+            **fields,
+        }
     )
 
 
@@ -272,6 +274,19 @@ def test_the_finish_log_carries_the_duration_and_the_error_code(
         store.create(make_record(RUNNING))
         move(store, "x", FAILED)
     assert re.search(r"-> FAILED \(\d+\.\d{3}s, INTERNAL_ERROR\)", caplog.text)
+
+
+def test_an_unreadable_timestamp_does_not_break_the_finished_write(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = ExecutionStore(Settings())
+    store.create(make_record(RUNNING, created_at="yesterday"))
+
+    with caplog.at_level("INFO"):
+        record = move(store, "x", FAILED)
+    assert record.status is FAILED
+    assert store.get("x").status is FAILED
+    assert " (0.000s, INTERNAL_ERROR)" in caplog.text
 
 
 def test_ids_lists_only_the_requested_statuses() -> None:

@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from qgis_agent_plugin.core.config import Settings
 from qgis_agent_plugin.core.context import ProjectLifecycle
@@ -150,6 +150,32 @@ def no_adapter(*args: Any) -> None:
     """Accept the background hand-off and do nothing: these tests only drive states."""
 
 
+class ExplodingParams(Params):
+    value: str
+
+    @field_validator("value")
+    @classmethod
+    def _explode(cls, value: str) -> str:
+        # Pydantic only wraps ValueError and AssertionError, so this escapes validation.
+        raise RuntimeError("validator exploded")
+
+
+class Exploding(
+    BaseQuery[ExplodingParams, ValueResult],
+    MainThreadOperationMixin[ExplodingParams, ValueResult],
+):
+    name = "test.explode"
+    description = "an operation whose input model is broken"
+    input_model = ExplodingParams
+    output_model = ValueResult
+
+    def execute_main(
+        self, ctx: OperationContext, request: ExplodingParams
+    ) -> ValueResult:
+        CALLED.append(self.name)
+        return ValueResult(value=request.value)
+
+
 class Queue:
     """The Qt event queue, stood in for by a list the test drains."""
 
@@ -242,6 +268,30 @@ def test_invalid_input_ends_as_a_failed_record_and_does_not_run(call_name: str) 
     assert record.error.message == "test.echo: invalid input at unknown"
     assert CALLED == []
     assert harness.queue.callbacks == []
+
+
+def test_an_input_model_that_raises_unexpectedly_ends_as_failed() -> None:
+    harness = Harness(Exploding())
+    for call in (harness.engine.run_sync, harness.engine.submit):
+        record = call("test.explode", {"value": "x"})
+        assert record.status is FAILED
+        assert record.error is not None
+        assert record.error.code == INTERNAL_ERROR
+        assert "validator exploded" not in record.error.message
+    # Nothing was left waiting: the call cannot eat a queue slot.
+    assert harness.store.ids({QUEUED}) == []
+    assert CALLED == []
+
+
+def test_calls_whose_input_explodes_cannot_exhaust_the_queue() -> None:
+    harness = Harness(Exploding(), Echo())
+    for _ in range(33):  # one more than max_pending
+        assert harness.engine.submit("test.explode", {"value": "x"}).status is FAILED
+
+    queued = harness.engine.submit("test.echo", {})
+    assert queued.status is QUEUED
+    harness.queue.tick()
+    assert harness.engine.get(queued.execution_id).status is SUCCEEDED
 
 
 def test_a_submitted_call_waits_for_the_event_queue() -> None:
@@ -520,6 +570,21 @@ def test_a_queued_callback_that_raises_is_logged_and_dropped(
     runner.post("x", boom)
     with caplog.at_level(logging.ERROR):
         posted[0]()
-    assert "main-thread callback for x failed" in caplog.text
+    assert "main-thread step for x failed" in caplog.text
     # The stack went to the log instead of into the Qt slot.
     assert "slot blew up" in caplog.text
+
+
+def test_a_liveness_check_that_raises_cannot_escape_the_slot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def exploding_check(execution_id: str) -> bool:
+        raise RuntimeError("liveness check blew up")
+
+    posted: list[Callable[[], None]] = []
+    runner = MainThreadRunner(exploding_check, post=posted.append)
+    runner.post("x", lambda: pytest.fail("the callback must not run"))
+
+    with caplog.at_level(logging.ERROR):
+        posted[0]()
+    assert "main-thread step for x failed" in caplog.text

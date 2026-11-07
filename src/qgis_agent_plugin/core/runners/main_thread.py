@@ -32,12 +32,14 @@ class MainThreadRunner:
         """Queue ``callback``, to run only if ``execution_id`` is still live."""
 
         def run() -> None:
-            if not self._is_live(execution_id):
-                return
+            # The liveness check is inside the guard too: it is injected code, and an
+            # exception from it would abort QGIS just like one from the callback.
             try:
+                if not self._is_live(execution_id):
+                    return
                 callback()
             except Exception:  # noqa: BLE001 - nothing may escape into a Qt slot
-                _LOGGER.exception("main-thread callback for %s failed", execution_id)
+                _LOGGER.exception("main-thread step for %s failed", execution_id)
 
         self._post(run)
 

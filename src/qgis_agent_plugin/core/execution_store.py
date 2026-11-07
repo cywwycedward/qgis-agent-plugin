@@ -221,8 +221,15 @@ def _log_details(record: ExecutionRecord) -> str:
 
 
 def _elapsed_seconds(record: ExecutionRecord) -> float:
-    """How long the call took, read from its own wall-clock stamps."""
+    """How long the call took, read from its own wall-clock stamps.
 
-    created = datetime.fromisoformat(record.created_at)
-    finished = datetime.fromisoformat(record.finished_at or record.created_at)
-    return (finished - created).total_seconds()
+    The stamps are plain strings the model does not validate (F1 §5), and a log line
+    must never turn a finished write into an exception.
+    """
+
+    try:
+        created = datetime.fromisoformat(record.created_at)
+        finished = datetime.fromisoformat(record.finished_at or record.created_at)
+        return (finished - created).total_seconds()
+    except (TypeError, ValueError):
+        return 0.0
