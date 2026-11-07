@@ -36,7 +36,6 @@ __all__ = [
     "Plugin",
     "Supervisor",
     "application_supervisor",
-    "classFactory",
     "read_settings",
 ]
 
@@ -249,7 +248,3 @@ class Plugin:
         for name in (ENGINE_ATTRIBUTE, REGISTRY_ATTRIBUTE):
             if hasattr(self.iface, name):
                 delattr(self.iface, name)
-
-
-def classFactory(iface: Any) -> Plugin:
-    return Plugin(iface)

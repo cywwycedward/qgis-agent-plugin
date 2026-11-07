@@ -27,7 +27,6 @@ from qgis_agent_plugin.core import models, registry, security
 from qgis_agent_plugin.core.runners import main_thread, qgs_task
 
 assert callable(qgis_agent_plugin.classFactory)
-assert callable(plugin.classFactory)
 assert callable(plugin.Plugin)
 assert callable(plugin.Supervisor)
 assert callable(plugin.application_supervisor)

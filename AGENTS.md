@@ -10,7 +10,8 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 | --- | --- |
 | `src/qgis_agent_plugin/core/` | 契约与管线：`contracts`（Operation/Command/Query 与两个执行策略的协议）、`models`（DTO、状态枚举、错误码）、`registry`、`engine`、`execution_store`、`context`（工程代数 `project_epoch` 与主线程判定）、`config`（PRD 10.1 的七项配置）、`security`（允许目录与路径规范化）、`runners/`（`main_thread` 事件队列、`qgs_task` 后台适配） |
 | `src/qgis_agent_plugin/operations/` | 操作：一个文件一个能力族，装着它的 `Params`、`Result` 和 Operation 类，外加自己的清单元组；`__init__.py` 只做汇总（`register_all`） |
-| `src/qgis_agent_plugin/plugin.py` | 入口：`classFactory`、`initGui`/`unload`（PRD 9.3 六步）、`Supervisor`（卸载后仍活着的任务的托管） |
+| `src/qgis_agent_plugin/__init__.py` | 入口：QGIS 按名字在包上找的 `classFactory`（它只在被调用时才 import `plugin`） |
+| `src/qgis_agent_plugin/plugin.py` | 会话：`initGui`/`unload`（PRD 9.3 六步）、`Supervisor`（卸载后仍活着的任务的托管） |
 | `src/qgis_agent_plugin/metadata.txt` | 插件元数据（QGIS 插件管理器读的那个） |
 
 放置规则：
