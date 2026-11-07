@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import warnings
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +62,10 @@ class UnsafeRoot(Exception):
 REMOTE_VSICURL = "/vsicurl/http://127.0.0.1:9/never.tif"
 REMOTE_UNC = r"\\no-such-host-audit\share\data.gpkg"
 
+# One member of the oversized project expands to this many bytes: over the scan's
+# limit by far, and a few hundred KB on disk because it is all spaces (AT-33).
+BOMB_MEMBER_BYTES = 300 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class Fixtures:
@@ -79,6 +84,11 @@ class Fixtures:
     leak: Path
     remote_vsicurl: Path
     remote_unc: Path
+    remote_utf16: Path
+    remote_spaced: Path
+    moved_directory: Path
+    oversized: Path
+    encrypted: Path
     escape: Path | None
 
 
@@ -172,6 +182,28 @@ def build(root: Path) -> Fixtures:
     remote_unc = data / "remote unc.qgs"
     _write_remote_project(remote_unc, raster, REMOTE_UNC)
 
+    # The same remote source written so that a UTF-8 text scan cannot see it: once in
+    # UTF-16, once with the whitespace XML allows inside the tag (AT-31).
+    remote_utf16 = data / "remote utf16.qgs"
+    _write_remote_project(remote_utf16, raster, REMOTE_VSICURL)
+    _encode_utf16(remote_utf16)
+    remote_spaced = data / "remote spaced.qgs"
+    _write_remote_project(remote_spaced, raster, REMOTE_VSICURL)
+    _space_datasource_tags(remote_spaced)
+
+    # A project whose only source lives in a directory that was moved away: the path
+    # is inside the allowed roots, only nothing is there any more (AT-32).
+    moved_directory = data / "moved directory.qgs"
+    _write_project(moved_directory, [(cities, CITIES_LAYER, "moved")], [])
+    _rewrite_datasource(moved_directory, str(data / "moved-away" / "cities.gpkg"))
+
+    # A project that is tiny on disk but would take 300 MB if it were unpacked, and
+    # one whose member is marked encrypted (AT-33, AT-34).
+    oversized = data / "oversized member.qgz"
+    _write_oversized_project(oversized, raster)
+    encrypted = data / "encrypted member.qgz"
+    _write_encrypted_project(encrypted, raster)
+
     return Fixtures(
         root=data,
         cities=cities,
@@ -186,6 +218,11 @@ def build(root: Path) -> Fixtures:
         leak=leak,
         remote_vsicurl=remote_vsicurl,
         remote_unc=remote_unc,
+        remote_utf16=remote_utf16,
+        remote_spaced=remote_spaced,
+        moved_directory=moved_directory,
+        oversized=oversized,
+        encrypted=encrypted,
         escape=_junction(data / "escape", outside),
     )
 
@@ -277,17 +314,84 @@ def _write_remote_project(path: Path, local_raster: Path, remote: str) -> None:
     """
 
     _write_project(path, [], [local_raster])
-    text = path.read_text(encoding="utf-8")
+    _rewrite_datasource(path, remote)
+
+
+def _rewrite_datasource(path: Path, source: str) -> None:
+    """Replace the datasource of the project's first map layer, leaving the rest.
+
+    A ``.qgs`` holds more than one ``<datasource>``: the annotation layer has one too,
+    and it comes first.  Only the element inside ``<projectlayers>`` is the layer
+    ``read()`` builds and reaches.
+    """
+
+    head, marker, layers = path.read_text(encoding="utf-8").partition("<projectlayers>")
     rewritten, replaced = re.subn(
         r"<datasource>[^<]*</datasource>",
         # A function, not a template: a UNC path is full of backslash escapes.
-        lambda _match: f"<datasource>{remote}</datasource>",
-        text,
+        lambda _match: f"<datasource>{source}</datasource>",
+        layers,
         count=1,
     )
-    if replaced != 1:
-        raise RuntimeError(f"could not place the remote datasource in {path}")
-    path.write_text(rewritten, encoding="utf-8")
+    if not marker or replaced != 1:
+        raise RuntimeError(f"could not place the datasource in {path}")
+    path.write_text(head + marker + rewritten, encoding="utf-8")
+
+
+def _encode_utf16(path: Path) -> None:
+    """Rewrite a project in UTF-16 with a BOM, which QDomDocument still reads."""
+
+    text = path.read_text(encoding="utf-8")
+    path.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
+
+
+def _space_datasource_tags(path: Path) -> None:
+    """Give the ``datasource`` tags the whitespace XML allows before ``>``."""
+
+    text = path.read_text(encoding="utf-8")
+    spaced = text.replace("<datasource>", "<datasource >").replace(
+        "</datasource>", "</datasource >"
+    )
+    if spaced == text:
+        raise RuntimeError(f"could not space the datasource tags in {path}")
+    path.write_text(spaced, encoding="utf-8")
+
+
+def _write_oversized_project(path: Path, local_raster: Path) -> None:
+    """A valid project padded past the scan limit: tiny on disk, 300 MB unpacked."""
+
+    seed = path.with_name(path.name + ".seed.qgs")
+    _write_project(seed, [], [local_raster])
+    document = seed.read_bytes()
+    seed.unlink()
+    path.with_name(seed.name + "_attachments.zip").unlink(missing_ok=True)
+    chunk = b" " * (1024 * 1024)
+    with (
+        zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive,
+        archive.open("project.qgs", "w") as member,
+    ):
+        member.write(document)
+        for _ in range(BOMB_MEMBER_BYTES // len(chunk)):
+            member.write(chunk)
+
+
+def _write_encrypted_project(path: Path, local_raster: Path) -> None:
+    """A valid project whose member is marked encrypted, which ``zipfile`` refuses.
+
+    ``zipfile`` cannot write an encrypted member, so the general purpose flag is set
+    on an otherwise plain archive; extracting the member then raises RuntimeError,
+    exactly as a password-protected project does (AT-34).
+    """
+
+    _write_project(path, [], [local_raster])
+    data = bytearray(path.read_bytes())
+    for signature, offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        start = data.find(signature)
+        if start < 0:
+            raise RuntimeError(f"could not find a zip header in {path}")
+        flags = int.from_bytes(data[start + offset : start + offset + 2], "little") | 1
+        data[start + offset : start + offset + 2] = flags.to_bytes(2, "little")
+    path.write_bytes(bytes(data))
 
 
 def _junction(link: Path, target: Path) -> Path | None:

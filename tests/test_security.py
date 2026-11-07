@@ -12,9 +12,15 @@ from qgis_agent_plugin.core.models import PATH_NOT_ALLOWED, FrameworkError
 from qgis_agent_plugin.core.security import resolve_path
 
 
-def refused(raw: str, roots: list[Path], *, must_exist: bool = True) -> FrameworkError:
+def refused(
+    raw: str,
+    roots: list[Path],
+    *,
+    must_exist: bool = True,
+    allow_directory: bool = False,
+) -> FrameworkError:
     with pytest.raises(FrameworkError) as caught:
-        resolve_path(raw, roots, must_exist=must_exist)
+        resolve_path(raw, roots, must_exist=must_exist, allow_directory=allow_directory)
     assert caught.value.code == PATH_NOT_ALLOWED
     return caught.value
 
@@ -54,16 +60,70 @@ def test_a_directory_is_not_a_readable_file(tmp_path: Path) -> None:
 
 
 def test_a_directory_may_be_a_data_source(tmp_path: Path) -> None:
-    # An ESRI FileGDB is a directory; only a data source is allowed to be one.
+    # An ESRI FileGDB is a directory; the data-source shape is what allows one.
+    # A read is always a regular file, so ``allow_directory`` says nothing there.
     root = data_root(tmp_path)
     source = root / "roads.gdb"
     source.mkdir()
-    assert resolve_path(str(source), [root], must_exist=True, allow_directory=True) == (
-        source.resolve()
-    )
     assert resolve_path(str(source), [root], must_exist=False, allow_directory=True) == (
         source.resolve()
     )
+    refused(str(source), [root], must_exist=True, allow_directory=True)
+
+
+def test_a_data_source_whose_directory_is_gone_is_still_inside_the_root(tmp_path: Path) -> None:
+    # A2 #4's promise for the case where the directory itself moved away: the source
+    # is not there any more, but it is still a path inside the root (AT-18B), so the
+    # save shape's "the parent must exist" is not the question asked here.
+    root = data_root(tmp_path)
+    source = root / "moved-away" / "roads.gpkg"
+    assert resolve_path(str(source), [root], must_exist=False, allow_directory=True) == (
+        source.resolve()
+    )
+
+
+def test_a_data_source_whose_directory_is_gone_outside_the_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    root = data_root(tmp_path)
+    refused(
+        str(tmp_path / "moved-away" / "roads.gpkg"),
+        [root],
+        must_exist=False,
+        allow_directory=True,
+    )
+
+
+def test_a_data_source_shape_does_not_follow_a_link_out_of_the_root(tmp_path: Path) -> None:
+    # The non-strict resolve still follows what exists, so a source under a link that
+    # leaves the root cannot be vouched for just because its directory is gone.
+    root = data_root(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = escape_link(root, outside)
+    refused(
+        str(link / "moved-away" / "roads.gpkg"),
+        [root],
+        must_exist=False,
+        allow_directory=True,
+    )
+
+
+def test_a_data_source_that_cannot_be_resolved_is_refused_not_an_internal_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unreadable source is an untrusted one; it may not escape as an exception the
+    # engine would report as its own defect.
+    root = data_root(tmp_path)
+    original = Path.resolve
+
+    def resolve(self: Path, strict: bool = False) -> Path:
+        if self.name == "unreadable.gpkg":
+            raise PermissionError("denied")
+        return original(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    refused(str(root / "unreadable.gpkg"), [root], must_exist=False, allow_directory=True)
 
 
 def test_a_relative_path_is_refused(tmp_path: Path) -> None:

@@ -61,14 +61,19 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
   `..` 和软链接跳不出去）。
 - 读（`layer.add`、`project.open` 的工程文件）：目标必须存在且是普通文件。
 - 工程文件里的一层数据源可以是一**目录**（ESRI FileGDB 就是目录）：同样是解析后落在
-  `allowed_data_roots` 内就算通过，不要求它是普通文件（`resolve_path(..., allow_directory=True)`）。
+  `allowed_data_roots` 内就算通过，不要求它是普通文件（`resolve_path(..., allow_directory=True)`，
+  只在“写”形状上生效；读永远要求普通文件）。数据源**不存在**（连父目录都没有）也算通过：
+  只问解析后的路径是否落在根内，不要求路径存在。
 - 写（`project.save`）：目标可以不存在，但父目录必须存在且在根内；不创建父目录。
 - URL、provider URI、`/vsi*`、以及 Windows UNC 路径（`\\host\share\…`、`//host/share/…`、
   `\\?\…`）都在**任何 I/O 之前**拒掉：UNC 的解析本身就会连主机并带上当前 Windows 凭据，
   所以它和 URL 一样不能先进白名单再判。错误消息里**不含**原始路径。
-- `project.open` 的工程文件还会在 `read()` **之前**被扫一遍 `<datasource>` 文本（`.qgs` 是
-  XML，`.qgz` 是 zip 里的同一个 XML）：命中 `/vsi*`、URI scheme（含 XYZ/WMS 写在
-  `…&url=https://…` 里的那个）或 UNC 前缀就立刻 `PATH_NOT_ALLOWED`。
+- `project.open` 的工程文件还会在 `read()` **之前**被扫一遍 `<datasource>`（`.qgs` 是 XML，
+  `.qgz` 是 zip 里的同一个 XML）：扫的是**原始字节**（不是解码后的文本），命中 `/vsi*`、URI scheme
+  （含 XYZ/WMS 写在 `…&url=https://…` 里的那个）或 UNC 前缀就立刻 `PATH_NOT_ALLOWED`。
+  标签内的空白合法（`<datasource >` 与 `<datasource>` 是同一个元素），所以匹配也接受它；
+  字节里出现 NUL 说明工程不是 UTF-8（UTF-16/UTF-32），直接 `PATH_NOT_ALLOWED`，不尝试解码；
+  单个工程文件（或 `.qgz` 的一个成员）超过 16 MB 也直接拒，不读进内存。
   否则 `read()` 会先构造图层、先联网，再让逐层检查来“拒绝”。
 - **容器格式不在这一层策略内**：一个合法本地的 `.vrt` 内部可以写
   `<SourceFilename>/vsicurl/https://…</SourceFilename>`，`layer.add` 与 `project.open`
@@ -137,11 +142,19 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 数据源是另一回事：`read()` 会把它们全部构造出来，远程地址就在主线程上发 HTTP、UNC 就在
 主线程上做一次带 Windows 凭据的 SMB 连接。所以两步：
 
-1. **先扫文本，不碰数据源**：`read()` 之前读工程文件的 `<datasource>`，命中 `/vsi*`、
-   URI scheme（XYZ/WMS 把它写在 `…&url=https://…` 里，也算）或 UNC 前缀 → 直接
+1. **先扫字节，不碰数据源**：`read()` 之前读工程文件的原始字节并取 `<datasource>` 元素，命中
+   `/vsi*`、URI scheme（XYZ/WMS 把它写在 `…&url=https://…` 里，也算）或 UNC 前缀 → 直接
    `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not opened`。
    这一步只读字节，**当前工程原样保留**（已实测：两个含 `/vsicurl` / UNC 数据源的工程各
-   16 ms、31 ms 返回，旧工程与它的图层都还在）。
+   0–16 ms 返回，旧工程与它的图层都还在）。另外三种情况同样在读之前拒：
+   - 文件不是 UTF-8（字节里有 NUL，例如 UTF-16 工程）→ `PATH_NOT_ALLOWED`，消息
+     `the project file is not UTF-8; it was not opened`。QDomDocument 会读这种文件，而按 UTF-8
+     解码后的文本扫描什么也找不到，所以判据是字节本身；
+   - 工程文件或 `.qgz` 的某个成员解压后超过 16 MB → `PATH_NOT_ALLOWED`，消息
+     `the project file is too large; it was not opened`（解压前先用 `getinfo().file_size` 判）；
+   - `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）→ `PROJECT_OPEN_FAILED`，用的是
+     `read()` 失败时同一句消息。**这种档案不会交给 `read()`**：QGIS 3.44 在它上面会直接崩掉
+     （实测，退出码 0xC0000005）。
 2. **再逐层比对根目录**：`read()` 之后用 provider 自己的 `decodeUri()` 取真实路径，问
    `allowed_data_roots`。
    - 有数据源落在根外（或 provider 说不出一个本地路径，或 `decodeUri()` 自己抛异常）→ 这些
@@ -149,7 +162,9 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
      失败，`message` 里带被移除的图层数。**不是**“加载成功 + 只报个字段”：那等于白名单被绕过。
    - 数据源是**目录**（ESRI FileGDB）不算越界：只要目录本身在 `allowed_data_roots` 内。
    - 数据源文件**不存在**不算越界（它还在根内）：那是 AT-18B 的部分加载，照常 `SUCCEEDED` +
-     `invalid_layer_count > 0`。
+     `invalid_layer_count > 0`。**数据源的父目录不存在也算**：判定只问“解析后的路径是否落在根内”，
+     不要求路径存在（已实测：来源为 `root/moved-away/cities.gpkg`、目录已被搬走的工程 →
+     `SUCCEEDED`，`layer_count 1`、`invalid_layer_count 1`，图层没有被移除）。
    - 工程文件本身已经 `read()` 进去了，所以这一步失败时**当前工程已经被替换成“去掉越界层之后的
      剩货”**，不回滚；`message` 说的就是这件事（`they were removed and the project was replaced`）。
 
@@ -161,9 +176,9 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里的数据源是远程 URI、`/vsi*`、UNC（**`read()` 之前**就拒）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里的数据源是远程 URI、`/vsi*`、UNC（**`read()` 之前**就拒）；或工程文件不是 UTF-8、超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
-| `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
+| `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
 成功路径同样会触发 `QgsProject.aboutToBeCleared`（`read()` 会清空旧工程），所以 `project_epoch` 加 1、
 旧代数的排队调用立即 `CANCELLED`；**本次调用自己照常成功**（实测：两个键都指向数据与工程所在目录，

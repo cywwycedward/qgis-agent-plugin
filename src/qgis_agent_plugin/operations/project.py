@@ -48,9 +48,16 @@ from ..core.security import is_remote_uri, resolve_path
 # The two formats this plugin reads and writes; anything else is a caller mistake.
 PROJECT_SUFFIXES = (".qgs", ".qgz")
 
-# What a project file says about each layer's data.  A ``.qgs`` is this XML and a
-# ``.qgz`` is a zip whose ``.qgs`` member is the same XML; only that text is read.
-_DATASOURCE = re.compile(r"<datasource>(.*?)</datasource>", re.DOTALL | re.IGNORECASE)
+# What a project file says about each layer's data, matched in the file's own bytes.
+# The bytes are the point: decoding first is how a project that is not UTF-8 slipped
+# past this scan, and XML allows whitespace or an attribute between the name and
+# ``>``, so ``<datasource >`` is the same element to QGIS as ``<datasource>``.
+_DATASOURCE = re.compile(rb"<datasource\b[^>]*>(.*?)</datasource\s*>", re.DOTALL | re.IGNORECASE)
+
+# A ``.qgs``, or one member of a ``.qgz``, larger than this is refused rather than
+# read: the scan runs on the main thread, and a small archive can hold a member that
+# expands to gigabytes.  Real project files are far smaller.
+MAX_PROJECT_BYTES = 16 * 1024 * 1024
 
 
 def _project_path(raw: str) -> str:
@@ -264,32 +271,69 @@ def _refuse_remote_datasources(path: Path) -> None:
 
     try:
         sources = _project_datasources(path)
+    except FrameworkError:
+        raise
     except (OSError, zipfile.BadZipFile):
         # A file this scan cannot parse is what ``read()`` reports as
-        # PROJECT_OPEN_FAILED; there is nothing here to refuse ahead of it.
+        # PROJECT_OPEN_FAILED; the scan is not a new failure source of its own.
         return
-    for source in sources:
-        # A WMS/XYZ layer carries its endpoint inside the datasource rather than as
-        # the whole string, so a scheme anywhere in it is the same network reach.
-        # XML character references are what QGIS decodes before it builds the layer.
-        source = unescape(source)
-        if is_remote_uri(source) or "://" in source:
+    except Exception:  # noqa: BLE001 - a member the scan cannot extract
+        # An encrypted member, or a compression ``zipfile`` does not know: QGIS 3.44
+        # crashes inside ``read()`` on such an archive (measured, access violation),
+        # so it is not handed over.  The caller still gets the code ``read()`` would
+        # have produced, not INTERNAL_ERROR.
+        raise FrameworkError(
+            PROJECT_OPEN_FAILED,
+            "the project file could not be read; the current project may have changed",
+        ) from None
+    for raw in sources:
+        # XML character references are what QGIS decodes before it builds the layer,
+        # and a WMS/XYZ layer carries its endpoint inside the datasource rather than
+        # as the whole string.  The bytes are checked too, so neither the decoding
+        # nor the entity spelling is all that stands between the file and the network.
+        source = unescape(raw.decode("utf-8", "replace"))
+        remote = (
+            is_remote_uri(source)
+            or "://" in source
+            or b"/vsi" in raw
+            or b"://" in raw
+            or raw.lstrip()[:2] in (b"\\\\", b"//")
+        )
+        if remote:
             raise FrameworkError(
                 PATH_NOT_ALLOWED,
                 "the project file names a remote data source; it was not opened",
             )
 
 
-def _project_datasources(path: Path) -> list[str]:
-    """The ``<datasource>`` text of a ``.qgs`` or of the ``.qgs`` member of a ``.qgz``."""
+def _project_datasources(path: Path) -> list[bytes]:
+    """The raw text of every ``<datasource>`` element in a ``.qgs`` or ``.qgz``.
+
+    A NUL byte means the file is UTF-16 or UTF-32; QDomDocument still reads it, while
+    a UTF-8 text scan sees a NUL between every character and matches nothing.  QGIS
+    itself only writes UTF-8, so nothing an operator can open is refused here.
+    """
 
     if path.suffix.lower() == ".qgz":
         with zipfile.ZipFile(path) as archive:
-            members = [name for name in archive.namelist() if name.lower().endswith(".qgs")]
-            text = "\n".join(archive.read(name).decode("utf-8", "replace") for name in members)
+            chunks = []
+            for name in archive.namelist():
+                if not name.lower().endswith(".qgs"):
+                    continue
+                _refuse_if_too_large(archive.getinfo(name).file_size)
+                chunks.append(archive.read(name))
+        text = b"\n".join(chunks)
     else:
-        text = path.read_bytes().decode("utf-8", "replace")
-    return [source.strip() for source in _DATASOURCE.findall(text)]
+        _refuse_if_too_large(path.stat().st_size)
+        text = path.read_bytes()
+    if b"\x00" in text:
+        raise FrameworkError(PATH_NOT_ALLOWED, "the project file is not UTF-8; it was not opened")
+    return _DATASOURCE.findall(text)
+
+
+def _refuse_if_too_large(size: int) -> None:
+    if size > MAX_PROJECT_BYTES:
+        raise FrameworkError(PATH_NOT_ALLOWED, "the project file is too large; it was not opened")
 
 
 def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, Any]) -> list[str]:

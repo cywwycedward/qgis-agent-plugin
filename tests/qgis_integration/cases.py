@@ -1181,6 +1181,134 @@ def at_30_open_refuses_a_remote_source_before_reading(ctx: Context) -> str:
     )
 
 
+def at_31_open_refuses_an_encoded_or_spaced_datasource(ctx: Context) -> str:
+    """A UTF-8-only text scan can be walked past with an encoding or a space (A3 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at31 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    timings: list[str] = []
+    for label, target, expected in (
+        ("a UTF-16 project", ctx.fixtures.remote_utf16, "not UTF-8"),
+        ("a <datasource > tag", ctx.fixtures.remote_spaced, "remote data source"),
+    ):
+        started = time.monotonic()
+        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+        elapsed = time.monotonic() - started
+        equal(record.status, ExecutionStatus.FAILED, f"project.open on {label}")
+        equal(error_code(record), PATH_NOT_ALLOWED, f"the code for {label}")
+        error = record.error
+        if error is None:
+            raise AssertionError("a failed record carries an error")
+        require(expected in error.message, f"the message for {label}: {error.message!r}")
+        # Neither form may reach read(): 10 s of GDAL retries is what the audit measured
+        # when the scan missed the datasource it could not see.
+        require(elapsed < 0.5, f"{label} took {elapsed:.2f}s: read() reached the source")
+        equal(project_layer_ids(), before, f"the project's layers after {label}")
+        equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
+        timings.append(f"{label} {elapsed * 1000:.0f} ms")
+    reset_project(ctx)
+    return (
+        f"FAILED(PATH_NOT_ALLOWED) in {', '.join(timings)}; the file was scanned in its own "
+        "bytes, so the old project and its one layer are still loaded"
+    )
+
+
+def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
+    """A moved-away source directory is AT-18B, not a breach of the roots (A3 #2)."""
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at32 old")
+
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.moved_directory), "discard_current": True},
+    )
+
+    equal(
+        record.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open on a project whose source directory is gone",
+    )
+    values = result_of(record)
+    equal(values["layer_count"], 1, "the layers the project registers")
+    equal(values["invalid_layer_count"], 1, "the layers that do not load")
+    listed = result_of(ctx.run("layer.list"))["layers"]
+    equal([row["name"] for row in listed], ["moved"], "the layers still registered")
+    reset_project(ctx)
+    return (
+        "SUCCEEDED with layer_count 1 and invalid_layer_count 1, the source directory "
+        "does not exist but its path is inside allowed_data_roots: the layer was not "
+        "removed and the read was not turned into PATH_NOT_ALLOWED"
+    )
+
+
+def at_33_open_refuses_an_oversized_member_before_unpacking_it(ctx: Context) -> str:
+    """A tiny QGZ may hold a member that expands to 300 MB, on the main thread (A3 #3)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at33 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    on_disk = ctx.fixtures.oversized.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run("project.open", {"path": str(ctx.fixtures.oversized), "discard_current": True})
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on an oversized member")
+    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an oversized member")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("too large" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 1.0, f"the {on_disk} byte archive took {elapsed:.2f}s: its member was read")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte QGZ whose member declares 300 MB: FAILED(PATH_NOT_ALLOWED) in "
+        f"{elapsed * 1000:.0f} ms, before the member was unpacked; the old project kept its layer"
+    )
+
+
+def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
+    """A QGZ the scanner cannot unpack is the file's problem, not the plugin's (A3 #4)."""
+
+    reset_project(ctx)
+
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.encrypted), "discard_current": True},
+    )
+
+    equal(
+        record.status,
+        ExecutionStatus.FAILED,
+        "project.open on a QGZ whose member is encrypted",
+    )
+    equal(
+        error_code(record),
+        PROJECT_OPEN_FAILED,
+        "the code for a QGZ the scanner cannot unpack (INTERNAL_ERROR would blame the plugin)",
+    )
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("may have changed" in error.message, f"the message: {error.message!r}")
+    reset_project(ctx)
+    return (
+        "the member carries the zip encryption flag, so extracting it raises RuntimeError; "
+        "read() is never given that archive (QGIS 3.44 crashes on it, measured) and the "
+        "caller gets PROJECT_OPEN_FAILED with read()'s message, not INTERNAL_ERROR"
+    )
+
+
 CASES = (
     ("AT-01", at_01_duplicate_registration),
     ("AT-02", at_02_invalid_input),
@@ -1217,4 +1345,8 @@ CASES = (
     ("AT-28", at_28_layer_add_sub_layer),
     ("AT-29", at_29_open_refuses_a_source_outside_the_roots),
     ("AT-30", at_30_open_refuses_a_remote_source_before_reading),
+    ("AT-31", at_31_open_refuses_an_encoded_or_spaced_datasource),
+    ("AT-32", at_32_open_keeps_a_source_whose_directory_is_gone),
+    ("AT-33", at_33_open_refuses_an_oversized_member_before_unpacking_it),
+    ("AT-34", at_34_unreadable_member_is_a_project_read_failure),
 )

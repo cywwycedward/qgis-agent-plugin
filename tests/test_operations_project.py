@@ -226,12 +226,15 @@ def project_dir(tmp_path: Path) -> Path:
     return root
 
 
-def project_xml(datasource: str) -> str:
+REMOTE_SOURCE = "/vsicurl/http://127.0.0.1:9/never.tif"
+
+
+def project_xml(datasource: str, *, tag: str = "datasource") -> str:
     """The smallest project XML QGIS writes around one layer's datasource."""
 
     return (
         "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        f"<datasource>{datasource}</datasource>"
+        f"<{tag}>{datasource}</{tag}>"
         "</maplayer></projectlayers></qgis>"
     )
 
@@ -245,10 +248,37 @@ def qgs_file(directory: Path, name: str, datasource: str) -> Path:
 def qgz_file(directory: Path, name: str, datasource: str) -> Path:
     """A ``.qgz`` is a zip whose ``.qgs`` member is the same XML."""
 
+    return qgz_bytes(directory, name, project_xml(datasource).encode("utf-8"))
+
+
+def qgz_bytes(directory: Path, name: str, member: bytes) -> Path:
     target = directory / name
     with zipfile.ZipFile(target, "w") as archive:
-        archive.writestr("project.qgs", project_xml(datasource))
+        archive.writestr("project.qgs", member)
     return target
+
+
+def encoded_project(directory: Path, name: str, datasource: str) -> Path:
+    """The same XML in UTF-16, which QDomDocument reads and a UTF-8 text scan cannot."""
+
+    member = b"\xff\xfe" + project_xml(datasource).encode("utf-16-le")
+    if name.lower().endswith(".qgz"):
+        return qgz_bytes(directory, name, member)
+    target = directory / name
+    target.write_bytes(member)
+    return target
+
+
+def set_encryption_flag(path: Path) -> None:
+    """Mark the archive's one member as encrypted, which ``zipfile`` cannot write."""
+
+    data = bytearray(path.read_bytes())
+    for signature, offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        start = data.find(signature)
+        assert start >= 0, "the archive has no local or central header"
+        flags = int.from_bytes(data[start + offset : start + offset + 2], "little") | 1
+        data[start + offset : start + offset + 2] = flags.to_bytes(2, "little")
+    path.write_bytes(bytes(data))
 
 
 def refused(code: str, call: Any) -> FrameworkError:
@@ -711,7 +741,7 @@ def test_open_refuses_a_directory_shaped_source_outside_the_roots(
 @pytest.mark.parametrize(
     "remote",
     [
-        "/vsicurl/http://127.0.0.1:9/never.tif",
+        REMOTE_SOURCE,
         r"\\no-such-host-audit\share\data.gpkg",
         "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png",
         # What QGIS's own XML parser decodes before it builds the layer.
@@ -742,6 +772,159 @@ def test_open_refuses_a_remote_source_before_the_project_is_read(
     assert loaded.read_path is None
     assert "remote data source" in failed.message
     assert remote not in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_a_utf16_project_before_the_project_is_read(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # QDomDocument reads a UTF-16 project; a scan that decodes the file as UTF-8 sees
+    # a NUL between every character and matches nothing.  NUL bytes are the tell.
+    root = project_dir(tmp_path)
+    target = encoded_project(root, f"encoded{suffix}", REMOTE_SOURCE)
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "not UTF-8" in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+@pytest.mark.parametrize("tag", ["datasource ", "datasource\n"])
+def test_open_sees_a_datasource_tag_with_whitespace(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str, tag: str
+) -> None:
+    # ``<datasource >`` is legal XML and the same element to QGIS; only a scanner
+    # that insists on the exact spelling misses it.
+    root = project_dir(tmp_path)
+    xml = project_xml(REMOTE_SOURCE, tag=tag)
+    if suffix == ".qgz":
+        target = qgz_bytes(root, f"spaced{suffix}", xml.encode("utf-8"))
+    else:
+        target = root / f"spaced{suffix}"
+        target.write_text(xml, encoding="utf-8")
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+def test_a_qgs_over_the_scan_limit_is_refused_without_reading_it(
+    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The scan reads the whole file, so its size is the main thread's memory: a file
+    # over the limit is refused before a byte of it is read.
+    root = project_dir(tmp_path)
+    target = root / "huge.qgs"
+    with target.open("wb") as handle:
+        handle.truncate(project.MAX_PROJECT_BYTES + 1)
+
+    def read_bytes(self: Path) -> bytes:
+        raise AssertionError("the project file was read before it was measured")
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    ctx = context(FakeProject(), roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert "too large" in failed.message
+
+
+def test_a_qgz_member_over_the_scan_limit_is_refused_before_it_is_unpacked(
+    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A small archive can hold a member that expands to gigabytes; the declared
+    # size is checked before the member is decompressed into memory.
+    root = project_dir(tmp_path)
+    target = root / "bomb.qgz"
+    with (
+        zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive,
+        archive.open("project.qgs", "w") as member,
+    ):
+        member.write(b" " * (project.MAX_PROJECT_BYTES + 1))
+
+    def read(self: zipfile.ZipFile, name: str) -> bytes:
+        raise AssertionError(f"the archive member {name} was unpacked before it was measured")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", read)
+    ctx = context(FakeProject(), roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert "too large" in failed.message
+
+
+def test_open_reports_an_encrypted_member_as_a_read_failure(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``zipfile`` raises RuntimeError for an encrypted member; a scan is not a new
+    # failure source, so the file is still refused with ``read()``'s code,
+    # PROJECT_OPEN_FAILED, not an INTERNAL_ERROR that reads like a plugin defect.
+    # ``read()`` is not called: QGIS 3.44 crashes on such an archive (measured).
+    root = project_dir(tmp_path)
+    target = qgz_file(root, "locked.qgz", str(root / "a.gpkg"))
+    set_encryption_flag(target)
+    loaded = FakeProject(read_result=False)
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "may have changed" in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_keeps_a_layer_whose_source_directory_is_gone(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # A2 #4's promise, for the case where the directory itself moved away: the source
+    # is still inside the roots, so it is AT-18B (read, invalid_layer_count > 0), not
+    # a breach that removes the layer and replaces the project.
+    root = project_dir(tmp_path)
+    source = root / "moved-away" / "cities.gpkg"
+    target = (
+        qgz_file(root, f"moved{suffix}", str(source))
+        if suffix == ".qgz"
+        else qgs_file(root, f"moved{suffix}", str(source))
+    )
+    loaded = FakeProject(layers_after_read={"moved": FakeLayer(valid=False, source=str(source))})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert result.invalid_layer_count == 1
+    assert loaded.removed == []
 
 
 def test_open_still_reads_a_project_whose_sources_are_local(
