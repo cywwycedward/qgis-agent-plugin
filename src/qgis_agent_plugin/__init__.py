@@ -1,9 +1,9 @@
 """The QGIS Agent plugin package.
 
-QGIS looks the entry point up by name on the package, so the import of the GUI
-module stays inside ``classFactory``: importing this package must not pull Qt in,
-or every module under it -- including the ones that never touch QGIS -- becomes
-impossible to import, and so to test, in a plain interpreter.
+QGIS looks the entry point up by name on the package, so ``classFactory`` stays
+here and imports the plugin only when QGIS calls it: importing the package alone
+stays cheap and pulls in no registry wiring, which is what lets every layer below
+it be imported and tested on its own.
 """
 
 from __future__ import annotations

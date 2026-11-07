@@ -1,0 +1,84 @@
+"""Which local paths an operation may read or write.
+
+There is one entry point, and a path either normalises to a regular file inside
+one of the operator's allowed roots or it is refused.  Roots are compared path
+component by path component after resolution, so ``..`` and a symbolic link
+cannot climb out of an allowed directory; the message never repeats the raw path,
+because an error line may end up in a log or an agent's context.
+
+An empty root list -- the default -- refuses everything: no directory is allowed
+until an operator names one.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from pathlib import Path
+from typing import NoReturn
+
+from .models import PATH_NOT_ALLOWED, FrameworkError
+
+# A URI scheme is at least two characters and ends in a colon; a single letter
+# followed by a colon is a Windows drive, which is a path, not a scheme.
+_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
+# GDAL's in-process virtual file systems are not local files at this layer.
+_VSI = "/vsi"
+
+
+def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> Path:
+    """Return the normalised path, or raise ``PATH_NOT_ALLOWED``.
+
+    ``must_exist=True`` is a read: the target has to be an existing regular file.
+    ``must_exist=False`` is a save: the target may be absent, but its parent must
+    exist and be inside the same roots, and the overwrite decision stays with the
+    operation (``TARGET_EXISTS`` is not this module's concern).
+    """
+
+    _refuse_remote(raw)
+    path = Path(raw)
+    if not raw or "\0" in raw or not path.is_absolute():
+        _refuse()
+    # A relative root is a configuration mistake: it would make the policy depend
+    # on the working directory, so it allows nothing.
+    allowed = tuple(Path(root).resolve() for root in roots if Path(root).is_absolute())
+
+    if must_exist:
+        target = _resolve_existing(path)
+        if not target.is_file():
+            _refuse()
+    else:
+        parent = _resolve_existing(path.parent)
+        if not parent.is_dir():
+            _refuse()
+        # resolve() also normalises a trailing ``.``/``..``, which would otherwise
+        # look like it lived inside the root while naming its parent.
+        target = (parent / path.name).resolve()
+        if target.is_dir():
+            _refuse()
+
+    if not any(target == root or root in target.parents for root in allowed):
+        _refuse()
+    return target
+
+
+def _resolve_existing(path: Path) -> Path:
+    """Resolve ``path`` through links; a missing or unreadable target is refused."""
+
+    try:
+        return path.resolve(strict=True)
+    except OSError:
+        _refuse()
+
+
+def _refuse_remote(raw: str) -> None:
+    """Refuse URLs, provider schemes and virtual file systems before any I/O."""
+
+    if raw.lower().startswith(_VSI) or _URI.match(raw):
+        _refuse()
+
+
+def _refuse() -> NoReturn:
+    # The raw path stays out of the message: it may carry credentials in a
+    # provider URI, and the caller already knows what it asked for.
+    raise FrameworkError(PATH_NOT_ALLOWED, "path is not an allowed local file")
