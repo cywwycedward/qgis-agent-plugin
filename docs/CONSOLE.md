@@ -1,0 +1,282 @@
+# Python Console 调用样例
+
+结论：本插件在 Python Console 里只有两个入口——`iface.agent_engine`（调用）和
+`iface.agent_registry`（看契约）。八个 Operation 用 `run_sync` 同步执行，唯一的后台 Operation
+用 `submit` + `get`。下面每段样例都标了实测状态：标“已实测”的是真跑过的，输出是从 Console
+里摘的摘要；标“未实测”的写明为什么没跑。
+
+## 0. 实测环境与标注约定
+
+| 项 | 值 |
+| --- | --- |
+| QGIS | 3.44.13-Solothurn（`Qgis.QGIS_VERSION`） |
+| Python / Qt | 3.12.13 / 5.15.13 |
+| Pydantic / pytest | 2.13.4 / 9.2.0 |
+| 跑法 | `D:\QGIS 3.44.13\bin\python-qgis-ltr.bat` + headless `QgsApplication`（`QT_QPA_PLATFORM=offscreen`）+ 真 `QgsProject` + 真 `QgsTaskManager` |
+
+标注规则：
+
+- **已实测（headless）**：在 headless 里真跑过。headless 没有 `iface`，所以引擎是手工用
+  `initGui` 里同样的类构造的（`OperationEngine(registry, Settings(...), ProjectLifecycle(),
+  iface=..., project=QgsProject.instance(), background_runner=OperationTaskRunner(...))`）；
+  样例里的 `engine` 在 GUI 里就是 `iface.agent_engine`，代码一样。
+- **已实测（GUI 未跑）**：逻辑跑过，但依赖 `iface` 的那一步（目前只有 `project.create` 的
+  `iface.newProject`）在 headless 里用替身。
+- **未实测**：没跑，原因写在旁边。不把没跑过的写成跑过。
+
+## 1. 找会话
+
+```python
+registry = iface.agent_registry
+engine = iface.agent_engine
+len(registry.list_specs())                     # 9
+[s.name for s in registry.list_specs()]
+```
+
+实测（headless，同一 registry）：
+
+```text
+9
+['layer.add', 'layer.get_info', 'layer.list', 'layer.set_visibility',
+ 'layer.sum_numeric_field', 'project.create', 'project.get_info',
+ 'project.open', 'project.save']
+```
+
+`unload` 之后这两个属性会被撤掉，`hasattr(iface, "agent_engine")` 变 `False`。
+
+## 2. 同步读一次工程状态
+
+```python
+record = engine.run_sync("project.get_info", {})
+record.status                                  # 'SUCCEEDED'
+record.model_dump_json(indent=2)
+```
+
+已实测（headless）：
+
+```json
+{
+  "execution_id": "df5781d5-8665-4ab1-b35e-39057bb83e54",
+  "operation": "project.get_info",
+  "kind": "query",
+  "strategy": "main_thread",
+  "status": "SUCCEEDED",
+  "progress": 100.0,
+  "created_at": "2026-11-07T11:11:08.210784+00:00",
+  "started_at": "2026-11-07T11:11:08.211785+00:00",
+  "finished_at": "2026-11-07T11:11:08.211785+00:00",
+  "project_epoch": 0,
+  "result": {
+    "file_path": null,
+    "crs_authid": "",
+    "is_dirty": false,
+    "layer_count": 0,
+    "project_epoch": 0
+  },
+  "error": null
+}
+```
+
+`crs_authid` 是工程自己的 CRS，空工程可能是 `""`；`project_epoch` 是插件本地的代数，不是
+QGIS 的工程版本号。`run_sync` 永远返回终态（`SUCCEEDED` 或 `FAILED`）。
+
+## 3. 参数写错的样子
+
+```python
+engine.run_sync("project.get_info", {"discard_current": True})
+```
+
+已实测（headless）：
+
+```text
+status: FAILED | error: INVALID_INPUT | project.get_info: invalid input at discard_current
+```
+
+多余的键不会被忽略（所有输入模型 `extra="forbid"`），布尔也不接受字符串。这类失败在 GIS
+侧没有任何副作用。
+
+## 4. 加图层、看图层
+
+```python
+added = engine.run_sync("layer.add", {
+    "kind": "vector",
+    "source_path": r"C:\temp\data\cities.geojson",
+    "name": "Cities",
+})
+layer_id = added.result["layer_id"]
+engine.run_sync("layer.list", {}).result
+engine.run_sync("layer.get_info", {"layer_id": layer_id}).result
+```
+
+已实测（headless，源是 4 个点的 GeoJSON，`pop` 字段里有一个 null）：
+
+```text
+added              -> SUCCEEDED
+{"layer_id": "Cities_5945552f_c430_4aaf_b619_3b51a9de718a", "name": "Cities",
+ "kind": "vector", "provider": "ogr", "crs_authid": "EPSG:4326"}
+
+layer.list         -> {"layers": [{"layer_id": "Cities_5945552f_...", "name": "Cities",
+                       "kind": "vector", "crs_authid": "EPSG:4326",
+                       "in_layer_tree": true, "visible": true, "effective_visible": true}]}
+
+layer.get_info     -> {"layer_id": "Cities_5945552f_...", ..., "provider": "ogr",
+                       "valid": true, "in_layer_tree": true,
+                       "visible": true, "effective_visible": true}
+```
+
+`provider` 由 `kind` 决定（vector→`ogr`，raster→`gdal`），调用方不能指定。图层的 `layer_id`
+由 QGIS 生成，带随机后缀，所以上面只保证前缀一致。
+
+## 5. 可见性
+
+```python
+engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
+engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": False})
+engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
+```
+
+已实测（headless）：
+
+```text
+{"visible": true,  "effective_visible": true,  "changed": false}   # 已经是 true：没动
+{"visible": false, "effective_visible": false, "changed": true }   # 隐藏
+{"visible": true,  "effective_visible": true,  "changed": true }   # 再显示
+```
+
+`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性；父组被隐藏时
+会出现 `visible=true, effective_visible=false`（单测覆盖，本文件未实测该组合）。
+
+## 6. 后台求和（唯一的 background Operation）
+
+```python
+submitted = engine.submit("layer.sum_numeric_field",
+                          {"layer_id": layer_id, "field_name": "pop"})
+submitted.status                               # 'QUEUED'
+engine.get(submitted.execution_id).status      # 下一轮事件循环后
+```
+
+已实测（headless，4 个要素、1 个 null）：
+
+```text
+submit -> QUEUED
+observed statuses: QUEUED -> SCHEDULED -> SUCCEEDED
+result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
+         "skipped_null": 1, "total": 225.0, "snapshot_project_epoch": 0}
+progress: 100.0
+```
+
+几条实测到的事实：
+
+- worker 在 Qt 线程池线程上跑（探针里线程名 `Dummy-1`），`finished` 回调在 `MainThread`。
+- 4 要素 / 9000 要素这种快任务，记录里的进度只写 `0 → 100`；`RUNNING` 甚至可能观察不到
+  （第一个进度报告还没到，任务已经结束，记录直接由 `SCHEDULED` 经成功路径到 `SUCCEEDED`）。
+- 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
+- 超过 `max_snapshot_features`（默认 10000）：10001 个要素 → `FAILED`
+  `SNAPSHOT_LIMIT_EXCEEDED`，不做静默截断。
+- 在 Console 里不要忙等：打完下一行代码就是一次事件循环，`get` 即可；等任务真正跑完再 `get`
+  才会看到终态。
+
+`run_sync` 调它会被拒绝（控制面，不建记录）：
+
+```text
+### run_sync layer.sum_numeric_field
+FrameworkError: UNSUPPORTED_EXECUTION_MODE | layer.sum_numeric_field is a background operation; submit it instead
+```
+
+## 7. 取消
+
+已经被接受但还没开始的调用，取消是立即的：
+
+```python
+queued = engine.submit("project.get_info", {})
+engine.cancel(queued.execution_id)
+```
+
+已实测（headless）：
+
+```text
+submit -> QUEUED
+{"execution_id":"7875fb2e-d005-4c4b-9e84-062856b59ce5","accepted":true,"status":"CANCELLED","reason":null}
+after the event loop: CANCELLED      # 排队中的回调被跳过，没有再执行
+```
+
+后台任务一旦交给 QGIS，取消只是“请求”：
+
+```python
+receipt = engine.cancel(running_id)   # accepted=true, status='CANCEL_REQUESTED'
+engine.get(running_id).status         # 等任务自己报告，才变 'CANCELLED'
+```
+
+**未实测（本文件）**：正在 `RUNNING` 的 `QgsTask` 的 `CANCEL_REQUESTED -> CANCELLED` 这一段。
+4 要素/9000 要素的求和在毫秒级结束，构造不出稳定的取消窗口；F5 的实现报告里有
+`progress 60.0 → CANCEL_REQUESTED → CANCELLED` 的探针记录。语义见 `docs/ERRORS.md` §4。
+
+`cancel` 对主线程正在执行的调用、以及 `FINALIZING` 的记录，返回 `accepted=false`
+与 `reason="NOT_INTERRUPTIBLE"` / `"FINALIZING"`。
+
+## 8. 保存与打开工程
+
+```python
+engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})
+engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})   # 第二次
+engine.run_sync("project.open", {"path": r"C:\temp\projects\missing.qgz", "discard_current": True})
+engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz",  "discard_current": True})
+engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz"})
+```
+
+已实测（headless，`allowed_project_roots` 指向 `C:\temp\projects`）：
+
+```text
+save #1   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}
+save #2   -> FAILED     TARGET_EXISTS | the target file exists; pass overwrite=true to replace it
+open 缺失 -> FAILED     PATH_NOT_ALLOWED | path is not an allowed local file
+open 损坏 -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project may have changed
+open 不 discard -> FAILED  PROJECT_REPLACE_REQUIRED | ... pass discard_current=true to replace it
+```
+
+“缺失文件”归 `PATH_NOT_ALLOWED` 而不是 `PROJECT_OPEN_FAILED`：路径策略在读之前就要求文件存在。
+`PROJECT_OPEN_FAILED` 的 `message` 明说当前工程可能已经改变——不承诺回滚。
+
+`project.open(discard_current=true)` 与 `project.create` 的**成功**路径当前有缺陷（F9）：
+
+```text
+FrameworkError: INTERNAL_ERROR | <id>: CANCEL_REQUESTED -> SUCCEEDED is not a transition
+```
+
+**未实测**：这两个 Operation 的成功路径（F9 修复后再补）。`project.create` 还会用
+`iface.newProject(promptToSaveFlag=False)`，headless 里只能用替身；它的失败路径都实测过
+（`INVALID_CRS`、`PROJECT_REPLACE_REQUIRED`，见 §9）。缺陷说明见 `docs/ERRORS.md` §5。
+
+## 9. 常见错误速览
+
+已实测（headless），一条一行：
+
+| 调用 | 结果 |
+| --- | --- |
+| `run_sync("no.such", {})` | 抛 `FrameworkError: OPERATION_NOT_FOUND` |
+| `get("no-such-id")` | 抛 `FrameworkError: EXECUTION_NOT_FOUND` |
+| 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
+| `layer.add` 传 `add_to_legend="true"` | `FAILED` `INVALID_INPUT` at `add_to_legend` |
+| `layer.add` 的路径不在 `allowed_data_roots` 内 | `FAILED` `PATH_NOT_ALLOWED` |
+| `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
+| `layer.add(kind="raster", sub_layer="x", ...)` | `FAILED` `INVALID_INPUT` at `<root>` |
+| `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |
+| `layer.set_visibility` 对一个 `add_to_legend=false` 的图层 | `FAILED` `LAYER_NOT_IN_TREE` |
+| `layer.sum_numeric_field` 对文本字段 | `FAILED` `INVALID_FIELD_TYPE` |
+| `project.save` 不给路径且工程无关联文件 | `FAILED` `PROJECT_PATH_REQUIRED` |
+| `project.create` 传 `crs_authid="NOT:A_CRS"` | `FAILED` `INVALID_CRS`（当前工程未被替换） |
+| `project.create` 在有内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
+| 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
+| 全新安装（允许目录为空）调 `layer.add` / `project.save` | `FAILED` `PATH_NOT_ALLOWED` |
+
+## 10. 未实测清单
+
+| 样例 | 为什么没跑 |
+| --- | --- |
+| `iface.agent_engine` / `iface.agent_registry` 本身 | 需要 QGIS Desktop 的 `iface`；headless 里用同一套类手工装配，`initGui` 的发布逻辑由单测覆盖 |
+| `project.create` 成功路径 | 需要真实 `iface.newProject()`，且被 F9 挡住 |
+| `project.open` 成功路径 | 被 F9 挡住（headless 里用“只取消后台记录”的替身验证过修复方向，见 F9 报告） |
+| 运行中后台任务的 `CANCEL_REQUESTED -> CANCELLED` | 现有后台 Operation 太快，构造不出稳定窗口 |
+| 父级组隐藏时的 `visible=true / effective_visible=false` | 需要 GUI 图层树里的组；单测覆盖，Console 未跑 |
+| 多个后台任务排队（`max_active_background=2` 的 FIFO） | 探针里三次 9000 要素求和都在三轮事件循环内跑完，看不到第三个停在 `QUEUED`；单测覆盖该路径 |
+| 配置键写入（`QgsSettings().setValue(...)`） | 会改用户 `QGIS3.ini`，只验证了读：默认空根、缺失键返回 `None`、越界拒绝 |

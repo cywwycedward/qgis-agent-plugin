@@ -1,368 +1,161 @@
-# Sync and async in QGIS 3.44.13
+# QGIS 3.44 的同步与异步，以及本插件怎么用
 
-How work runs on or off the main thread in QGIS 3.44.13 (`final-3_44_13`), and what this
-plugin's `jobs.py` adds on top. Read this before adding a `Command` that takes
-more than a few milliseconds. Where a claim sits deep inside a long file the citation names
-the member instead of a line range — see [Sources](#sources).
+结论：QGIS 里“同步”就是调用线程一直执行到返回，“异步”就是把活交给 `QgsTask`，由
+`QgsTaskManager` 在自己的 `QThreadPool` 上跑 `run()`，再在**主线程**调用 `finished(bool)`。
+本插件把这两条落成两个执行策略：`main_thread`（`run_sync` 直接跑，或 `submit` 排队到下一轮事件
+循环）与 `background`（`prepare_main` → `QgsTask` → `finalize_main`）。
 
-## Summary
+三条不变式贯穿全文，也贯穿代码：
 
-In 3.44 synchronous means *block the calling thread*: `processing.run` validates the
-parameters and runs the algorithm on whatever thread called it
-(`python/plugins/processing/core/Processing.py`, `Processing.runAlgorithm`), and the
-renderer's synchronous flavour is `job.start()` + `job.waitForFinished()`. Asynchronous
-means handing the work to a `QgsTask`, which a `QgsTaskManager` runs on its own
-`QThreadPool` (`src/core/qgstaskmanager.cpp`, `QgsTaskManager::processQueue`), and whose
-outcome comes back through the virtual `finished(bool)` that the manager calls on the main
-thread. The renderer is the exception that already owns threads:
-`QgsMapRendererParallelJob` renders on Qt's concurrent framework and reports through the
-`finished()` **signal**.
+1. 后台线程不碰 `QgsProject`、`QgsMapLayer`、`iface`、Qt widget。
+2. 执行状态（`ExecutionStore`）只在主线程写；worker 只拿到 `TaskControl`（`is_cancelled()` /
+   `set_progress()`）。
+3. `QgsTask` 结束后 QGIS 会删掉它的 C++ 对象：插件只保留 task id，不保留任务指针。
 
-`QgsTask` is declared in `src/core/qgstaskmanager.h` at this tag — `src/core/qgstask.h` does
-not exist (raw fetch returns 404), the two files having been merged.
+## 1. 同步：调用线程干活
 
-## Sync: the calling thread does the work
+- `processing.run(...)` → `Processing.runAlgorithm`：参数校验、执行、返回都在调用线程，失败以
+  `QgsProcessingException` 抛出。没有线程被创建。
+- `QgsTask.waitForFinished(int timeout = 30000)` 阻塞当前线程（`src/core/qgstaskmanager.h`）；
+  `0` 等到底，超时返回 `false` 且任务**还在跑**。
+- 渲染：`job.start()` 立即返回，`job.waitForFinished()` 阻塞。
 
-- `processing.run(...)` → `processing.tools.general.run` → `Processing.runAlgorithm`, which
-  calls `alg.checkParameterValues(...)`, then `execute(...)`, then `alg.run(...)`. No thread
-  is created; the call returns when the algorithm is done and a failure arrives as a
-  `QgsProcessingException`.
-- `QgsTask::waitForFinished( int timeout = 30000 )` blocks the current thread
-  (`src/core/qgstaskmanager.h:L210-L219`); `0` blocks forever, a timeout returns `false` with
-  the task still running.
-- A renderer job: `void start()` — "Start the rendering job and immediately return"
-  (`qgsmaprendererjob.h`) — then `waitForFinished()`.
+阻塞主线程的副作用是 Qt 不再派发事件：所有排到主线程的东西都要等这次调用返回。本插件的
+`run_sync` 就是这种情况——它在主线程同步调 `execute_main`，调用期间 GUI 不动。这也解释了为什么
+只有八个 Operation 允许 `run_sync`：唯一的后台 Operation 用 `run_sync` 会被
+`UNSUPPORTED_EXECUTION_MODE` 拒绝，避免“同步等一个 QgsTask”这种会死锁的写法。
 
-Blocking the main thread also stops Qt from delivering queued signals, so nothing posted to
-the main thread runs until the call returns. *Researcher inference* from the event-loop
-model, not a QGIS comment.
+## 2. 异步：`QgsTask` 与 `QgsTaskManager`
 
-## Async: QgsTask and QgsTaskManager
+- `QgsTask::run()` 是**唯一**在别的线程跑的成员；manager 把它放到线程池，结束后在**主线程**
+  调用 `finished(bool)`（`qgstaskmanager.cpp`，`QgsTaskManager::taskStatusChanged`）。
+- `finished` 是 `protected` 的 **virtual**，不是 signal：`task.finished.connect(...)` 不能当信号用，
+  只有 manager 会调它。所以要么子类 override，要么用 `QgsTask.fromFunction(on_finished=...)`。
+- 没被加进 manager 的 `QgsTask` 永远收不到 `finished()`。
+- 进度从 worker 走 `setProgress()`，主线程侧通过 manager 的 `progressChanged(int, double)` 读；
+  也可以在 worker 里读 `task.progress()`。
+- `cancel()` 只是请求：置 `isCanceled()` 标志，子类必须自己周期性检查并尽快退出。
 
-`QgsTask::run()` is the only member that runs off the main thread; the manager starts it on
-its thread pool and calls `finished(bool)` back on the main thread. Progress is reported by
-calling `setProgress()` from `run()`, which emits `progressChanged` and is readable through
-`progress()` (`src/core/qgstaskmanager.h:L124-L127`, `:L295-L300`). A task that is never
-added to a manager never gets `finished()`: "If the task is managed by a QgsTaskManager, this
-will be called after the task has finished" (`src/core/qgstaskmanager.h:L274-L284`).
+## 3. 三种异步形态
 
-## Comparison
+| 形态 | 跑活的线程 | 完成怎么观察 | 本插件用吗 |
+| --- | --- | --- | --- |
+| `QgsTask` 子类 | manager 的 `QThreadPool` | override `finished(bool)`，主线程 | **用**（`core/runners/qgs_task.py`） |
+| `QgsTask.fromFunction` | 同上 | `on_finished(exception, values)`，主线程 | 不用（本插件需要 `setDependentLayers` 和 `isCanceled()` 的实例方法，子类更直接） |
+| `QgsProcessingAlgRunnerTask` | 同上 | `executed(bool, dict)` signal + `finished()` | 不用（见 §8） |
+| `QgsMapRendererParallelJob` | Qt concurrent（`QFuture`） | `finished()` **signal** | 不用（本插件不渲染） |
 
-| | Thread that runs the work | Completion is observed as | Cancel | Progress | Waited on synchronously |
-| --- | --- | --- | --- | --- | --- |
-| `processing.run(...)` | the calling thread | return value / raised `QgsProcessingException` | no handle to cancel | none | it is the synchronous form |
-| `QgsTask` subclass | the manager's `QThreadPool` | virtual `finished(bool)`, main thread | `cancel()` sets a flag the subclass must poll | `setProgress()` → `progressChanged`, `progress()` | `waitForFinished(30000)` |
-| `QgsProcessingAlgRunnerTask` | the manager's `QThreadPool` | `executed(bool, dict)` signal, emitted from its own `finished()` override | `cancel()` cancels the feedback, then the task flag | feedback `progressChanged` → task `setProgress` (`qgsprocessingalgrunnertask.cpp`, `run()`) | same as `QgsTask` |
-| `QgsMapRendererParallelJob` | Qt concurrent threads (`QFuture`/`QFutureWatcher`) | `finished()` **signal** | `cancelWithoutBlocking()`, or blocking `cancel()` | none | `waitForFinished()` |
+## 4. 本插件怎么落在这两条上
 
-## Minimal shapes
-
-Synchronous algorithm run, as `_checked`/`run` already do it
-(`commands/processing/execute_processing.py`, `ExecuteProcessing.run`):
-
-```python
-from qgis.core import QgsProcessingFeedback
-import processing
-
-feedback = QgsProcessingFeedback()
-results = processing.run(
-    algorithm, parameters, context=context, feedback=feedback, is_child_algorithm=True
-)  # returns when done; raises on failure
-```
-
-`QgsTask` subclass — the base contract (`run` off-thread, `finished` on-thread):
-
-```python
-from qgis.core import QgsTask
-
-
-class Work(QgsTask):
-    def run(self) -> bool:
-        for i in range(100):
-            if self.isCanceled():
-                return False
-            self.setProgress(i)  # emits progressChanged
-        return True
-
-    def finished(self, result: bool) -> None:  # main thread; result carries no reason
-        ...
-```
-
-`QgsTask.fromFunction`, the shortest asynchronous form
-(`python/core/additions/fromfunction.py:L31-L38`):
-
-```python
-# QgsTask.fromFunction(description, function, *args, on_finished=None,
-#                      flags=QgsTask.Flag.AllFlags, **kwargs)
-task = QgsTask.fromFunction("my task", calculate, on_finished=calculation_finished)
-QgsApplication.taskManager().addTask(task)
-```
-
-`on_finished` is called from `QgsTaskWrapper.finished()`
-(`python/core/additions/qgstaskwrapper.py`), i.e. on the main thread, with
-`(exception, returned_values)`; `run()` turns any Python exception into `False` plus
-`self.exception`, and a cancelled run synthesises `Exception("Task canceled")`.
-
-`QgsProcessingAlgRunnerTask` — the runner the plugin uses (`jobs.py`, `AlgorithmTask`):
-
-```python
-from qgis.core import QgsProcessingAlgRunnerTask, QgsApplication
-
-task = QgsProcessingAlgRunnerTask(algorithm, parameters, context, feedback)
-task.executed.connect(lambda ok, results: ...)  # executed is a real signal
-QgsApplication.taskManager().addTask(task)  # returns 0 on failure
-```
-
-Renderer job — asynchronous because the job already has threads
-(`commands/view/render_map.py`, `RenderMap.arun`):
-
-```python
-from qgis.core import QgsMapRendererParallelJob
-
-job = QgsMapRendererParallelJob(settings)
-job.finished.connect(save_rendered_image)  # signal, delivered on the main thread
-job.start()
-```
-
-## Cancellation
-
-`QgsTask::cancel()` only asks (`src/core/qgstaskmanager.h:L138-L147`): "Calling this is not
-guaranteed to immediately end the task, rather it sets the isCanceled() flag which task
-subclasses can check and terminate their operations at an appropriate time… Derived classes
-must ensure that the base class implementation is called from any overridden version."
-
-The implementation (`qgstaskmanager.cpp`, `QgsTask::cancel`) sets `mShouldTerminate` under a
-mutex and terminates immediately only if the task has not started yet. It does not consult
-`canCancel()`; the prompt-and-check lives in the GUI, not here.
-
-`QgsProcessingAlgRunnerTask::cancel()` cancels the feedback *and* the task
-(`qgsprocessingalgrunnertask.cpp`):
-
-```cpp
-void QgsProcessingAlgRunnerTask::cancel()
-{
-  if ( mFeedback )
-    mFeedback->cancel();
-  QgsTask::cancel();
-}
-```
-
-and its `run()` reports cancellation as failure: `return ok && !mFeedback->isCanceled();`.
-Algorithms that honour `QgsFeedback::isCanceled()` stop on their next check; those that do
-not run to the end and their result is discarded.
-
-Renderer jobs have two different cancels (`qgsmaprendererjob.h`): `cancel()` "does not
-return until the job has terminated", while `cancelWithoutBlocking()` "will continue to
-operate until it is able to cancel, at which stage the finished() signal will be emitted".
-Anything that must return immediately uses the second.
-
-## Progress
-
-- `QgsFeedback::progress()` returns a percentage 0–100 and is a plain member read
-  (`src/core/qgsfeedback.h:L77-L84`); `mProgress` starts at `0.0` and `mCanceled` at `false`
-  (same file, private members). **There is no "unknown = -1" convention in 3.44.13**:
-  `QgsProcessingFeedback` does not override `progress()` and nothing sets a negative value.
-  `jobs.py`'s `>= 0` guard is defensive, not a QGIS contract.
-- `setProgress()` only emits `progressChanged` when the value moves by a tenth
-  (`qgsfeedback.h`, `setProgress`), so poll `progress()` rather than counting signals.
-- `setProgressText()` is not a stored field: `QgsProcessingFeedback::setProgressText`
-  appends the text to the HTML and text logs (`qgsprocessingfeedback.cpp`), and there is no
-  getter. A poller that wants the latest text must capture it itself — which is what
-  `ProcessingFeedback.setProgressText` does (`jobs.py`), and that
-  override also keeps progress chatter out of the log.
-- `textLog()` is the accumulated message log: every `pushInfo`, `pushWarning`, `reportError`
-  and — by default — every progress text lands there. It is the only place a failed
-  processing run says *why*.
-
-## What PyQGIS can and cannot touch
-
-Three tiers, and only the virtual public ones let C++ call back into Python. The stub shipped
-in `apps/qgis-ltr/python/qgis/_core.pyi` lists a method whether or not C++ ever dispatches
-into an override, so the stub cannot answer this — the header's `virtual` and its access
-section can.
-
-| Member | In C++ (`final-3_44_13`) | In PyQGIS |
+| 层 | 代码 | 用什么机制 |
 | --- | --- | --- |
-| `QgsFeedback::progress()`, `setProgress()` | `CORE_EXPORT`, public, inline, **not virtual**, `SIP_HOLDGIL` | callable; overriding them changes nothing, C++ never dispatches into the override |
-| `QgsFeedback::mProgress`, `mCanceled` | `private` | not exposed; read through `progress()` / `isCanceled()` |
-| `QgsProcessingFeedback::setProgressText()`, `reportError()`, `pushInfo()`, `textLog()` | `CORE_EXPORT`, public **virtual** | overridable, and C++ does call the override |
-| `QgsProcessingFeedback::mTextLog`, `log()` | `private` | not exposed; `textLog()` is the only read |
-| `QgsTask::run()`, `finished()` | `CORE_EXPORT`, **protected virtual** | overridable, and the manager dispatches into them |
-| `QgsTaskManager::taskStatusChanged`, `QgsTask::mShouldTerminate` | `private` slot / `private` member | not callable, not readable; they are the manager's own plumbing |
-| `QgsProcessingAlgRunnerTask::executed` | signal | real `pyqtSignal` |
+| 主线程同步 | `core/engine.py::run_sync` | 直接调 `execute_main`，调用线程就是主线程 |
+| 主线程异步 | `core/runners/main_thread.py` | `QTimer.singleShot(0, cb)` 推一轮事件循环，回调前先问“这条执行还活着吗” |
+| 后台快照 | `operations/layer.py::LayerSumNumericField.prepare_main` | 主线程读要素，复制成 `tuple[float, ...]` |
+| 后台计算 | `core/runners/qgs_task.py::OperationTask(QgsTask)` | `run()` 里只调 `execute_worker(snapshot, TaskControl)` |
+| 完成回调 | `OperationTask.finished` → `OperationTaskRunner.task_finished` | 主线程：更新记录、`finalize_main`、校验 epoch |
+| 状态机 | `core/execution_store.py` | 只有主线程写；PRD 8.2 的边逐条成表 |
+| 取消 | `engine.cancel` → `runner.cancel` | 转 `CANCEL_REQUESTED` + `manager.task(id).cancel()` |
+| 卸载 | `plugin.unload` → `engine.shutdown` | 只取消本插件那个 manager 的任务，**永不** `cancelAll()` |
 
-The `private:` members matter for reading this document, not for writing a plugin: anything
-this file says about `mProgress`, `mTextLog` or `mShouldTerminate` is how QGIS works inside,
-and the only handles PyQGIS gets are the public methods in the same table.
+一次后台 `submit` 的状态序列（PRD 8.1/8.2）：
 
-## Measured on 3.44.13
-
-Four checks against the installed build. The first two drive the virtual through C++ only —
-a `QgsProcessingMultiStepFeedback` forwards to its wrapped feedback in C++, so a Python
-override is reached only if the virtual really exists.
-
-- **`setProgressText` reaches Python, and the base implementation really is skipped.** A C++
-  proxy forwarding one string landed in the override, and `textLog()` afterwards was `''`:
-  the C++ append never runs, so an override suppresses log growth as well as capturing the
-  text. This is the measured form of the claim `jobs.py` now makes.
-- **`setProgress` never reaches Python.** The same C++ proxy reported `0` calls to a Python
-  override: the method is not virtual, so overriding it is dead code. Read `progress()`
-  instead, which is what `ProcessingJob.progress` does.
-- **A native algorithm may never report progress text at all.** A full `native:centroids` run
-  over 20,000 features made `0` `setProgressText` calls and left `textLog()` empty. Progress
-  text is per-algorithm, not a guarantee, so `progress_text` being `None` or `''` is normal
-  and says nothing about the run.
-- **The job layer and the manager layer disagree on a cancelled task, on purpose.** Cancel a
-  `ProcessingJob` and the job settles a `processing_failed` failure with an empty message,
-  because a cancelled algorithm task simply reports `finished(False)`. Only `Operations`
-  turns that into `terminal_outcome="cancelled"`, since it read `cancel_requested` first
-  (`operations.py`, `_finish`). Without that one writer a
-  user-initiated cancel would arrive as a failure.
-
-## Errors
-
-`finished(bool)` carries one bit and no reason. When an algorithm fails, the exception text
-and the algorithm's own messages go through `QgsProcessingFeedback::reportError`, which
-writes them to the log (`qgsprocessingfeedback.cpp`). Hence:
-
-```python
-self.fail(CommandError("processing_failed", self._feedback.textLog().strip()))  # jobs.py
+```text
+QUEUED            submit 返回时；输入已经校验过，排队中
+PREPARING         下一轮事件循环，主线程跑 prepare_main
+SCHEDULED         addTask 返回非 0，QGIS 接手中（还没必然开始）
+RUNNING           第一个进度报告到达主线程时才置（短任务可能观察不到这一步）
+FINALIZING        finished(true) 且没被取消，主线程跑 finalize_main（先校验 project_epoch）
+SUCCEEDED/FAILED  输出校验后落终态
+CANCELLED         finished 报告已取消，或排队时就被取消
 ```
 
-`QgsProcessingAlgRunnerTask::finished(bool)` runs `mAlgorithm->postProcess(...)` and then
-emits `executed(result, results)`, so the results arrive through a signal, after
-post-processing, on the main thread. `AlgorithmTask` connects to `executed` to record success
-*before* the `finished()` override runs (`jobs.py`, `AlgorithmTask`).
+实测（headless，QGIS 3.44.13，9000 要素求和）：
 
-A renderer job reports errors through the job's own error list; `finished()` only means "the
-render stopped", cancelled or not.
+```text
+submit -> QUEUED
+observed statuses: QUEUED -> SCHEDULED -> SUCCEEDED      # 任务 3 ms 级，RUNNING 没被观察到
+worker thread: Dummy-1 | finished callback thread: MainThread
+progressChanged 次数 100（worker 调 setProgress 100 次，一次不少）
+记录里的 progress: 0.0 -> 100.0
+```
 
-## Two constraints this plugin depends on
+## 5. 会咬人的地方（都写在适配器的注释里）
 
-### (a) `finished` is a virtual on the main thread, not a signal
+- **`finished` 不是信号**：只有 manager 调它。想接信号就 `fromFunction`，想控制生命周期就 override。
+- **`addTask()` 返回 0 = 没接手**：此时任务的 Python 对象还在插件这边，可以丢；返回非 0 时所有权
+  交给 manager（`SIP_TRANSFER`），但插件仍可 `cancel()`，只是别自己删。
+- **任务结束后不能留指针**：QGIS 删掉 C++ 对象后再访问会 `RuntimeError`。本插件把
+  `execution_id → task_id` 的映射只用于“活动任务定位”，任务结束就释放。
+- **`cancel()` 不检查 `canCancel()`**：设置里那个检查在 GUI 层。
+- **worker 里抛异常会 abort QGIS**（异常穿过 C++ 任务框架）：`OperationRun.run` 用
+  `except BaseException` 兜住，转成 `FAILED(INTERNAL_ERROR)`，堆栈只进本机日志。
+- **`waitForFinished(30000)` 默认 30 秒**，`0` 是无期限；超时只说明任务还在跑。本插件不用它。
+- **进度节流要自己做**：`QgsTask.setProgress` 每次都发 `progressChanged`（实测 100 次调用 = 100 次
+  信号），所以适配器才把“写执行记录”限制到每 100 ms 一次，并且**不写 100**——100 只由
+  `SUCCEEDED` 那一步写，否则一个已取消的任务也会留下 100% 的记录。
+  （`QgsFeedback::setProgress` 才有“变化 1/10 才发信号”的行为，那是另一个类。）
+- **任务没有结果也可能是失败**：`finished(true)` 只表示 `run()` 返回了真值；本插件还要看有没有
+  算出的结果，没有就 `FAILED(INTERNAL_ERROR: the task ended without a result)`。
 
-Source comment, `src/core/qgstaskmanager.h:L274-L284`:
+## 6. PyQGIS 能碰什么、不能碰什么
 
-> If the task is managed by a QgsTaskManager, this will be called after the task has
-> finished (whether through successful completion or via early termination). The result
-> argument reflects whether the task was successfully completed or not. This method is
-> always called from the main thread, so it is safe to create widgets and perform other
-> operations which require the main thread. However, the GUI will be blocked for the
-> duration of this method so tasks should avoid performing any lengthy operations here.
+只有 public virtual 的成员会让 C++ 回调进 Python；随 QGIS 附带的 `_core.pyi` stub 会列出方法，
+但不告诉你它是不是 virtual，只能看头文件的 `virtual` 与访问段。
 
-It is declared under `protected:` (`:L262`) and is absent from the `signals:` block
-(`:L221-L260`), which is why `task.finished.connect(...)` cannot work and why `jobs.py` wraps
-every task in a `QObject` with its own `finished` signal (`jobs.py`, `OperationJob`). The
-manager is what calls it: `QgsTaskManager::taskStatusChanged` invokes `task->finished( result )`
-on `Complete`/`Terminated` (`qgstaskmanager.cpp`), reached through the task's `statusChanged`
-signal.
-
-### (b) A runner task must not be handed a context that already resolved parameters
-
-This is **observed behaviour in this plugin**, not a documented QGIS rule. `_checked` runs
-`checkParameterValues(...)` against a throwaway context and says why
-(`commands/processing/execute_processing.py`, `_checked`): "a task must be given a context
-nothing has resolved parameters with: QGIS keeps what the check left there alive past the
-run, so handing a context that has already resolved parameters to the task crashes the next
-one."
-
-What the source does support: the context is stateful and thread-bound — `thread()` is the
-temporary layer store's affinity, `pushToThread()` asserts the current thread matches, and
-`takeResultsFrom()` is "only safe to call when both this context and the other context share
-the same thread() affinity" (`qgsprocessingcontext.h`). And the runner task calls `prepare()`
-again in its own constructor (`qgsprocessingalgrunnertask.cpp`), so a context one
-`prepare`/`checkParameterValues` pass has touched gets a second pass on another thread.
-`unverified:` no source comment states the crash; it is the plugin's own observation.
-
-The other half of the constraint is lifetime: the task holds raw pointers to the algorithm,
-the context and the feedback, not copies — keep them alive on the job
-(`jobs.py`, `ProcessingJob`).
-
-## Pitfalls verified on 3.44.13
-
-- `finished()` is a protected virtual, never a signal, and only a manager calls it — a bare
-  task object has no completion callback (`qgstaskmanager.h:L274-L284`).
-- `QgsTaskManager::addTask` returns "unique task ID, or 0 if task could not be added"
-  (`qgstaskmanager.h`, `addTask`) — check it.
-- `addTask` takes `SIP_TRANSFER`: ownership moves to the manager, so keep your own reference
-  if you still want to call `cancel()` later (`jobs.py` does: `self._task`).
-- `waitForFinished( int timeout = 30000 )` defaults to 30 s, `0` waits forever, and a timeout
-  means the task is *still running* (`qgstaskmanager.h:L210-L219`). It calls
-  `QCoreApplication::sendPostedEvents( this )` after the wait, so a posted `finished()` still
-  arrives after it returns (`qgstaskmanager.cpp`).
-- `QgsTask::cancel()` does not check `canCancel()`; only the GUI does
-  (`qgstaskmanager.cpp`, `QgsTask::cancel`).
-- `QgsProcessingAlgRunnerTask` strips `CanCancel` when the algorithm lacks
-  `ProcessingAlgorithmFlag::CanCancel`, so `task.canCancel()` can be `False`
-  (`qgsprocessingalgrunnertask.cpp`, constructor).
-- The manager lookup is `task( id )` and `taskId( task )` returns `-1` when unknown; there is
-  no `taskFromId` on this class (`qgstaskmanager.h`, `task`/`taskId`).
-- `QgsFeedback::progress()` starts at `0.0`; nothing in `qgsfeedback.h` or
-  `qgsprocessingfeedback.cpp` sets `-1` for "unknown".
-- `QgsProcessingFeedback::setProgressText()` appends to `textLog()`/`htmlLog()` and cannot be
-  read back (`qgsprocessingfeedback.cpp`).
-- `QgsMapRendererJob::cancel()` blocks until the job has terminated; use
-  `cancelWithoutBlocking()` from anything that must return (`qgsmaprendererjob.h`).
-
-## How this plugin maps onto it
-
-| Plugin class | QGIS mechanism | Why the wrapper exists |
+| 成员 | 在 C++（3.44.13） | 在 PyQGIS |
 | --- | --- | --- |
-| `OperationJob` (`jobs.py`) | none | One `finished` **signal**, a `settle()`/`fail()` pair that fires once, and `progress`/`progress_text` that may be `None`. |
-| `RenderMapJob` (`jobs.py`) | `QgsMapRendererParallelJob` | The job already has threads and a real `finished` signal; the wrapper only saves the image and settles. No progress, because the job reports none. |
-| `ProcessingFeedback` (`jobs.py`) | `QgsProcessingFeedback` | Keeps the latest `setProgressText` string where a poll can read it, and keeps it out of the log. |
-| `AlgorithmTask` (`jobs.py`) | `QgsProcessingAlgRunnerTask` | Turns `executed(bool, results)` plus the `finished` override into one callback, so a cancelled task and a failed task both settle. |
-| `ProcessingJob` (`jobs.py`) | `QgsProcessingAlgRunnerTask` | Holds the algorithm/context/feedback alive, maps progress, and takes the failure reason from `textLog()`. |
-| `Operations` (`operations.py`, `start`/`cancel`/`status`) | none | The only writer of a terminal outcome, and the store a poll reads: the job itself is released at the boundary, because QGIS keeps neither the finished task nor its result. |
-| `Command.execution` / `.modes` (`command.py`) | none | A declaration states whether `run`, `arun` or both exist; the pipeline picks the method (`dispatch.py`). |
+| `QgsFeedback::progress()`、`setProgress()` | public、inline、**非 virtual** | 可调用；override 不会被执行 |
+| `QgsFeedback::mProgress`、`mCanceled` | `private` | 不可见；只能读 `progress()` / `isCanceled()` |
+| `QgsProcessingFeedback::setProgressText()`、`reportError()`、`pushInfo()`、`textLog()` | public **virtual** | 可 override，且 C++ 会调到 |
+| `QgsTask::run()`、`finished()` | **protected virtual** | 可 override，manager 会调到 |
+| `QgsTaskManager::taskStatusChanged`、`QgsTask::mShouldTerminate` | `private` slot / `private` 成员 | 不可调用、不可读 |
+| `QgsProcessingAlgRunnerTask::executed` | signal | 真的是 `pyqtSignal` |
 
-A new asynchronous command declares `execution = "both"` (or `"async"`), writes an `arun` that
-builds a job and ends with `ctx.operations.start(self.name, job)`, and reuses `RenderMapJob` or
-`ProcessingJob` when the mechanism is one of those two. Only a new mechanism needs a new adapter.
+## 7. 3.44.13 上实测过什么
 
-## Sources
+前三条是上一版本文档在本机同一版本上做的实测（方法见本节末尾），本次重写没有重跑；
+第四条与 §4 的观察是 F8 在 headless 探针里跑的。
 
-Raw files fetched at tag `final-3_44_13` (`https://raw.githubusercontent.com/qgis/QGIS/final-3_44_13/…`):
+在一个 `QT_QPA_PLATFORM=offscreen` 的 `QgsApplication` 里跑的探针（不装任何东西、不碰用户 profile）：
 
-- `src/core/qgstaskmanager.h` / `.cpp` — `QgsTask` (merged in from `qgstask.h`), `cancel()`,
-  `setProgress()`, `waitForFinished()`, and `QgsTaskManager::taskStatusChanged` calling
-  `task->finished()`.
-- `src/core/qgsfeedback.h` — `progress()`, `setProgress()`, `cancel()`, member defaults.
-- `src/core/processing/qgsprocessingfeedback.h` / `.cpp` — `setProgressText`, `reportError`,
-  `textLog`.
-- `src/core/processing/qgsprocessingalgrunnertask.h` / `.cpp` — constructor, `cancel()`,
-  `run()`, `finished()`.
-- `src/core/processing/qgsprocessingcontext.h` — `thread()`, `pushToThread()`,
-  `copyThreadSafeSettings()`, `takeResultsFrom()`.
-- `src/core/maprenderer/qgsmaprendererjob.h`, `qgsmaprendererparalleljob.h` — `start()`,
-  `cancel()`, `cancelWithoutBlocking()`, `waitForFinished()`, `finished()` signal,
-  `QFuture` members.
-- `src/core/CMakeLists.txt` — only `qgstaskmanager.cpp` is compiled from the task sources.
-- `python/core/additions/fromfunction.py`, `qgstaskwrapper.py` — `fromFunction` signature and
-  which thread `on_finished` runs on.
-- `python/plugins/processing/tools/general.py`, `python/plugins/processing/core/Processing.py`
-  — what `processing.run` does before and after the algorithm runs.
+- **`setProgressText` 会进 Python，且 C++ 的默认实现被跳过**：C++ 代理转发一个字符串，Python 的
+  override 收到了，事后 `textLog()` 是空的。用 C++ 侧转发才证明得了这件事，Python 调 Python
+  证明不了。
+- **`setProgress` 不会进 Python**：同一个代理报告 0 次调用——它不是 virtual。要读进度只能读
+  `progress()`。
+- **原生算法可能一直不报进度文本**：20000 个要素跑 `native:centroids`，`setProgressText` 0 次、
+  `textLog()` 为空。所以“进度文本为空”不代表出错。
+- **取消的确认来自任务自己的报告**：`QgsTask.finished(bool)` 只有一个布尔值，没有原因；本插件据此
+  把已请求取消的任务归档为 `CANCELLED`，把真实异常归档为 `FAILED`（失败优先于取消，PRD 8.2）。
+  这也是为什么 `CANCEL_REQUESTED` 不是终态：在任务真的报告之前，谁也不知道它停没停。
 
-Also fetched: `api.github.com` listings for `src/core` and `python/core/additions`;
-`github.com/qgis/QGIS/blob/final-3_44_13/src/core/qgsfeedback.h` (page only). Read locally:
-`D:\QGIS 3.44.13\apps\qgis-ltr\python\qgis\_core.pyi` (the shipped stub — it lists public
-members but not which of them are `virtual`) and the installed `processing` plugin under
-`apps/qgis-ltr/python/plugins`.
+## 8. 本插件没有用到的机制
 
-The "Measured on 3.44.13" checks ran in one throwaway script under
-`python-qgis-ltr.bat` with `QT_QPA_PLATFORM=offscreen`, `QgsApplication([], False)` +
-`initQgis()`, `Processing.initialize()`, a 20,000-feature memory layer, and
-`QApplication.processEvents()` as the event loop. Nothing was installed and the plugin
-profile was not touched. `QgsProcessingMultiStepFeedback` was used as the C++ caller because
-it forwards `setProgressText` to its wrapped feedback from C++ — a Python-to-Python call could
-not prove that the virtual exists.
+- **Processing**（`QgsProcessingAlgRunnerTask`）：有自己的一套 `prepare/runPrepared/postProcess`
+  与 context/feedback 生命周期；MVP 的九个 Operation 里没有 Processing 调用，后台那个是纯 Python
+  求和（PRD 7.10）。接 Processing 属于 P1。
+- **渲染 job**（`QgsMapRendererParallelJob`）：自带线程与 `finished()` **signal**，本插件不渲染。
+- **`QgsTask.fromFunction`**：够短，但拿不到 `setDependentLayers` 那类实例方法；本插件用子类。
 
-Line numbers are counted on the fetched text, not taken from a line-numbered view — treat the
-quoted text as the authoritative locator. Signature checks were run against the installed
-build (`D:\QGIS 3.44.13\bin\python-qgis-ltr.bat`; `Qgis.QGIS_VERSION` = 3.44.13-Solothurn,
-Qt 5.15.13) and agree with the tagged source on every claim that rests on them:
-`QgsTask.finished` is a `builtin_function_or_method` while
-`QgsProcessingAlgRunnerTask.executed` is a `pyqtSignal`; `QgsTaskManager` has `task(id)` and
-`taskId(task)` but no `taskFromId`; `addTask` is documented to return `0` on failure;
-`QgsTask.cancel()` leaves `isCanceled()` true; and `progress()` reads `0.0` on a fresh
-`QgsFeedback` and a fresh `QgsTask` — nothing reports `-1`.
+## 9. 来源
+
+在 tag `final-3_44_13` 上取的原始文件（`https://raw.githubusercontent.com/qgis/QGIS/final-3_44_13/…`）：
+
+- `src/core/qgstaskmanager.h` / `.cpp` — `QgsTask`（`qgstask.h` 在该 tag 已并入此文件）、
+  `cancel()`、`setProgress()`、`waitForFinished()`，以及 `QgsTaskManager::taskStatusChanged`
+  调用 `task->finished()`。
+- `src/core/qgsfeedback.h` — `progress()`、`setProgress()`、`cancel()`、成员默认值。
+- `src/core/processing/qgsprocessingfeedback.h` / `.cpp` — `setProgressText`、`reportError`、`textLog`。
+- `src/core/processing/qgsprocessingalgrunnertask.h` / `.cpp` — 构造、`cancel()`、`run()`、`finished()`。
+- `src/core/processing/qgsprocessingcontext.h` — `thread()`、`pushToThread()`、`takeResultsFrom()`。
+- `src/core/maprenderer/qgsmaprendererjob.h`、`qgsmaprendererparalleljob.h` — `start()`、`cancel()`、
+  `cancelWithoutBlocking()`、`waitForFinished()`、`finished()` signal。
+- `python/core/additions/fromfunction.py`、`qgstaskwrapper.py` — `fromFunction` 的签名与
+  `on_finished` 所在线程。
+- `python/plugins/processing/tools/general.py`、`python/plugins/processing/core/Processing.py` —
+  `processing.run` 在跑算法前后做了什么。
+
+另读了本机安装的 `D:\QGIS 3.44.13\apps\qgis-ltr\python\qgis\_core.pyi`（stub 只列公开成员，
+不标 virtual）。本文件“实测”一节的探针在 `D:\QGIS 3.44.13\bin\python-qgis-ltr.bat` 下运行，
+Qt 5.15.13、`Qgis.QGIS_VERSION` = 3.44.13-Solothurn。
