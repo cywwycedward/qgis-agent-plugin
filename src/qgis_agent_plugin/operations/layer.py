@@ -1,10 +1,15 @@
 """The layer operations: load a local file, list and inspect layers, toggle visibility.
 
-Every operation here runs on the main thread and works through ``ctx.project``,
-so it reads the project the engine holds rather than a global singleton.  A QGIS
-layer never leaves the method that built it: only its id, name, provider, CRS and
-the two visibility flags travel out, because those are the values a caller can
-act on and the only ones that survive serialisation.
+Every operation here but ``layer.sum_numeric_field`` runs on the main thread and
+works through ``ctx.project``, so it reads the project the engine holds rather than
+a global singleton.  A QGIS layer never leaves the method that built it: only its
+id, name, provider, CRS and the two visibility flags travel out, because those are
+the values a caller can act on and the only ones that survive serialisation.
+
+The field sum is the one background operation, so its reading is split across the
+three stages: the numbers are copied out on the main thread, summed off it over a
+tuple of plain floats, and checked against the project generation on the way back
+(PRD 6.2, 7.10).
 
 ``visible`` and ``effective_visible`` are deliberately two fields.  A layer's own
 check state can be true while its parent group hides it, and reporting one number
@@ -13,21 +18,27 @@ for both would make a toggle look like it failed (PRD 7.7, AT-21B).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
 
 from ..core.contracts import (
+    BackgroundOperationMixin,
     BaseCommand,
     BaseQuery,
     MainThreadOperationMixin,
     OperationContext,
+    TaskControl,
 )
 from ..core.models import (
+    INVALID_FIELD_TYPE,
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     LAYER_NOT_IN_TREE,
+    SNAPSHOT_LIMIT_EXCEEDED,
+    STALE_PROJECT,
     FrameworkError,
     Params,
 )
@@ -291,3 +302,143 @@ class LayerSetVisibility(
             effective_visible=bool(node.isVisible()),
             changed=changed,
         )
+
+
+class SumNumericFieldParams(Params):
+    layer_id: StrictStr = Field(min_length=1)
+    field_name: StrictStr = Field(min_length=1)
+
+
+class SumNumericFieldResult(BaseModel):
+    """The sum of a snapshot, which is not the layer's value when the task ends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    layer_id: StrictStr
+    field_name: StrictStr
+    count: int
+    skipped_null: int
+    total: float
+    snapshot_project_epoch: int
+
+
+@dataclass(frozen=True)
+class FieldValues:
+    """A copied-out field: plain floats, so no QGIS object reaches the worker."""
+
+    layer_id: str
+    field_name: str
+    values: tuple[float, ...]
+    skipped_null: int
+    project_epoch: int
+
+
+@dataclass(frozen=True)
+class FieldSum:
+    """What the worker computed, with the generation it was computed from."""
+
+    count: int
+    total: float
+    skipped_null: int
+    project_epoch: int
+
+
+class LayerSumNumericField(
+    BaseQuery[SumNumericFieldParams, SumNumericFieldResult],
+    BackgroundOperationMixin[
+        SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum
+    ],
+):
+    """Sum one numeric field off the main thread, over a snapshot (PRD 7.10).
+
+    The task declares ``dependent_layer_ids`` so the adapter can hand it to
+    ``QgsTask.setDependentLayers``: removing the layer then cancels the task, as
+    QGIS does for any dependent task (PRD 8.4).
+    """
+
+    name = "layer.sum_numeric_field"
+    description = "Sum one numeric field of a vector layer over a copied snapshot"
+    input_model = SumNumericFieldParams
+    output_model = SumNumericFieldResult
+
+    def prepare_main(
+        self, ctx: OperationContext, request: SumNumericFieldParams
+    ) -> FieldValues:
+        from qgis.core import NULL, QgsVectorLayer
+
+        layer = ctx.project.mapLayer(request.layer_id)
+        if layer is None:
+            raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            raise FrameworkError(INVALID_LAYER, "the layer is not a valid vector layer")
+        fields = layer.fields()
+        index = fields.indexFromName(request.field_name)
+        if index < 0:
+            raise FrameworkError(INVALID_FIELD_TYPE, "the layer has no such field")
+        if not fields.at(index).isNumeric():
+            raise FrameworkError(INVALID_FIELD_TYPE, "the field is not integer or floating point")
+
+        limit = ctx.policy.max_snapshot_features
+        values: list[float] = []
+        skipped = 0
+        for seen, feature in enumerate(layer.getFeatures(), start=1):
+            if seen > limit:
+                # Never truncate quietly: a partial sum that looks complete is worse
+                # than a refusal (PRD 7.10).
+                raise FrameworkError(
+                    SNAPSHOT_LIMIT_EXCEEDED, f"the layer has more than {limit} features"
+                )
+            value = feature[index]
+            # QGIS hands a null attribute back as its own NULL singleton (a QVariant),
+            # and some builds return None instead; both are the "skipped null" case.
+            if value is None or value == NULL:
+                skipped += 1
+                continue
+            values.append(float(value))
+        return FieldValues(
+            layer_id=request.layer_id,
+            field_name=request.field_name,
+            values=tuple(values),
+            skipped_null=skipped,
+            project_epoch=ctx.lifecycle.current_epoch,
+        )
+
+    def execute_worker(self, snapshot: FieldValues, control: TaskControl) -> FieldSum:
+        values = snapshot.values
+        step = max(1, len(values) // 100)
+        total = 0.0
+        count = 0
+        for position, value in enumerate(values, start=1):
+            if position % step == 0:
+                if control.is_cancelled():
+                    # Stopping here is the cooperative half of the cancel; the adapter
+                    # turns the partial run into CANCELLED and drops the numbers.
+                    break
+                control.set_progress(100.0 * position / len(values))
+            total += value
+            count += 1
+        return FieldSum(
+            count=count,
+            total=total,
+            skipped_null=snapshot.skipped_null,
+            project_epoch=snapshot.project_epoch,
+        )
+
+    def finalize_main(
+        self, ctx: OperationContext, request: SumNumericFieldParams, result: FieldSum
+    ) -> SumNumericFieldResult:
+        if ctx.lifecycle.current_epoch != result.project_epoch:
+            raise FrameworkError(
+                STALE_PROJECT, "the project was replaced while the field was summed"
+            )
+        return SumNumericFieldResult(
+            layer_id=request.layer_id,
+            field_name=request.field_name,
+            count=result.count,
+            skipped_null=result.skipped_null,
+            total=result.total,
+            snapshot_project_epoch=result.project_epoch,
+        )
+
+    def dependent_layer_ids(self, request: SumNumericFieldParams) -> list[str]:
+        return [request.layer_id]

@@ -43,11 +43,15 @@ class Plugin:
         from .core.context import ProjectLifecycle
         from .core.engine import OperationEngine
         from .core.registry import OperationRegistry
+        from .core.runners.qgs_task import OperationTaskRunner
         from .operations import register_all
 
         registry = OperationRegistry()
         register_all(registry)
         self.registry = registry
+        # The adapter is built before the engine because the engine's seam needs it;
+        # it holds no reference to the engine between calls.
+        runner = OperationTaskRunner()
         # Settings stay at their defaults until the lifecycle reads QgsSettings;
         # the epoch starts at 0 until it is bound to aboutToBeCleared.
         self.engine = OperationEngine(
@@ -56,6 +60,8 @@ class Plugin:
             ProjectLifecycle(),
             iface=self.iface,
             project=QgsProject.instance(),
+            background_runner=runner,
+            background_cancel=runner.cancel,
         )
 
     def unload(self) -> None:

@@ -9,8 +9,8 @@ fails ends as a ``FAILED`` record, because it did become one.
 Everything here runs on the thread that built the engine (PRD 8.3): the store is
 written from nowhere else, so a status can never be moved by a worker.  Main-thread
 work is deferred to the event loop rather than run inside ``submit``; background
-work is handed to one injected adapter, and F2 owns nothing of the QgsTask side of
-that seam.
+work is handed to one injected adapter, and the engine owns nothing of the QgsTask
+side of that seam beyond asking it to stop what it still owns (PRD 9.2, 9.3.2).
 """
 
 from __future__ import annotations
@@ -55,7 +55,16 @@ BackgroundRunner = Callable[
     ["OperationEngine", ExecutionRecord, BaseOperation, BaseModel], None
 ]
 
+# The second half of the same adapter: ask one task to stop.  ``cancel``, a replaced
+# project and ``shutdown`` all need it, and none may reach the global
+# ``QgsTaskManager.cancelAll()`` (PRD 9.2, 9.3.2).
+BackgroundCanceller = Callable[["OperationEngine", str], None]
+
 _QUEUED = frozenset({ExecutionStatus.QUEUED})
+
+# The background statuses that count against ``max_active_background`` and that a
+# cancelled or replaced project must ask to stop (PRD 8.5, 9.2).
+_ACTIVE_BACKGROUND = frozenset({ExecutionStatus.SCHEDULED, ExecutionStatus.RUNNING})
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +81,7 @@ class OperationEngine:
         iface: Any = None,
         project: Any = None,
         background_runner: BackgroundRunner | None = None,
+        background_cancel: BackgroundCanceller | None = None,
         post: Callable[[Callback], None] | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
@@ -81,6 +91,7 @@ class OperationEngine:
         self._iface = iface
         self._project = project
         self._background_runner = background_runner
+        self._background_cancel = background_cancel
         self._store = ExecutionStore(settings, clock=clock)
         self._runner = MainThreadRunner(self._is_live, post=post)
         self._owner_thread = threading.get_ident()
@@ -163,11 +174,11 @@ class OperationEngine:
             ExecutionStatus.SCHEDULED,
             ExecutionStatus.RUNNING,
         ):
-            # F5 calls QgsTask.cancel() on this status; only the task's own report
-            # turns the request into CANCELLED (PRD 8.5).
-            return _receipt(
-                self._store.transition(execution_id, ExecutionStatus.CANCEL_REQUESTED), True
-            )
+            # Only the task's own report turns the request into CANCELLED (PRD 8.5);
+            # asking QgsTask to stop is the adapter's half of this call.
+            receipt = self._store.transition(execution_id, ExecutionStatus.CANCEL_REQUESTED)
+            self._cancel_task(execution_id)
+            return _receipt(receipt, True)
         if record.status is ExecutionStatus.CANCEL_REQUESTED:
             return _receipt(record, accepted=True)
         # A main-thread operation that is already running cannot be interrupted, and
@@ -175,7 +186,11 @@ class OperationEngine:
         return _receipt(record, accepted=False, reason="NOT_INTERRUPTIBLE")
 
     def shutdown(self) -> None:
-        """Stop accepting work, then cancel everything that never started (PRD 9.3)."""
+        """Stop accepting work, then cancel everything this session still owns.
+
+        The queued calls are cancelled outright; the tasks QGIS already holds are
+        only asked to stop, and their own report is what ends them (PRD 9.3.2).
+        """
 
         self._require_main_thread()
         if self._closing:
@@ -183,6 +198,43 @@ class OperationEngine:
         self._closing = True
         for execution_id in self._store.ids(_QUEUED):
             self._store.transition(execution_id, ExecutionStatus.CANCELLED)
+        self._stop_background()
+
+    def on_project_replaced(self) -> None:
+        """Drop everything that belongs to the old project generation (PRD 9.1, 9.2).
+
+        The lifecycle calls this right after ``ProjectLifecycle.bump()`` (F6 binds it
+        to ``QgsProject.aboutToBeCleared``).  Calls queued under the old epoch are
+        cancelled at once; running background tasks are asked to stop cooperatively,
+        and anything they still return is refused at finalisation (``STALE_PROJECT``).
+        """
+
+        self._require_main_thread()
+        epoch = self._lifecycle.current_epoch
+        for execution_id in self._store.ids(_QUEUED):
+            if self._store.get(execution_id).project_epoch != epoch:
+                self._store.transition(execution_id, ExecutionStatus.CANCELLED)
+        self._stop_background()
+
+    def _stop_background(self) -> None:
+        """Report the cancel request, then ask the adapter to stop every live task."""
+
+        live = self._store.ids(_ACTIVE_BACKGROUND)
+        for execution_id in live:
+            self._store.transition(execution_id, ExecutionStatus.CANCEL_REQUESTED)
+        for execution_id in live:
+            self._cancel_task(execution_id)
+
+    def _cancel_task(self, execution_id: str) -> None:
+        """Let the adapter call ``QgsTask.cancel()`` for one execution (PRD 9.3.2)."""
+
+        stopper = self._background_cancel
+        if stopper is None:
+            return
+        try:
+            stopper(self, execution_id)
+        except Exception:  # noqa: BLE001 - an unload hook may not raise into unload
+            _LOGGER.exception("cancelling background execution %s failed", execution_id)
 
     def _require_open(self) -> None:
         self._require_main_thread()
