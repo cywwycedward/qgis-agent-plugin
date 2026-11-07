@@ -37,7 +37,7 @@ def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> 
 
     _refuse_remote(raw)
     path = Path(raw)
-    if not raw or not path.is_absolute():
+    if not raw or "\0" in raw or not path.is_absolute():
         _refuse()
     # A relative root is a configuration mistake: it would make the policy depend
     # on the working directory, so it allows nothing.

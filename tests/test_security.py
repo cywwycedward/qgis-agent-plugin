@@ -58,6 +58,12 @@ def test_a_relative_path_is_refused(tmp_path: Path) -> None:
     refused("roads.gpkg", [root])
 
 
+@pytest.mark.parametrize("must_exist", [True, False])
+def test_a_null_byte_in_a_path_is_refused(must_exist: bool, tmp_path: Path) -> None:
+    root = data_root(tmp_path)
+    refused(str(root / "a\0b.qgz"), [root], must_exist=must_exist)
+
+
 def test_a_file_outside_every_allowed_root_is_refused(tmp_path: Path) -> None:
     root = data_root(tmp_path)
     outside = readable_file(tmp_path)
@@ -170,9 +176,7 @@ def test_a_single_root_string_is_read_as_one_root(tmp_path: Path) -> None:
 
 
 def test_settings_take_counts_as_strings_and_keep_the_other_defaults(tmp_path: Path) -> None:
-    settings = Settings.from_mapping(
-        {"allowed_project_roots": [str(tmp_path)], "max_pending": "8"}
-    )
+    settings = Settings.from_mapping({"allowed_project_roots": [str(tmp_path)], "max_pending": "8"})
     assert settings.allowed_project_roots == (tmp_path,)
     assert settings.max_pending == 8
     assert settings.max_active_background == 2

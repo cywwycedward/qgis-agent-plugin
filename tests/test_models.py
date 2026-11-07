@@ -1,14 +1,12 @@
-"""Execution records, the error contract and the pydantic compatibility layer."""
+"""Execution records, the error contract and the input model rules."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-import pydantic
 import pytest
 from pydantic import StrictBool, ValidationError
 
-from qgis_agent_plugin.core import pydantic_compat
 from qgis_agent_plugin.core.models import (
     ERROR_CODES,
     INTERNAL_ERROR,
@@ -110,7 +108,7 @@ def test_succeeded_record_carries_the_result_and_is_complete() -> None:
         progress=100,
         finished_at=utc_now(),
     )
-    assert pydantic_compat.dump(succeeded)["status"] == "SUCCEEDED"
+    assert succeeded.model_dump(mode="json")["status"] == "SUCCEEDED"
 
 
 @pytest.mark.parametrize(
@@ -216,57 +214,10 @@ def test_cancel_receipt_has_the_prd_fields_and_no_reason_by_default() -> None:
 
 def test_unknown_input_field_is_refused() -> None:
     with pytest.raises(ValidationError):
-        pydantic_compat.validate(StrictParams, {"unknown": 1})
+        StrictParams.model_validate({"unknown": 1})
 
 
 def test_string_true_is_not_a_boolean() -> None:
     with pytest.raises(ValidationError):
-        pydantic_compat.validate(StrictParams, {"enabled": "true"})
-
-
-def test_compat_reports_the_installed_pydantic_major() -> None:
-    assert pydantic_compat.major() in (1, 2)
-    assert pydantic_compat.major() == int(pydantic.VERSION.split(".", 1)[0])
-
-
-def test_compat_dumps_json_values_not_python_objects() -> None:
-    class KindParams(Params):
-        kind: OperationKind = OperationKind.QUERY
-
-    dumped = pydantic_compat.dump(pydantic_compat.validate(KindParams, {}))
-    assert dumped == {"kind": "query"}
-
-
-def test_compat_schema_is_the_model_schema() -> None:
-    schema = pydantic_compat.json_schema(StrictParams)
-    assert schema["properties"]["enabled"]
-    assert schema["additionalProperties"] is False
-
-
-class FakeV1Model:
-    """The three calls the compatibility layer makes of a pydantic v1 model."""
-
-    def __init__(self, data: dict[str, object]) -> None:
-        self.data = data
-
-    @classmethod
-    def parse_obj(cls, data: dict[str, object]) -> FakeV1Model:
-        return cls(data)
-
-    def dict(self) -> dict[str, object]:
-        return self.data
-
-    @classmethod
-    def schema(cls) -> dict[str, object]:
-        return {"title": "FakeV1Model"}
-
-
-def test_compat_v1_branch_calls_the_v1_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    """v1 is not installed here, so the branch is checked by dispatch, not by a fake pydantic."""
-
-    monkeypatch.setattr(pydantic_compat, "_MAJOR", 1)
-    parsed = pydantic_compat.validate(FakeV1Model, {"a": 1})  # type: ignore[arg-type]
-    assert parsed.data == {"a": 1}
-    assert pydantic_compat.dump(parsed) == {"a": 1}  # type: ignore[arg-type]
-    assert pydantic_compat.json_schema(FakeV1Model) == {"title": "FakeV1Model"}  # type: ignore[arg-type]
+        StrictParams.model_validate({"enabled": "true"})
 

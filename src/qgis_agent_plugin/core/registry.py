@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 
-from . import pydantic_compat
 from .contracts import BaseOperation, validate_operation
 from .models import (
     DUPLICATE_OPERATION,
@@ -36,9 +35,7 @@ class OperationRegistry:
 
         name = getattr(operation, "name", None)
         if not isinstance(name, str) or not _NAME.fullmatch(name):
-            raise FrameworkError(
-                INVALID_OPERATION_DEFINITION, f"invalid operation name: {name!r}"
-            )
+            raise FrameworkError(INVALID_OPERATION_DEFINITION, f"invalid operation name: {name!r}")
         validate_operation(operation)
         if name in self._operations:
             raise FrameworkError(DUPLICATE_OPERATION, f"{name} is already registered")
@@ -76,7 +73,8 @@ def _spec(operation: BaseOperation) -> OperationSpec:
         kind=operation.kind,
         strategy=operation.strategy,
         destructive=operation.destructive,
-        input_schema=pydantic_compat.json_schema(operation.input_model),
-        output_schema=pydantic_compat.json_schema(operation.output_model),
-        pydantic_major=pydantic_compat.major(),
+        input_schema=operation.input_model.model_json_schema(),
+        output_schema=operation.output_model.model_json_schema(),
+        # Pydantic 2 is the only supported major; plugin.py refuses any other at start-up.
+        pydantic_major=2,
     )

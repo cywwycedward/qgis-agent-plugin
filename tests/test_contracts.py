@@ -73,9 +73,7 @@ class WorkerQuery(
     def execute_worker(self, snapshot: tuple[int, ...], control: TaskControl) -> int:
         return sum(snapshot)
 
-    def finalize_main(
-        self, ctx: OperationContext, request: NoParams, result: int
-    ) -> EmptyResult:
+    def finalize_main(self, ctx: OperationContext, request: NoParams, result: int) -> EmptyResult:
         return EmptyResult()
 
 
@@ -129,9 +127,7 @@ class BothStrategies(BaseQuery[NoParams, EmptyResult]):
     def execute_worker(self, snapshot: tuple[int, ...], control: TaskControl) -> int:
         return 0
 
-    def finalize_main(
-        self, ctx: OperationContext, request: NoParams, result: int
-    ) -> EmptyResult:
+    def finalize_main(self, ctx: OperationContext, request: NoParams, result: int) -> EmptyResult:
         return EmptyResult()
 
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from qgis_agent_plugin.core import pydantic_compat
 from qgis_agent_plugin.core.contracts import (
     BaseCommand,
     BaseOperation,
@@ -115,7 +114,7 @@ def test_a_spec_carries_the_declaration_and_the_schemas() -> None:
     assert spec.kind is OperationKind.COMMAND
     assert spec.strategy is ExecutionStrategy.MAIN_THREAD
     assert spec.destructive is True
-    assert spec.pydantic_major == pydantic_compat.major()
+    assert spec.pydantic_major == 2
     assert spec.input_schema["additionalProperties"] is False
     assert spec.output_schema["properties"] == {}
 

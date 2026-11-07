@@ -117,9 +117,7 @@ class BackgroundOperationMixin[InputT: BaseModel, OutputT: BaseModel, SnapshotT,
     def execute_worker(self, snapshot: SnapshotT, control: TaskControl) -> WorkerT: ...
 
     @abstractmethod
-    def finalize_main(
-        self, ctx: OperationContext, request: InputT, result: WorkerT
-    ) -> OutputT: ...
+    def finalize_main(self, ctx: OperationContext, request: InputT, result: WorkerT) -> OutputT: ...
 
 
 def validate_operation(operation: object) -> None:

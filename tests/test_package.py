@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 _GUARD = """
@@ -20,7 +22,7 @@ import sys
 
 import qgis_agent_plugin
 from qgis_agent_plugin import operations, plugin
-from qgis_agent_plugin.core import config, contracts, models, pydantic_compat, registry, security
+from qgis_agent_plugin.core import config, contracts, models, registry, security
 
 assert callable(qgis_agent_plugin.classFactory)
 assert callable(plugin.classFactory)
@@ -45,3 +47,11 @@ def test_package_and_contracts_import_without_qgis() -> None:
         cwd=ROOT,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_a_pydantic_major_other_than_two_is_a_dependency_error() -> None:
+    from qgis_agent_plugin import plugin
+
+    with pytest.raises(RuntimeError, match="requires pydantic 2.x"):
+        plugin.require_supported_pydantic("1.10.26")
+    plugin.require_supported_pydantic("2.13.4")
