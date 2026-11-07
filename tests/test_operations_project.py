@@ -187,11 +187,22 @@ def refused(code: str, call: Any) -> FrameworkError:
 # --- input models -----------------------------------------------------------
 
 
-def test_an_unknown_input_field_is_refused() -> None:
+@pytest.mark.parametrize(
+    "model, fields",
+    [
+        (project.ProjectCreateParams, {}),
+        (project.ProjectOpenParams, {"path": A_PROJECT_FILE}),
+        (project.ProjectSaveParams, {}),
+        (project.ProjectGetInfoParams, {}),
+    ],
+    ids=["create", "open", "save", "get_info"],
+)
+def test_an_unknown_input_field_is_refused(model: Any, fields: dict[str, Any]) -> None:
+    # The valid payload has to pass on its own, otherwise the refusal below could
+    # come from a missing field rather than from the unknown one.
+    model.model_validate(fields)
     with pytest.raises(ValidationError):
-        project.ProjectCreateParams.model_validate({"unexpected": True})
-    with pytest.raises(ValidationError):
-        project.ProjectGetInfoParams.model_validate({"unexpected": True})
+        model.model_validate({**fields, "unexpected": True})
 
 
 @pytest.mark.parametrize("value", ["true", "false", 0, 1])
@@ -287,6 +298,20 @@ def test_create_reports_the_canonical_crs_authid(qgis: types.ModuleType) -> None
     assert loaded.crs_authid == "EPSG:3857"
 
 
+def test_create_reports_the_layers_the_new_project_brought(qgis: types.ModuleType) -> None:
+    # A QGIS project template can populate a brand new project, so the counts are
+    # read from the project rather than hardcoded to the PRD's sample zeros.
+    template = FakeProject(layers={"a": FakeLayer(), "b": FakeLayer()})
+    ctx = context(template, iface=FakeIface())
+
+    result = project.ProjectCreate().execute_main(
+        ctx, project.ProjectCreateParams(discard_current=True)
+    )
+
+    assert result.layer_count == 2
+    assert result.file_path is None
+
+
 def test_create_refuses_an_unusable_crs_before_replacing(qgis: types.ModuleType) -> None:
     loaded = FakeProject(file_name="C:/maps/current.qgs")
     iface = FakeIface(loaded)
@@ -369,6 +394,44 @@ def test_open_reports_a_failed_read(qgis: types.ModuleType, tmp_path: Path) -> N
     assert "may have changed" in failed.message
 
 
+def test_open_replaces_a_stateful_project_when_explicitly_allowed(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # PRD 7.3: `open` has the same guard as `create`, so the authorized branch has
+    # to be exercised here too, not only through `create`.
+    root = project_dir(tmp_path)
+    target = root / "a.qgs"
+    target.write_text("", encoding="utf-8")
+    loaded = FakeProject(layers={"old": FakeLayer()}, file_name="C:/maps/old.qgs", dirty=True)
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(
+        ctx, project.ProjectOpenParams(path=str(target), discard_current=True)
+    )
+
+    assert loaded.read_path == str(target.resolve())
+    assert loaded.file_name == str(target.resolve())
+    assert result.layer_count == 0
+
+
+def test_open_uses_the_normalised_path(qgis: types.ModuleType, tmp_path: Path) -> None:
+    # `resolve_path` is what vets the path, so its result is what QGIS and the
+    # caller's output must see, not the raw request string.
+    root = project_dir(tmp_path)
+    (root / "sub").mkdir()
+    target = root / "a.qgz"
+    target.write_text("", encoding="utf-8")
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(
+        ctx, project.ProjectOpenParams(path=str(root / "sub" / ".." / "a.qgz"))
+    )
+
+    assert loaded.read_path == str(target.resolve())
+    assert Path(result.file_path) == target.resolve()
+
+
 def test_open_succeeds_and_counts_the_layers_that_cannot_load(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
@@ -423,6 +486,25 @@ def test_save_refuses_to_overwrite_an_existing_target(
         lambda: project.ProjectSave().execute_main(
             ctx, project.ProjectSaveParams(path=str(target))
         ),
+    )
+    assert loaded.writes == []
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_save_refuses_to_overwrite_the_associated_file(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # PRD 7.4: "even the current associated file" needs overwrite=true; without it
+    # a plain save() of an already-saved project would silently replace that file.
+    root = project_dir(tmp_path)
+    target = root / "current.qgs"
+    target.write_text("original", encoding="utf-8")
+    loaded = FakeProject(file_name=str(target))
+    ctx = context(loaded, roots=(root,))
+
+    refused(
+        TARGET_EXISTS,
+        lambda: project.ProjectSave().execute_main(ctx, project.ProjectSaveParams()),
     )
     assert loaded.writes == []
     assert target.read_text(encoding="utf-8") == "original"
