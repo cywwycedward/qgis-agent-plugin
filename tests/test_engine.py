@@ -684,6 +684,34 @@ def test_a_project_replacement_leaves_a_running_main_thread_call_alone(
     assert harness.store.get(background.execution_id).status is CANCEL_REQUESTED
 
 
+def test_a_replacement_that_cannot_cancel_the_queue_still_asks_the_tasks_to_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A10: the epoch moved before the engine was asked, so the cancel still happens.
+
+    The queued-cancel loop is the half that fails here; the old generation's running
+    background task is asked to stop anyway (PRD 9.1, 9.2).
+    """
+
+    harness = Harness(Echo(), Sum(), background_runner=no_adapter)
+    queued = harness.engine.submit("test.echo", {})
+    background = live_background(harness, PREPARING, SCHEDULED, RUNNING)
+    harness.lifecycle.bump()
+
+    real_get = harness.store.get
+
+    def get(execution_id: str) -> ExecutionRecord:
+        if execution_id == queued.execution_id:
+            raise FrameworkError(EXECUTION_NOT_FOUND, "the store lost the record")
+        return real_get(execution_id)
+
+    monkeypatch.setattr(harness.store, "get", get)
+    with pytest.raises(FrameworkError):
+        harness.engine.on_project_replaced()
+
+    assert harness.store.get(background.execution_id).status is CANCEL_REQUESTED
+
+
 def test_shutdown_leaves_a_running_main_thread_call_alone() -> None:
     def stop() -> None:
         harness.engine.shutdown()

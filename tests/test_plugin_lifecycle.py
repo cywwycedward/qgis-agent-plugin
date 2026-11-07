@@ -11,6 +11,7 @@ the acceptance run's business (F7).
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 import weakref
@@ -431,6 +432,39 @@ def test_a_replaced_project_bumps_the_epoch_once_and_drops_the_old_work(fake_qgi
 
     assert lifecycle.current_epoch == 2
     instance.unload()
+
+
+def test_a_replacement_that_cannot_be_recorded_only_logs(
+    fake_qgis: types.SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A10: the epoch slot is a Qt slot too, so a raise may only reach the log.
+
+    The epoch has already moved when the engine is asked, so what happens below is
+    the half state the guard has to survive: the bump is kept, the rest is logged.
+    """
+
+    iface = types.SimpleNamespace()
+    instance = plugin.Plugin(iface)
+    instance.initGui()
+    engine = instance.engine
+    lifecycle = instance.lifecycle
+    assert engine is not None and lifecycle is not None
+
+    def refuse() -> None:
+        raise RuntimeError("the store went away")
+
+    monkeypatch.setattr(engine, "on_project_replaced", refuse)
+    with caplog.at_level(logging.ERROR, logger=plugin.__name__):
+        fake_qgis.project.aboutToBeCleared.emit()  # a slot may not raise
+
+    assert lifecycle.current_epoch == 1
+    assert "the project replacement could not be recorded" in caplog.text
+    # The session is whole after it: unload still runs its six steps.
+    instance.unload()
+    assert not hasattr(iface, "agent_engine")
+    assert fake_qgis.project.aboutToBeCleared.slots == []
 
 
 def test_unloading_a_plugin_that_never_loaded_does_nothing(fake_qgis) -> None:

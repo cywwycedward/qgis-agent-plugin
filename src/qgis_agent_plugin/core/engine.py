@@ -218,10 +218,14 @@ class OperationEngine:
 
         self._require_main_thread()
         epoch = self._lifecycle.current_epoch
-        for execution_id in self._store.ids(_QUEUED):
-            if self._store.get(execution_id).project_epoch != epoch:
-                self._store.transition(execution_id, ExecutionStatus.CANCELLED)
-        self._stop_background()
+        try:
+            for execution_id in self._store.ids(_QUEUED):
+                if self._store.get(execution_id).project_epoch != epoch:
+                    self._store.transition(execution_id, ExecutionStatus.CANCELLED)
+        finally:
+            # The epoch moved before this call (the plugin bumps it first), so a raise
+            # above may not leave the old generation's tasks running un-asked to stop.
+            self._stop_background()
 
     def _stop_background(self) -> None:
         """Report the cancel request, then ask the adapter to stop every live task.

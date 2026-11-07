@@ -19,6 +19,7 @@ error rather than as an import failure inside a model module.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import fields
@@ -38,6 +39,8 @@ __all__ = [
     "application_supervisor",
     "read_settings",
 ]
+
+_LOGGER = logging.getLogger(__name__)
 
 # The seven PRD 10.1 keys live under one group: nothing this plugin reads can be
 # confused with another plugin's setting, and a default install reads nothing at all.
@@ -234,7 +237,12 @@ class Plugin:
             # A queued signal may arrive after unload; a slot may not raise.
             return
         lifecycle.bump()
-        engine.on_project_replaced()
+        try:
+            # The epoch has already moved, so the cancel half of the replacement still
+            # has to happen (the engine finishes it in a ``finally``); a raise only logs.
+            engine.on_project_replaced()
+        except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 9.1)
+            _LOGGER.exception("the project replacement could not be recorded")
 
     def _publish(self) -> None:
         """Put the session where the Python Console looks for it (PRD 1.3)."""
