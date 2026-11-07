@@ -24,6 +24,10 @@ from .models import PATH_NOT_ALLOWED, FrameworkError
 _URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
 # GDAL's in-process virtual file systems are not local files at this layer.
 _VSI = "/vsi"
+# A UNC path is network I/O, not a local file: two leading separators name a host
+# and a share, and the ``\\?\`` prefixes are the long-path spelling of the same.
+# ``Path.resolve`` would reach that host before the allow-list is ever consulted.
+_UNC = ("\\\\", "//", "\\\\?\\", "//?/")
 
 
 def resolve_path(raw: str, roots: Sequence[str | Path], *, must_exist: bool) -> Path:
@@ -74,7 +78,7 @@ def _resolve_existing(path: Path) -> Path:
 def _refuse_remote(raw: str) -> None:
     """Refuse URLs, provider schemes and virtual file systems before any I/O."""
 
-    if raw.lower().startswith(_VSI) or _URI.match(raw):
+    if raw.lower().startswith(_VSI) or raw.startswith(_UNC) or _URI.match(raw):
         _refuse()
 
 

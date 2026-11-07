@@ -82,10 +82,36 @@ def test_no_allowed_root_refuses_everything(tmp_path: Path) -> None:
         "postgis:host=db.example.com dbname=gis",
         "/vsicurl/https://example.com/roads.gpkg",
         "/vsis3/bucket/roads.gpkg",
+        r"\\no-such-host-audit\share\roads.gpkg",
+        "//no-such-host-audit/share/roads.gpkg",
+        r"\\?\UNC\no-such-host-audit\share\roads.gpkg",
     ],
 )
 def test_network_and_virtual_paths_are_refused(raw: str, tmp_path: Path) -> None:
     refused(raw, [tmp_path])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r"\\no-such-host-audit\share\roads.gpkg",
+        "//no-such-host-audit/share/roads.gpkg",
+        r"\\?\C:\data\roads.gpkg",
+        "//?/C:/data/roads.gpkg",
+    ],
+)
+@pytest.mark.parametrize("must_exist", [True, False])
+def test_a_network_path_is_refused_before_the_file_system_is_touched(
+    raw: str, must_exist: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A UNC path reaches a host, so resolving it would open a connection with the
+    # operator's credentials (and block the main thread until it timed out).  The
+    # refusal has to come first, which is what failing ``resolve`` proves.
+    def resolve(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("the path was resolved before it was refused")
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    refused(raw, [tmp_path], must_exist=must_exist)
 
 
 def test_the_refusal_does_not_repeat_the_path(tmp_path: Path) -> None:
@@ -196,3 +222,36 @@ def test_settings_take_counts_as_strings_and_keep_the_other_defaults(tmp_path: P
     assert settings.allowed_project_roots == (tmp_path,)
     assert settings.max_pending == 8
     assert settings.max_active_background == 2
+
+
+COUNT_KEYS = (
+    "max_active_background",
+    "max_pending",
+    "max_terminal_records",
+    "terminal_ttl_seconds",
+    "max_snapshot_features",
+)
+
+
+@pytest.mark.parametrize("key", COUNT_KEYS)
+@pytest.mark.parametrize("value", [0, -1, "0", "-3"])
+def test_a_count_below_one_is_refused_and_names_the_key(key: str, value: object) -> None:
+    # A count of 0 has a silent failure mode: max_active_background=0 would leave
+    # every background call waiting for a slot that never frees.
+    with pytest.raises(RuntimeError) as caught:
+        Settings.from_mapping({key: value})
+    assert key in str(caught.value)
+
+
+@pytest.mark.parametrize("key", COUNT_KEYS)
+def test_a_count_that_is_not_a_number_names_the_key_and_the_value(key: str) -> None:
+    with pytest.raises(RuntimeError) as caught:
+        Settings.from_mapping({key: "32 (default)"})
+    assert key in str(caught.value)
+    assert "32 (default)" in str(caught.value)
+
+
+def test_a_count_of_one_is_accepted() -> None:
+    # The lower bound is inclusive: one background slot is a usable configuration.
+    settings = Settings.from_mapping({"max_active_background": "1"})
+    assert settings.max_active_background == 1

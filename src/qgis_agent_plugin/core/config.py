@@ -50,8 +50,28 @@ class Settings:
             if field.name not in set_values:
                 continue
             value = set_values[field.name]
-            resolved[field.name] = _roots(value) if field.name in _ROOT_KEYS else int(value)
+            resolved[field.name] = (
+                _roots(value) if field.name in _ROOT_KEYS else _count(field.name, value)
+            )
         return cls(**resolved)
+
+
+def _count(key: str, value: Any) -> int:
+    """One count, refused rather than clamped when it cannot work.
+
+    A count below one is a configuration mistake with a silent failure mode:
+    ``max_active_background=0`` would leave every background call waiting for a
+    slot that never frees, so the plugin refuses to load instead of queueing
+    forever.  The error names the key and, for an unparseable value, the value too.
+    """
+
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{key} must be a whole number, not {value!r}") from None
+    if count < 1:
+        raise RuntimeError(f"{key} must be at least 1, not {count}")
+    return count
 
 
 def _roots(value: Any) -> tuple[Path, ...]:
