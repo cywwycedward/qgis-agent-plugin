@@ -532,7 +532,9 @@ def test_save_overwrites_when_explicitly_allowed(qgis: types.ModuleType, tmp_pat
     root = project_dir(tmp_path)
     target = root / "out.qgs"
     target.write_text("original", encoding="utf-8")
-    loaded = FakeProject()
+    # The project already has a file on purpose: an explicit `path` has to win,
+    # the associated file is only the fallback when `path` is null (PRD 7.4).
+    loaded = FakeProject(file_name=str(root / "current.qgs"))
     ctx = context(loaded, roots=(root,))
 
     project.ProjectSave().execute_main(
