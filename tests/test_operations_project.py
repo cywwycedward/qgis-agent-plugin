@@ -260,6 +260,28 @@ def qgz_bytes(directory: Path, name: str, member: bytes) -> Path:
     return target
 
 
+def write_project_xml(directory: Path, name: str, xml: str) -> Path:
+    """Write ``xml`` as a ``.qgs``, or as the ``.qgs`` member of a ``.qgz``."""
+
+    if name.lower().endswith(".qgz"):
+        return qgz_bytes(directory, name, xml.encode("utf-8"))
+    target = directory / name
+    target.write_text(xml, encoding="utf-8")
+    return target
+
+
+def layout_project(source: Path, item: str) -> str:
+    """A project with one local layer and one print layout holding ``item``."""
+
+    return (
+        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
+        f"<datasource>{source}</datasource>"
+        "</maplayer></projectlayers>"
+        f'<Layouts><Layout name="sheet">{item}</Layout></Layouts>'
+        "</qgis>"
+    )
+
+
 # The audit's measured shapes: the old scan spent 661 s on the second one.
 UNCLOSED_DATASOURCES = 82_000
 DEEP_NESTING = 8_000
@@ -797,11 +819,10 @@ def test_open_refuses_a_directory_shaped_source_outside_the_roots(
     [
         REMOTE_SOURCE,
         r"\\no-such-host-audit\share\data.gpkg",
-        "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png",
         # What QGIS's own XML parser decodes before it builds the layer.
         "&#47;vsicurl&#47;http&#58;&#47;&#47;127.0.0.1&#58;9/never.tif",
     ],
-    ids=["vsi", "unc", "embedded-url", "entity-escaped"],
+    ids=["vsi", "unc", "entity-escaped"],
 )
 def test_open_refuses_a_remote_source_before_the_project_is_read(
     qgis: types.ModuleType, tmp_path: Path, suffix: str, remote: str
@@ -826,6 +847,32 @@ def test_open_refuses_a_remote_source_before_the_project_is_read(
     assert loaded.read_path is None
     assert "remote data source" in failed.message
     assert remote not in failed.message
+
+
+def test_a_provider_uri_that_carries_its_url_after_a_prefix_is_not_refused_before_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The boundary of the pre-read list (docs/OPERATIONS.md 1.2): only the *start* of a
+    # value is asked, so an XYZ layer's ``type=xyz&url=https://...`` is not refused
+    # before read() -- a substring check would also refuse a description quoting a URL
+    # (A6 #3).  The per-layer check after read() still removes the layer and fails the
+    # open, so the code is the same one; only the request has been made by then.
+    root = project_dir(tmp_path)
+    source = "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png"
+    target = qgs_file(root, "tiles.qgs", source)
+    loaded = FakeProject(layers_after_read={"tiles": FakeLayer(source=source)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path == str(target)
+    assert loaded.removed == ["tiles"]
+    assert "1 layer data source(s)" in failed.message
 
 
 @pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
@@ -1201,8 +1248,8 @@ def test_open_refuses_a_remote_uri_wherever_the_project_keeps_it(
 
 
 def test_open_refuses_a_datasource_in_a_namespace(qgis: types.ModuleType, tmp_path: Path) -> None:
-    # The element is a datasource to QGIS whatever prefix it carries, so the scan
-    # compares local names rather than bytes.
+    # The element is a datasource to QGIS whatever prefix it carries; the scan asks a
+    # value's start and never its element name, so the prefix cannot matter.
     root = project_dir(tmp_path)
     target = qgs_file(root, "namespaced.qgs", REMOTE_SOURCE)
     target.write_text(
@@ -1449,25 +1496,17 @@ def test_open_refuses_a_file_uri_that_names_a_host(
     assert "remote data source" in failed.message
 
 
-@pytest.mark.parametrize(
-    "metadata",
-    [
-        "<identifier>https://example.org/datasets/42</identifier>",
-        "<abstract>Downloaded from https://example.org/data</abstract>",
-    ],
-)
-def test_open_reads_a_project_whose_layer_metadata_holds_a_url(
-    qgis: types.ModuleType, tmp_path: Path, metadata: str
+def test_open_reads_a_project_whose_layer_metadata_quotes_a_url(
+    qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # A layer's metadata is not a data source: it carries the dataset's own DOI or the
-    # page it came from, and refusing those refused every documented project (measured,
-    # one local GeoPackage layer plus a metadata identifier).
+    # A URL inside prose is not a value that starts with one: the uniform rule asks only
+    # the start of every value, so a description quoting a URL is still read (A6 #3).
     root = project_dir(tmp_path)
     target = root / "metadata.qgs"
     target.write_text(
         "<qgis><projectlayers><maplayer>"
         f"<datasource>{root / 'a.gpkg'}</datasource>"
-        f"<metadata>{metadata}</metadata>"
+        "<metadata><abstract>Downloaded from https://example.org/data</abstract></metadata>"
         "</maplayer></projectlayers></qgis>",
         encoding="utf-8",
     )
@@ -1477,6 +1516,220 @@ def test_open_reads_a_project_whose_layer_metadata_holds_a_url(
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
     assert loaded.read_path == str(target)
+
+
+def test_open_refuses_a_metadata_value_that_is_a_url(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The accepted false refusal (docs/OPERATIONS.md 12): the rule has no element name
+    # in it, so a layer whose identifier *is* a URL is refused before read().  A6 #3
+    # fixed the prose half; this half is the price of asking every value the same
+    # question, and it is recorded rather than special-cased back.
+    root = project_dir(tmp_path)
+    target = root / "metadata.qgs"
+    target.write_text(
+        "<qgis><projectlayers><maplayer>"
+        f"<datasource>{root / 'a.gpkg'}</datasource>"
+        "<metadata><identifier>https://example.org/datasets/42</identifier></metadata>"
+        "</maplayer></projectlayers></qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_a_layout_picture_that_names_a_remote_file(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # A11 #1: ``read()`` loads the picture a layout item names, and that name is an
+    # attribute.  The scan that only asked the text of a ``<datasource>`` let this file
+    # through, and ``project.open`` made 9 TCP connections (0.25 s) before returning
+    # SUCCEEDED; a host that accepts and never answers held the main thread 180 s.
+    root = project_dir(tmp_path)
+    xml = layout_project(
+        root / "a.gpkg", '<LayoutItem type="65640" file="http://127.0.0.1:9/picture.png"/>'
+    )
+    target = write_project_xml(root, f"picture{suffix}", xml)
+    loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+    assert "127.0.0.1" not in failed.message
+    # Milliseconds, not the seconds a fetch takes: nothing was read or contacted.
+    assert elapsed < 0.5, f"the {target.stat().st_size} byte project took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_a_layout_html_source_that_is_a_remote_url(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # An HTML item's source is a value like any other, here an element's whole text.
+    root = project_dir(tmp_path)
+    xml = layout_project(
+        root / "a.gpkg",
+        '<LayoutMultiFrame type="65648"><url>http://127.0.0.1:9/page.html</url></LayoutMultiFrame>',
+    )
+    target = write_project_xml(root, f"html{suffix}", xml)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+@pytest.mark.parametrize(
+    "value",
+    [r"\\no-such-host-audit\share\picture.png", "/vsicurl/http://127.0.0.1:9/picture.tif"],
+    ids=["unc", "vsi"],
+)
+def test_open_refuses_an_attribute_value_that_starts_with_a_remote_marker(
+    qgis: types.ModuleType, tmp_path: Path, value: str
+) -> None:
+    # The same question, asked of an attribute value: no element name is in the rule.
+    root = project_dir(tmp_path)
+    xml = layout_project(root / "a.gpkg", f'<LayoutItem type="65640" file="{value}"/>')
+    target = write_project_xml(root, "attribute.qgs", xml)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+
+
+def test_open_reads_a_project_of_local_paths_and_a_quoted_url(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # What the uniform rule may not refuse: QGIS's own spelling of a CSV layer, a picture
+    # next to the project, ``C:/`` and ``file:///C:/`` in attribute values, and a URL
+    # inside a description (A6 #3, A7 #3).
+    root = project_dir(tmp_path)
+    target = root / "ordinary.qgs"
+    target.write_text(
+        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
+        "<datasource>file:./points.csv</datasource>"
+        '<provider encoding="UTF-8">delimitedtext</provider>'
+        "<srs><authid>EPSG:4326</authid></srs>"
+        "<metadata><abstract>Downloaded from https://example.org/data</abstract></metadata>"
+        "</maplayer></projectlayers>"
+        # What QGIS 3.44 writes for its own project style: a local scheme, not a host.
+        '<ProjectStyleSettings projectStyleId="attachment:///styles.db" '
+        'iccProfileId="attachment:///"/>'
+        '<Layouts><Layout name="sheet">'
+        '<LayoutItem type="65640" file="./data/pixel.tif"/>'
+        '<LayoutItem type="65640" file="C:/data/pixel.tif"/>'
+        '<LayoutItem type="65640" value="file:///C:/data/pixel.tif"/>'
+        "</Layout></Layouts></qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject(layers_after_read={"points": FakeLayer(source=str(root / "points.csv"))})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert loaded.removed == []
+
+
+def test_a_project_of_repeated_and_oversized_attributes_is_refused_in_milliseconds(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # One start-of-value question per value, so a hostile file is a parse and not a loop
+    # that grows with it.  The remote value is the last attribute, so the 14 MB value and
+    # the 20000 repeated ones are walked before it is met.
+    root = project_dir(tmp_path)
+    target = root / "attributes.qgs"
+    repeated = " ".join(f'k{index}="v"' for index in range(20_000))
+    padding = "x" * (14 * 1024 * 1024)
+    target.write_text(
+        "<qgis><projectlayers><maplayer>"
+        f"<datasource>{root / 'a.gpkg'}</datasource>"
+        f'<metadata big="{padding}" {repeated} '
+        'remote="/vsicurl/http://127.0.0.1:9/never.tif"/>'
+        "</maplayer></projectlayers></qgis>",
+        encoding="utf-8",
+    )
+    assert target.stat().st_size < project.MAX_PROJECT_BYTES
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+    assert elapsed < 2.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s"
+
+
+def test_a_large_text_nested_deep_is_not_rejoined_at_every_level(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # Only the start of an element's text is judged, so 64 characters of it are kept per
+    # open element.  Joining the whole text once per nesting level copies the text once
+    # per level: this shape -- two fragments per level around an 8 MB text at depth 200
+    # -- took 0.5-1.0 s that way (measured when the bound was removed), against
+    # milliseconds with it, and it is main-thread time before ``read()``.
+    root = project_dir(tmp_path)
+    target = root / "deep text.qgs"
+    depth = 200
+    target.write_text(
+        "<qgis>"
+        + "<g>pre" * depth
+        + f"<datasource>{root / 'a.gpkg'}</datasource>"
+        + "y" * (8 * 1024 * 1024)
+        + "post</g>" * depth
+        + "</qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+    elapsed = time.monotonic() - started
+
+    assert result.layer_count == 1
+    assert elapsed < 0.3, f"the {target.stat().st_size} byte project took {elapsed:.2f}s"
 
 
 def test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked(

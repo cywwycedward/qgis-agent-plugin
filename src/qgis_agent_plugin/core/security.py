@@ -33,8 +33,9 @@ _UNC = ("\\\\", "//", "\\\\?\\", "//?/")
 def is_remote_uri(raw: str) -> bool:
     """Whether ``raw`` names network I/O or a virtual file system, not a local file.
 
-    Public because ``project.open`` asks the same question of the sources a project
-    file names, before ``read()`` would reach them (PRD 10.2).
+    Public because the path policy answers one question for every path: a URL, a
+    provider URI, a GDAL ``/vsi`` path and a UNC path are all I/O this plugin only
+    performs after the allow-list has said yes (PRD 10.2).
     """
 
     return raw.lower().startswith(_VSI) or raw.startswith(_UNC) or bool(_URI.match(raw))
