@@ -313,6 +313,8 @@ def test_create_reports_the_layers_the_new_project_brought(qgis: types.ModuleTyp
 
 
 def test_create_refuses_an_unusable_crs_before_replacing(qgis: types.ModuleType) -> None:
+    # The project is stateful and not authorized: the CRS is refused before the
+    # replacement guard gets a say, which is the documented order (report §6.5).
     loaded = FakeProject(file_name="C:/maps/current.qgs")
     iface = FakeIface(loaded)
     ctx = context(loaded, iface=iface)
@@ -320,7 +322,7 @@ def test_create_refuses_an_unusable_crs_before_replacing(qgis: types.ModuleType)
     refused(
         INVALID_CRS,
         lambda: project.ProjectCreate().execute_main(
-            ctx, project.ProjectCreateParams(crs_authid="EPSG:9999", discard_current=True)
+            ctx, project.ProjectCreateParams(crs_authid="EPSG:9999")
         ),
     )
     assert iface.new_project_calls == []
@@ -348,7 +350,10 @@ def test_open_refuses_a_path_outside_the_allowed_roots(
     outside.mkdir()
     target = outside / "a.qgs"
     target.write_text("", encoding="utf-8")
-    loaded = FakeProject()
+    # The project holds a layer on purpose: the allow-list has to refuse the path
+    # before the replacement guard gets a say, or a caller reads
+    # PROJECT_REPLACE_REQUIRED for a path they may not use at all (AT-19).
+    loaded = FakeProject(layers={"kept": FakeLayer()})
     ctx = context(loaded, roots=(root,))
     request = project.ProjectOpenParams(path=str(target))
 
@@ -555,6 +560,10 @@ def test_save_refuses_a_target_outside_the_allowed_roots(
     root = project_dir(tmp_path)
     outside = tmp_path / "elsewhere"
     outside.mkdir()
+    # The target exists on purpose: the allow-list has to refuse the path before
+    # the overwrite guard runs, otherwise existence outside the roots leaks
+    # through TARGET_EXISTS (AT-19).
+    (outside / "out.qgs").write_text("keep", encoding="utf-8")
     loaded = FakeProject()
     ctx = context(loaded, roots=(root,))
 
