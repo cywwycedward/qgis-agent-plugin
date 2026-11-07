@@ -66,6 +66,18 @@ REMOTE_UNC = r"\\no-such-host-audit\share\data.gpkg"
 # limit by far, and a few hundred KB on disk because it is all spaces (AT-33).
 BOMB_MEMBER_BYTES = 300 * 1024 * 1024
 
+# Shapes ``QgsProject.read()`` cannot survive, and the shapes the old scan could not
+# answer in time (AT-35..AT-37): 8000 nested elements overflow the parser's stack,
+# 984 KB of unclosed ``<datasource>`` made the regex backtrack for 661 s (measured),
+# and seventeen one-megabyte members are each under the limit but add up past it.
+DEEP_PROJECT_LEVELS = 8_000
+UNCLOSED_DATASOURCES = 82_000
+BUDGET_MEMBER_BYTES = 1024 * 1024
+BUDGET_MEMBERS = 17
+# Just under the 16 MB scan budget, and millions of elements: refused after one
+# ``bytes.count``, not walked element by element (AT-38).
+TAG_SPAM_PAIRS = 2_396_000
+
 
 @dataclass(frozen=True)
 class Fixtures:
@@ -89,6 +101,10 @@ class Fixtures:
     moved_directory: Path
     oversized: Path
     encrypted: Path
+    deep_project: Path
+    unclosed_project: Path
+    many_members: Path
+    tag_spam: Path
     escape: Path | None
 
 
@@ -204,6 +220,22 @@ def build(root: Path) -> Fixtures:
     encrypted = data / "encrypted member.qgz"
     _write_encrypted_project(encrypted, raster)
 
+    # A project nested far past anything QGIS writes, one that is nothing but the
+    # same unclosed tag, and an archive whose small members add up past the budget.
+    deep_project = data / "deep project.qgs"
+    deep_project.write_bytes(
+        b"<qgis>" + b"<a>" * DEEP_PROJECT_LEVELS + b"</a>" * DEEP_PROJECT_LEVELS + b"</qgis>"
+    )
+    unclosed_project = data / "unclosed datasources.qgs"
+    unclosed_project.write_bytes(b"<qgis>" + b"<datasource>" * UNCLOSED_DATASOURCES)
+    many_members = data / "many members.qgz"
+    member = b" " * BUDGET_MEMBER_BYTES
+    with zipfile.ZipFile(many_members, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index in range(BUDGET_MEMBERS):
+            archive.writestr(f"part{index}.qgs", member)
+    tag_spam = data / "tag spam.qgs"
+    tag_spam.write_bytes(b"<qgis>" + b"<a></a>" * TAG_SPAM_PAIRS + b"</qgis>")
+
     return Fixtures(
         root=data,
         cities=cities,
@@ -223,6 +255,10 @@ def build(root: Path) -> Fixtures:
         moved_directory=moved_directory,
         oversized=oversized,
         encrypted=encrypted,
+        deep_project=deep_project,
+        unclosed_project=unclosed_project,
+        many_members=many_members,
+        tag_spam=tag_spam,
         escape=_junction(data / "escape", outside),
     )
 

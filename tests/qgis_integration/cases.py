@@ -1309,6 +1309,149 @@ def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
     )
 
 
+def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -> str:
+    """A deeply nested project crashes ``read()``'s parser, so it never reaches it (A4 #2)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at35 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+
+    started = time.monotonic()
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.deep_project), "discard_current": True},
+    )
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on a deeply nested project")
+    equal(error_code(record), PROJECT_OPEN_FAILED, "the code for a deeply nested project")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("nests deeper" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 1.0, f"the 8000-level project took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        "a 56 KB project nested 8000 levels deep: FAILED(PROJECT_OPEN_FAILED) in "
+        f"{elapsed * 1000:.0f} ms, before read(); the process is still here and the old "
+        "project kept its layer (QGIS 3.44 crashed with 0xC00000FD when read() got this "
+        "file, measured)"
+    )
+
+
+def at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds(ctx: Context) -> str:
+    """984 KB of unclosed tags once cost the main thread 661 s; it is linear now (A4 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at36 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    on_disk = ctx.fixtures.unclosed_project.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.unclosed_project), "discard_current": True},
+    )
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on 984 KB of unclosed tags")
+    equal(error_code(record), PROJECT_OPEN_FAILED, "the code for 984 KB of unclosed tags")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("nests deeper" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s to scan")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte project of 82000 unclosed <datasource> tags: "
+        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, before read(); the old "
+        "regex was still scanning this file after 150 s, and the audit measured 661 s for "
+        "this shape"
+    )
+
+
+def at_37_open_refuses_a_qgz_over_the_total_budget(ctx: Context) -> str:
+    """The budget is the sum of the members, not each member on its own (A4 #3)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at37 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    on_disk = ctx.fixtures.many_members.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.many_members), "discard_current": True},
+    )
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on an archive over the budget")
+    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an archive over the budget")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("too large" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 1.0, f"the {on_disk} byte archive took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte QGZ with {fixtures.BUDGET_MEMBERS} one-megabyte .qgs members "
+        f"(each under 16 MB, {fixtures.BUDGET_MEMBERS} MB together): "
+        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms with no member unpacked; "
+        "the old per-member check accepted this shape and read every member (measured "
+        "peak 200 MB for 100 members)"
+    )
+
+
+def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
+    """16 MB of XML elements is refused by count, not walked element by element (A4 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at38 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    on_disk = ctx.fixtures.tag_spam.stat().st_size
+
+    started = time.monotonic()
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.tag_spam), "discard_current": True},
+    )
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.FAILED, "project.open on a tag-spam project")
+    equal(error_code(record), PROJECT_OPEN_FAILED, "the code for a tag-spam project")
+    error = record.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("XML elements" in error.message, f"the message: {error.message!r}")
+    require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        f"a {on_disk} byte project of {fixtures.TAG_SPAM_PAIRS} empty elements: "
+        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, one bytes.count over "
+        "the bytes; a per-element walk would have held the main thread for seconds"
+    )
+
+
 CASES = (
     ("AT-01", at_01_duplicate_registration),
     ("AT-02", at_02_invalid_input),
@@ -1349,4 +1492,8 @@ CASES = (
     ("AT-32", at_32_open_keeps_a_source_whose_directory_is_gone),
     ("AT-33", at_33_open_refuses_an_oversized_member_before_unpacking_it),
     ("AT-34", at_34_unreadable_member_is_a_project_read_failure),
+    ("AT-35", at_35_open_refuses_a_deeply_nested_project_before_reading_it),
+    ("AT-36", at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds),
+    ("AT-37", at_37_open_refuses_a_qgz_over_the_total_budget),
+    ("AT-38", at_38_open_refuses_a_tag_spam_project_in_milliseconds),
 )
