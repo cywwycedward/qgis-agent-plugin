@@ -242,9 +242,15 @@ def make_context(project: Any, root: Path) -> OperationContext:
     )
 
 
-def make_layer(fake: FakeQgis, layer_id: str, name: str = "layer", kind: str = "vector") -> Any:
+def make_layer(
+    fake: FakeQgis,
+    layer_id: str,
+    name: str = "layer",
+    kind: str = "vector",
+    provider: str = "ogr",
+) -> Any:
     layer_class = fake.QgsVectorLayer if kind == "vector" else fake.QgsRasterLayer
-    return layer_class(f"source-{layer_id}", name, "ogr", layer_id=layer_id)
+    return layer_class(f"source-{layer_id}", name, provider, layer_id=layer_id)
 
 
 def add_params(**overrides: Any) -> dict[str, Any]:
@@ -491,6 +497,44 @@ def test_a_layer_that_is_neither_vector_nor_raster_is_other(
     assert summary.kind == "other"
     assert summary.crs_authid == ""
     assert summary.visible is True
+
+
+def test_list_and_get_info_take_every_field_from_its_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A vector and a raster, so each value has to come from the layer it belongs to."""
+
+    project = FakeProject()
+    ctx = make_context(project, data_root)
+    # The fake gives a vector EPSG:4326 and a raster EPSG:3857, so a swapped or
+    # constant CRS cannot pass.
+    roads = make_layer(fake_qgis, "roads", name="Roads")
+    dem = make_layer(fake_qgis, "dem", name="Dem", kind="raster", provider="gdal")
+    for layer in (roads, dem):
+        project.layers[layer.id()] = layer
+        project.root.nodes[layer.id()] = FakeNode()
+
+    summaries = {
+        summary.layer_id: summary
+        for summary in ops.LayerList().execute_main(ctx, ops.LayerListParams()).layers
+    }
+    assert sorted(summaries) == ["dem", "roads"]
+    assert (summaries["roads"].name, summaries["roads"].kind, summaries["roads"].crs_authid) == (
+        "Roads",
+        "vector",
+        "EPSG:4326",
+    )
+    assert (summaries["dem"].name, summaries["dem"].kind, summaries["dem"].crs_authid) == (
+        "Dem",
+        "raster",
+        "EPSG:3857",
+    )
+
+    info = ops.LayerGetInfo().execute_main(ctx, ops.LayerGetInfoParams(layer_id="dem"))
+    assert info.layer_id == "dem"
+    assert (info.name, info.kind, info.crs_authid) == ("Dem", "raster", "EPSG:3857")
+    assert info.provider == "gdal"
+    assert info.valid is True
 
 
 # --- layer.get_info (PRD 7.8) ------------------------------------------------
