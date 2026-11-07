@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import types
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +224,31 @@ def project_dir(tmp_path: Path) -> Path:
     root = tmp_path / "projects"
     root.mkdir()
     return root
+
+
+def project_xml(datasource: str) -> str:
+    """The smallest project XML QGIS writes around one layer's datasource."""
+
+    return (
+        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
+        f"<datasource>{datasource}</datasource>"
+        "</maplayer></projectlayers></qgis>"
+    )
+
+
+def qgs_file(directory: Path, name: str, datasource: str) -> Path:
+    target = directory / name
+    target.write_text(project_xml(datasource), encoding="utf-8")
+    return target
+
+
+def qgz_file(directory: Path, name: str, datasource: str) -> Path:
+    """A ``.qgz`` is a zip whose ``.qgs`` member is the same XML."""
+
+    target = directory / name
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("project.qgs", project_xml(datasource))
+    return target
 
 
 def refused(code: str, call: Any) -> FrameworkError:
@@ -557,6 +583,10 @@ def test_open_refuses_a_project_that_points_outside_the_allowed_roots(
     assert loaded.removed == ["leaked"]
     assert loaded.layers == {}
     assert "1 layer data source(s)" in failed.message
+    # ``read()`` already replaced the project, so the message may not claim it was
+    # not opened: a caller reading that would keep working on a project that is gone.
+    assert "was replaced" in failed.message
+    assert "not opened" not in failed.message
     # The message never repeats the path it refused.
     assert "secret.gpkg" not in failed.message
 
@@ -601,6 +631,151 @@ def test_open_refuses_a_layer_whose_provider_names_no_local_path(
 
     assert loaded.removed == ["remote"]
     assert "1 layer data source(s)" in failed.message
+
+
+def test_open_refuses_a_layer_whose_provider_cannot_decode_its_uri(
+    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One provider's exception may not erase what the other layers already answered:
+    # the failing layer counts as outside instead of turning the whole check into an
+    # internal error that leaves every layer loaded.
+    class ExplodingMetadata:
+        def decodeUri(self, uri: str) -> dict[str, str]:  # noqa: N802 - a PyQGIS name
+            raise RuntimeError("this provider cannot decode its own URI")
+
+    root = project_dir(tmp_path)
+    target = root / "a.qgz"
+    target.write_text("", encoding="utf-8")
+    monkeypatch.setitem(FakeProviderRegistry.instance().metadata, "boom", ExplodingMetadata())
+    loaded = FakeProject(
+        layers_after_read={
+            "boom": FakeLayer(source="whatever", provider="boom"),
+            "inside": FakeLayer(source=str(root / "a.gpkg")),
+        }
+    )
+    ctx = context(loaded, roots=(root,))
+    request = project.ProjectOpenParams(path=str(target))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(ctx, request),
+    )
+
+    assert loaded.removed == ["boom"]
+    assert loaded.layers.keys() == {"inside"}
+    assert "1 layer data source(s)" in failed.message
+
+
+def test_open_accepts_a_directory_shaped_source_inside_the_roots(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # An ESRI FileGDB is a directory, and a project holding one is an ordinary
+    # project: the policy asks where it lives, not whether it is a regular file.
+    root = project_dir(tmp_path)
+    gdb = root / "roads.gdb"
+    gdb.mkdir()
+    target = qgs_file(root, "gdb.qgs", str(gdb))
+    loaded = FakeProject(layers_after_read={"gdb": FakeLayer(source=str(gdb))})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert loaded.removed == []
+
+
+def test_open_refuses_a_directory_shaped_source_outside_the_roots(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    root = project_dir(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    gdb = elsewhere / "roads.gdb"
+    gdb.mkdir()
+    target = qgs_file(root, "gdb.qgs", str(gdb))
+    loaded = FakeProject(layers_after_read={"gdb": FakeLayer(source=str(gdb))})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.removed == ["gdb"]
+    assert "1 layer data source(s)" in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "/vsicurl/http://127.0.0.1:9/never.tif",
+        r"\\no-such-host-audit\share\data.gpkg",
+        "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png",
+        # What QGIS's own XML parser decodes before it builds the layer.
+        "&#47;vsicurl&#47;http&#58;&#47;&#47;127.0.0.1&#58;9/never.tif",
+    ],
+    ids=["vsi", "unc", "embedded-url", "entity-escaped"],
+)
+def test_open_refuses_a_remote_source_before_the_project_is_read(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str, remote: str
+) -> None:
+    # ``read()`` builds every layer the file names, so a remote URI there is an HTTP
+    # request or an SMB authentication attempt before any per-layer check runs.
+    root = project_dir(tmp_path)
+    write = qgs_file if suffix == ".qgs" else qgz_file
+    target = write(root, f"remote{suffix}", remote)
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=remote)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    # The refusal has to come before ``read()``, which is what an unset read_path
+    # proves: no layer was built and no datasource was contacted.
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+    assert remote not in failed.message
+
+
+def test_open_still_reads_a_project_whose_sources_are_local(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    root = project_dir(tmp_path)
+    target = qgs_file(root, "local.qgs", str(root / "a.gpkg"))
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert loaded.read_path == str(target.resolve())
+
+
+def test_open_reports_a_corrupt_archive_as_a_read_failure(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The pre-read scan only reads bytes; a file it cannot unzip is still the
+    # project file's own problem, reported by ``read()`` as PROJECT_OPEN_FAILED.
+    root = project_dir(tmp_path)
+    target = root / "corrupt.qgz"
+    target.write_bytes(b"this is not zipped project data")
+    loaded = FakeProject(read_result=False)
+    ctx = context(loaded, roots=(root,))
+
+    refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path == str(target.resolve())
 
 
 # --- project.save -----------------------------------------------------------

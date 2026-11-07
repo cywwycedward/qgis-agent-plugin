@@ -53,6 +53,19 @@ def test_a_directory_is_not_a_readable_file(tmp_path: Path) -> None:
     refused(str(root), [root])
 
 
+def test_a_directory_may_be_a_data_source(tmp_path: Path) -> None:
+    # An ESRI FileGDB is a directory; only a data source is allowed to be one.
+    root = data_root(tmp_path)
+    source = root / "roads.gdb"
+    source.mkdir()
+    assert resolve_path(str(source), [root], must_exist=True, allow_directory=True) == (
+        source.resolve()
+    )
+    assert resolve_path(str(source), [root], must_exist=False, allow_directory=True) == (
+        source.resolve()
+    )
+
+
 def test_a_relative_path_is_refused(tmp_path: Path) -> None:
     root = data_root(tmp_path)
     refused("roads.gpkg", [root])

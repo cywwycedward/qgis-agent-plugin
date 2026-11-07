@@ -54,15 +54,26 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 ### 1.2 路径怎么判
 
 `layer.add` 用 `allowed_data_roots`，`project.open` / `project.save` 用 `allowed_project_roots`；
-两者都走 `core/security.resolve_path`：
+`project.open` 还额外地用 `allowed_data_roots` 检查工程文件里每一层的数据源（见 §3）。
+`resolve_path` 的规则：
 
 - 必须是绝对路径，`Path.resolve()` 后的真实目标要落在允许根目录内（按路径组件比较，
   `..` 和软链接跳不出去）。
-- 读（`layer.add`、`project.open`）：目标必须存在且是普通文件。
+- 读（`layer.add`、`project.open` 的工程文件）：目标必须存在且是普通文件。
+- 工程文件里的一层数据源可以是一**目录**（ESRI FileGDB 就是目录）：同样是解析后落在
+  `allowed_data_roots` 内就算通过，不要求它是普通文件（`resolve_path(..., allow_directory=True)`）。
 - 写（`project.save`）：目标可以不存在，但父目录必须存在且在根内；不创建父目录。
 - URL、provider URI、`/vsi*`、以及 Windows UNC 路径（`\\host\share\…`、`//host/share/…`、
   `\\?\…`）都在**任何 I/O 之前**拒掉：UNC 的解析本身就会连主机并带上当前 Windows 凭据，
   所以它和 URL 一样不能先进白名单再判。错误消息里**不含**原始路径。
+- `project.open` 的工程文件还会在 `read()` **之前**被扫一遍 `<datasource>` 文本（`.qgs` 是
+  XML，`.qgz` 是 zip 里的同一个 XML）：命中 `/vsi*`、URI scheme（含 XYZ/WMS 写在
+  `…&url=https://…` 里的那个）或 UNC 前缀就立刻 `PATH_NOT_ALLOWED`。
+  否则 `read()` 会先构造图层、先联网，再让逐层检查来“拒绝”。
+- **容器格式不在这一层策略内**：一个合法本地的 `.vrt` 内部可以写
+  `<SourceFilename>/vsicurl/https://…</SourceFilename>`，`layer.add` 与 `project.open`
+  看到的都是那个 `.vrt` 文件本身。这是已知的边界（升级条件见 `operations/layer.py`
+  的 `shortcut:` 注释）。
 - 允许目录**默认为空**，即默认拒绝一切文件访问（已实测：`layer.add` 与 `project.save`
   在未配置时都是 `PATH_NOT_ALLOWED`）。配置方法见 `docs/INSTALL.md`。
 
@@ -112,7 +123,7 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 
 | 参数 | 类型 | 必填 | 默认 | 约束 |
 | --- | --- | --- | --- | --- |
-| `path` | StrictStr | **是** | — | 绝对路径且后缀为 `.qgs` / `.qgz`（不区分大小写），否则 `INVALID_INPUT`（已实测）；文件必须存在、是普通文件、在 `allowed_project_roots` 内 |
+| `path` | StrictStr | **是** | — | 绝对路径且后缀为 `.qgs` / `.qgz`（不区分大小写），否则 `INVALID_INPUT`（已实测）；文件必须存在、是普通文件、在 `allowed_project_roots` 内；文件里每一层的数据源（文件**或**目录）还必须在 `allowed_data_roots` 内 |
 | `discard_current` | StrictBool | 否 | `false` | 同 `project.create` 的保护条件 |
 
 | 返回字段 | 类型 | 说明 |
@@ -122,29 +133,43 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 | `layer_count` | int | 注册进来的图层数 |
 | `invalid_layer_count` | int | 其中 `isValid() == False` 的数量（AT-18B：工程读成功但图层坏掉不算失败，只是不完整） |
 
-**工程里的数据源也要过白名单。** `read()` 只认工程文件，工程文件里写的图层数据源是另一回事，
-所以 `read()` 之后会逐个图层问 `allowed_data_roots`（用 provider 自己的 `decodeUri()` 取真实路径，
-不切字符串）：
+**工程里的数据源也要过白名单，而且要在 `read()` 之前拦下远程的。** 工程文件里写的图层
+数据源是另一回事：`read()` 会把它们全部构造出来，远程地址就在主线程上发 HTTP、UNC 就在
+主线程上做一次带 Windows 凭据的 SMB 连接。所以两步：
 
-- 有数据源落在根外（或 provider 说不出一个本地路径，例如 provider metadata 缺失）→ 这些图层
-  用 `removeMapLayer()` 从工程里移除，然后整次 `project.open` 以 `PATH_NOT_ALLOWED` 失败，
-  `message` 里带被移除的图层数。**不是**“加载成功 + 只报个字段”：那等于白名单被绕过。
-- 数据源文件**不存在**不算越界（它还在根内）：那是 AT-18B 的部分加载，照常 `SUCCEEDED` +
-  `invalid_layer_count > 0`。
-- 工程文件本身已经 `read()` 进去了，所以失败时**当前工程已经变成新工程的剩余部分**，不回滚。
+1. **先扫文本，不碰数据源**：`read()` 之前读工程文件的 `<datasource>`，命中 `/vsi*`、
+   URI scheme（XYZ/WMS 把它写在 `…&url=https://…` 里，也算）或 UNC 前缀 → 直接
+   `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not opened`。
+   这一步只读字节，**当前工程原样保留**（已实测：两个含 `/vsicurl` / UNC 数据源的工程各
+   16 ms、31 ms 返回，旧工程与它的图层都还在）。
+2. **再逐层比对根目录**：`read()` 之后用 provider 自己的 `decodeUri()` 取真实路径，问
+   `allowed_data_roots`。
+   - 有数据源落在根外（或 provider 说不出一个本地路径，或 `decodeUri()` 自己抛异常）→ 这些
+     图层用 `removeMapLayer()` 从工程里移除，然后整次 `project.open` 以 `PATH_NOT_ALLOWED`
+     失败，`message` 里带被移除的图层数。**不是**“加载成功 + 只报个字段”：那等于白名单被绕过。
+   - 数据源是**目录**（ESRI FileGDB）不算越界：只要目录本身在 `allowed_data_roots` 内。
+   - 数据源文件**不存在**不算越界（它还在根内）：那是 AT-18B 的部分加载，照常 `SUCCEEDED` +
+     `invalid_layer_count > 0`。
+   - 工程文件本身已经 `read()` 进去了，所以这一步失败时**当前工程已经被替换成“去掉越界层之后的
+     剩货”**，不回滚；`message` 说的就是这件事（`they were removed and the project was replaced`）。
+
+**要两个键都配。** 只配 `allowed_project_roots`、`allowed_data_roots` 留空的操作者，打开任何
+**含图层**的工程都会失败（实测：`FAILED(PATH_NOT_ALLOWED)`，`layers` 剩 0，`fileName()` 已经是
+那个被拒绝的工程文件）；空列表的语义就是“一个数据源都不许”。memory 图层、WMS/XYZ 底图、
+PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打开失败并把它们移除。
 
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里的数据源是远程 URI、`/vsi*`、UNC（**`read()` 之前**就拒）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
 | `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
 成功路径同样会触发 `QgsProject.aboutToBeCleared`（`read()` 会清空旧工程），所以 `project_epoch` 加 1、
-旧代数的排队调用立即 `CANCELLED`；**本次调用自己照常成功**（实测：打开一个含 1 个图层的工程得到
-`layer_count: 1`、`invalid_layer_count: 0`，epoch 0 → 1，记录终态 `SUCCEEDED`）。四个失败路径
-（`INVALID_INPUT`、`PATH_NOT_ALLOWED`、`PROJECT_REPLACE_REQUIRED`、`PROJECT_OPEN_FAILED`）与成功路径
-互不干扰。
+旧代数的排队调用立即 `CANCELLED`；**本次调用自己照常成功**（实测：两个键都指向数据与工程所在目录，
+打开一个含 1 个图层的工程得到 `layer_count: 1`、`invalid_layer_count: 0`，epoch 0 → 1，记录终态
+`SUCCEEDED`）。四个失败路径（`INVALID_INPUT`、`PATH_NOT_ALLOWED`、`PROJECT_REPLACE_REQUIRED`、
+`PROJECT_OPEN_FAILED`）与成功路径互不干扰。
 
 ## 4. `project.save`
 
@@ -342,5 +367,7 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 | 6.1 “兼容 Pydantic v1/v2” | 只支持 v2，`pydantic_major` 恒为 2 | 已记录偏差；非 v2 的 pydantic 在插件导入时直接 `RuntimeError` |
 | 11.1 `error.details` | 字段存在但永远是 `null` | `FrameworkError` 只带 `code` + `message`，没有 details 通路 |
 | 7.3 / 11.2 “含无法加载的图层 → `PROJECT_OPEN_FAILED`” | `SUCCEEDED` + `invalid_layer_count > 0` | 同一份 PRD 里这两句与 AT-18B（`read()` 为真但有坏图层 → 成功 + 计数）互斥。**以 AT-18B 与这里的代码为准**：读成功就是成功，坏图层只计数、不谎称可用。评审时不要按 7.3/11.2 那两句改代码 |
-| 7.3 未提工程内数据源 | `project.open` 逐层校验数据源，越界则移除该层并整体 `PATH_NOT_ALLOWED` | 更严，不是更松：PRD 2.3/10.2 要的是数据白名单，而数据源是工程文件替调用方写的路径，所以它们也得过 `allowed_data_roots`（已实测，见 `PROJECT_OPEN_FAILED` 之外的这条码） |
-| 未定义：provider 说不出本地路径 | 这种图层算越界（移除 + 失败） | 宁可拒绝：白名单无法为一个说不出来源的层担保；工程里出现 `memory` 等非文件 provider 时 `project.open` 会失败 |
+| 7.3 未提工程内数据源 | `project.open` 在 `read()` 前拒远程数据源，`read()` 后逐层校验数据源，越界则移除该层并整体 `PATH_NOT_ALLOWED` | 更严，不是更松：PRD 2.3/10.2 要的是数据白名单，而数据源是工程文件替调用方写的路径，所以它们也得过 `allowed_data_roots`（已实测，见 `PROJECT_OPEN_FAILED` 之外的这条码） |
+| 未定义：数据源是目录 | 数据源可以是目录（ESRI FileGDB），只要目录在 `allowed_data_roots` 内 | 保存目标仍然必须是文件；只有“工程里的数据源”放宽到目录，否则普通工程里一张 FileGDB 图层就会让整次打开失败 |
+| 未定义：容器格式内部的数据源 | 不检查：一个本地 `.vrt` 内部的 `<SourceFilename>` 不在这层策略内 | 已知边界，不是承诺；升级条件写在 `operations/layer.py` 的 `layer_source_uri` 的 `shortcut:` 注释里（有人真的把 VRT 当不可信输入时） |
+| 未定义：provider 说不出本地路径 | 这种图层算越界（移除 + 失败） | 宁可拒绝：白名单无法为一个说不出来源的层担保；工程里出现 `memory`、WMS/XYZ 等非文件 provider 时 `project.open` 会失败 |

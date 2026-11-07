@@ -357,6 +357,21 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
     assert len(fake_qgis.managers) == 3
 
 
+def test_a_count_key_below_one_refuses_the_load_and_publishes_nothing(fake_qgis) -> None:
+    iface = types.SimpleNamespace()
+    fake_qgis.settings.values["qgis_agent_plugin/max_pending"] = 0
+
+    with pytest.raises(RuntimeError) as refusal:
+        plugin.Plugin(iface).initGui()
+
+    # INSTALL.md §4: a count below one stops the plugin loading and names the key,
+    # and it does so before anything is published on iface -- a half session left
+    # there would look like a working engine that never starts.
+    assert "max_pending" in str(refusal.value)
+    assert not hasattr(iface, "agent_engine")
+    assert not hasattr(iface, "agent_registry")
+
+
 def test_unloading_keeps_a_task_that_is_still_running(fake_qgis) -> None:
     """AT-13 and PRD 9.3.4/9.3.5: a live task outlives the ``Plugin`` instance.
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from functools import partial
 from typing import Any
 
@@ -1148,6 +1149,38 @@ def at_29_open_refuses_a_source_outside_the_roots(ctx: Context) -> str:
     )
 
 
+def at_30_open_refuses_a_remote_source_before_reading(ctx: Context) -> str:
+    """A project file may not cost a network round trip before it is checked."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at30 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    timings: list[str] = []
+    for label, target in (
+        ("a /vsicurl source", ctx.fixtures.remote_vsicurl),
+        ("a UNC source", ctx.fixtures.remote_unc),
+    ):
+        started = time.monotonic()
+        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+        elapsed = time.monotonic() - started
+        equal(record.status, ExecutionStatus.FAILED, f"project.open on {label}")
+        equal(error_code(record), PATH_NOT_ALLOWED, f"the code for {label}")
+        # The file's own datasource text is refused before read(), so neither the
+        # HTTP retry nor the SMB connect happens on the main thread.
+        require(elapsed < 1.0, f"{label} took {elapsed:.2f}s: read() reached it")
+        equal(project_layer_ids(), before, f"the project's layers after {label}")
+        equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
+        timings.append(f"{label} {elapsed * 1000:.0f} ms")
+    reset_project(ctx)
+    return (
+        f"FAILED(PATH_NOT_ALLOWED) in {', '.join(timings)}; the project file was scanned "
+        "before read(), so the old project and its one layer are still loaded"
+    )
+
+
 CASES = (
     ("AT-01", at_01_duplicate_registration),
     ("AT-02", at_02_invalid_input),
@@ -1183,4 +1216,5 @@ CASES = (
     ("AT-27-v1", at_27_v1_half),
     ("AT-28", at_28_layer_add_sub_layer),
     ("AT-29", at_29_open_refuses_a_source_outside_the_roots),
+    ("AT-30", at_30_open_refuses_a_remote_source_before_reading),
 )
