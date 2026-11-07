@@ -25,6 +25,7 @@ from qgis_agent_plugin.core.contracts import (
     TaskControl,
 )
 from qgis_agent_plugin.core.engine import OperationEngine
+from qgis_agent_plugin.core.execution_store import ExecutionStore
 from qgis_agent_plugin.core.models import (
     INTERNAL_ERROR,
     TASK_SUBMISSION_FAILED,
@@ -43,6 +44,7 @@ from qgis_agent_plugin.core.runners.qgs_task import (
 QUEUED = ExecutionStatus.QUEUED
 SCHEDULED = ExecutionStatus.SCHEDULED
 RUNNING = ExecutionStatus.RUNNING
+CANCEL_REQUESTED = ExecutionStatus.CANCEL_REQUESTED
 SUCCEEDED = ExecutionStatus.SUCCEEDED
 FAILED = ExecutionStatus.FAILED
 CANCELLED = ExecutionStatus.CANCELLED
@@ -216,6 +218,16 @@ class ExplodingPrepare(Counting):
 
     def prepare_main(self, ctx: OperationContext, request: AmountParams) -> int:
         raise FrameworkError(TASK_SUBMISSION_FAILED, "the snapshot could not be read")
+
+
+class BadDependency(Counting):
+    """An operation whose layer dependency cannot be resolved."""
+
+    name = "test.bad_dependency"
+    description = "fail while the task's dependencies are being resolved"
+
+    def dependent_layer_ids(self, request: AmountParams) -> list[str]:
+        raise RuntimeError("the dependency cannot be resolved")
 
 
 class Layered(Counting):
@@ -478,7 +490,40 @@ def test_a_waiting_call_cancelled_before_its_turn_is_never_started(
     assert len(harness.tasks) == 2
 
 
+def test_a_dependency_that_raises_on_the_drain_path_still_ends_the_call() -> None:
+    fast = Counting()
+    harness = Harness(fast, BadDependency())
+    harness.submit(fast.name, {"amount": 1})
+    harness.submit(fast.name, {"amount": 2})
+    waiting = harness.submit(BadDependency.name, {"amount": 3})
+    assert harness.record(waiting).status is QUEUED
+
+    harness.run(harness.tasks[0])  # a slot frees, so the waiting call is drained
+
+    # PRD 12.3: a task that cannot even be built may not leave its record in
+    # PREPARING, a state nothing would ever settle again.
+    record = harness.record(waiting)
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == INTERNAL_ERROR
+
+
 # --- the progress window -----------------------------------------------------
+
+
+def watch_progress(store: ExecutionStore) -> list[float]:
+    """Record every progress the adapter writes, so a dropped or stale one is visible."""
+
+    written: list[float] = []
+    original = store.transition
+
+    def spy(*arguments: Any, **keywords: Any) -> ExecutionRecord:
+        if "progress" in keywords:
+            written.append(keywords["progress"])
+        return original(*arguments, **keywords)
+
+    store.transition = spy  # type: ignore[method-assign]
+    return written
 
 
 def test_progress_rewrites_the_record_at_most_once_per_interval(
@@ -488,16 +533,7 @@ def test_progress_rewrites_the_record_at_most_once_per_interval(
     record = harness.submit(counting.name, {"amount": 1})
     task = harness.tasks[0]
     execution_id = record.execution_id
-    writes: list[float] = []
-
-    original = harness.engine._store.transition
-
-    def spy(*arguments: Any, **keywords: Any) -> ExecutionRecord:
-        if "progress" in keywords:
-            writes.append(keywords["progress"])
-        return original(*arguments, **keywords)
-
-    harness.engine._store.transition = spy  # type: ignore[method-assign]
+    writes = watch_progress(harness.engine._store)
 
     # Four reports inside the same 100 ms window: one write, three kept back.
     harness.clock.now = 1.0
@@ -515,25 +551,51 @@ def test_progress_rewrites_the_record_at_most_once_per_interval(
     assert harness.engine_record(execution_id).status is RUNNING
 
 
-def test_the_last_progress_before_the_end_is_written_even_inside_the_window(
+def test_the_last_progress_reported_before_the_end_is_written(
     counting: Counting,
 ) -> None:
     harness = Harness(counting)
     record = harness.submit(counting.name, {"amount": 1})
     task = harness.tasks[0]
+    writes = watch_progress(harness.engine._store)
 
     harness.clock.now = 1.0
     harness.manager.report(task, 40.0)
     harness.clock.now = 1.01
     harness.manager.report(task, 80.0)  # throttled, kept for the flush
+    counting.fail = True
     harness.clock.now = 1.02
-    task.run()
-    task.finished(True)
+    harness.run(task)
 
-    # The record's own progress ends at 100 because it succeeded, but the dropped
-    # 80% must have been written on the way, not silently lost (PRD 8.4).
-    assert harness.record(record).status is SUCCEEDED
-    assert harness.record(record).progress == 100
+    # PRD 8.4: the last value is never the one the interval swallows.  The worker
+    # fails, so the record keeps the progress it reached instead of being reset to 100.
+    assert writes == [40.0, 80.0]
+    record = harness.record(record)
+    assert record.status is FAILED
+    assert record.progress == 80
+
+
+def test_a_value_kept_back_inside_the_window_never_overwrites_a_newer_one(
+    counting: Counting,
+) -> None:
+    harness = Harness(counting)
+    record = harness.submit(counting.name, {"amount": 1})
+    task = harness.tasks[0]
+    writes = watch_progress(harness.engine._store)
+
+    harness.clock.now = 1.0
+    harness.manager.report(task, 20.0)
+    harness.clock.now = 1.01
+    harness.manager.report(task, 60.0)  # throttled; 20 is the value on record
+    harness.clock.now = 1.2
+    harness.manager.report(task, 90.0)  # written, so 60 is stale from here on
+    counting.fail = True
+    harness.clock.now = 1.21
+    harness.run(task)
+
+    # The flush at the end must not resurrect 60: progress may never go backwards.
+    assert writes == [20.0, 90.0]
+    assert harness.record(record).progress == 90
 
 
 def test_a_progress_report_for_an_unknown_task_is_ignored(counting: Counting) -> None:
@@ -562,7 +624,77 @@ def test_a_successful_task_passes_through_running_and_finalizing(counting: Count
     assert record.finished_at is not None
     assert counting.seen == ["prepare", "worker", "finalize"]
     assert harness.runner._active == {}
-    assert harness.runner._progress_written == {}
+
+
+@pytest.mark.parametrize("before", [SCHEDULED, RUNNING, CANCEL_REQUESTED])
+def test_a_task_qgis_cancels_on_its_own_still_ends_cancelled(
+    counting: Counting, before: ExecutionStatus
+) -> None:
+    harness = Harness(counting)
+    submitted = harness.submit(counting.name, {"amount": 1})
+    task = harness.tasks[0]
+    if before is RUNNING:
+        harness.manager.report(task, 10.0)  # the first report moves SCHEDULED -> RUNNING
+    elif before is CANCEL_REQUESTED:
+        harness.engine.cancel(submitted.execution_id)
+    assert harness.record(submitted).status is before
+
+    # QGIS cancels the task itself (its dependent layer went away); nobody called
+    # engine.cancel, so the record still has to reach a terminal state on its own.
+    task.cancel()
+    harness.run(task)
+
+    record = harness.record(submitted)
+    assert record.status is CANCELLED
+    assert record.result is None
+    assert record.error is None
+    assert record.finished_at is not None
+
+
+def test_a_cancelled_record_does_not_claim_full_progress(counting: Counting) -> None:
+    harness = Harness(counting)
+    submitted = harness.submit(counting.name, {"amount": 1})
+    task = harness.tasks[0]
+    writes = watch_progress(harness.engine._store)
+
+    harness.clock.now = 1.0
+    harness.manager.report(task, 12.5)
+    harness.clock.now = 1.01
+    harness.manager.report(task, 100.0)  # what QGIS reports once run() returns
+    task.cancel()
+    harness.clock.now = 1.02
+    task.finished(True)  # the run itself already returned; only the report is left
+
+    record = harness.record(submitted)
+    # PRD 6.6: a record with no result may not read as complete, so no 100 ever lands.
+    assert record.status is CANCELLED
+    assert record.progress == 12.5
+    assert writes == [12.5]
+
+
+def test_a_completion_that_breaks_still_settles_the_record(counting: Counting) -> None:
+    harness = Harness(counting)
+    submitted = harness.submit(counting.name, {"amount": 1})
+    task = harness.tasks[0]
+    harness.engine.cancel(submitted.execution_id)
+    store = harness.engine._store
+    original = store.transition
+
+    def refusing(execution_id: str, status: Any = None, **values: Any) -> ExecutionRecord:
+        if status is ExecutionStatus.CANCELLED:
+            raise FrameworkError(INTERNAL_ERROR, "the store refused the write")
+        return original(execution_id, status=status, **values)
+
+    store.transition = refusing  # type: ignore[method-assign]
+
+    harness.run(task)  # must not raise into the Qt slot
+
+    # PRD 12.3: the task is over, so the record may not stay live even when the
+    # handler itself failed; every non-terminal status has an edge to FAILED.
+    record = harness.record(submitted)
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == INTERNAL_ERROR
 
 
 def test_an_unexpected_failure_keeps_its_type_and_not_its_text(

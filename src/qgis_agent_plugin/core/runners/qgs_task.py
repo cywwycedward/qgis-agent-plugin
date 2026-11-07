@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 from ..contracts import BackgroundOperationMixin, BaseOperation, TaskControl
 from ..engine import _serialised_output
+from ..execution_store import TERMINAL_STATUSES
 from ..models import (
     INTERNAL_ERROR,
     STALE_PROJECT,
@@ -52,10 +53,6 @@ _LOGGER = logging.getLogger(__name__)
 # reported last before the task ends is written regardless: a throttled drop there
 # would leave a finished record short of what the worker actually reached.
 PROGRESS_INTERVAL_SECONDS = 0.1
-
-_TERMINAL = frozenset(
-    {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
-)
 
 _UNSET = object()
 
@@ -102,13 +99,21 @@ class _TaskControl:
 
 @dataclass
 class _Submission:
-    """One accepted background call: what it needs to run, and its task once it has one."""
+    """One accepted background call: what it needs to run, and where it stands.
+
+    The progress fields belong here rather than in maps of their own, so the three
+    facts about an execution cannot drift apart: ``progress_written`` is when the
+    record was last moved, ``progress_pending`` the newest value kept back inside
+    the interval.
+    """
 
     engine: OperationEngine
     execution_id: str
     operation: BaseOperation
     request: BaseModel
     task_id: int = 0
+    progress_written: float | None = None
+    progress_pending: float | None = None
 
 
 class OperationTaskRunner:
@@ -120,18 +125,14 @@ class OperationTaskRunner:
         task_factory: Callable[..., Any] | None = None,
         task_manager: Any = None,
         clock: Callable[[], float] | None = None,
-        progress_interval: float = PROGRESS_INTERVAL_SECONDS,
     ) -> None:
         self._new_task = task_factory or task_class()
-        self._progress_interval = progress_interval
         self._clock = clock or time.monotonic
         self._manager = task_manager
         # Active tasks by execution id, and the calls still waiting for a slot in
         # submission order.  Both are emptied as work finishes, so neither is history.
         self._active: dict[str, _Submission] = {}
         self._waiting: deque[_Submission] = deque()
-        self._progress_written: dict[str, float] = {}
-        self._progress_pending: dict[str, float] = {}
         if task_manager is not None:
             task_manager.progressChanged.connect(self._progress_reported)
 
@@ -176,30 +177,45 @@ class OperationTaskRunner:
         """The main-thread completion handler for one task (PRD 8.4).
 
         ``task`` is alive for the length of this call and is never kept: QGIS
-        deletes its C++ side as soon as the task ends.
+        deletes its C++ side as soon as the task ends.  Whatever goes wrong in
+        here, the slot is released and the record does not stay live (PRD 12.3).
         """
 
         submission = self._active.pop(execution_id, None)
-        pending = self._progress_pending.pop(execution_id, None)
-        self._progress_written.pop(execution_id, None)
         if submission is None:
             _LOGGER.warning(
                 "completion for an execution this runner does not own: %s", execution_id
             )
             return
+        try:
+            self._complete(submission, run, task, succeeded)
+        except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 8.4, 11.3)
+            _LOGGER.exception("completion of %s failed", execution_id)
+            self._abandon(submission)
+        finally:
+            self._drain()
+
+    def _complete(
+        self, submission: _Submission, run: OperationRun, task: Any, succeeded: bool
+    ) -> None:
         store = submission.engine._store
+        execution_id = submission.execution_id
         record = store.get(execution_id)
-        if pending is not None and record.status not in _TERMINAL:
+        cancelled = bool(task.isCanceled()) or record.status is ExecutionStatus.CANCEL_REQUESTED
+        pending = submission.progress_pending
+        submission.progress_pending = None
+        if pending is not None and record.status not in TERMINAL_STATUSES:
+            # The last progress a worker reported is written even inside the interval.
             record = store.transition(execution_id, progress=pending)
 
         if run.error is not None:
             # A real failure outranks a cancel request (PRD 8.2: CANCEL_REQUESTED -> FAILED).
             self._running(store, execution_id, record)
             self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(run.error))
-        elif bool(task.isCanceled()) or record.status is ExecutionStatus.CANCEL_REQUESTED:
-            if record.status is ExecutionStatus.SCHEDULED:
-                # Cancelled while QGIS still held it: the request is reported first,
-                # because SCHEDULED has no edge straight to CANCELLED (PRD 8.2, AT-08B).
+        elif cancelled:
+            if record.status in (ExecutionStatus.SCHEDULED, ExecutionStatus.RUNNING):
+                # QGIS cancels a task on its own when its dependent layer goes away,
+                # and neither SCHEDULED nor RUNNING reaches CANCELLED directly (PRD 8.2).
                 store.transition(execution_id, ExecutionStatus.CANCEL_REQUESTED)
             store.transition(execution_id, ExecutionStatus.CANCELLED)
         elif not succeeded:
@@ -209,7 +225,25 @@ class OperationTaskRunner:
             self._finish_results(
                 submission, self._running(store, execution_id, record), run.result
             )
-        self._drain()
+
+    def _abandon(self, submission: _Submission) -> None:
+        """Settle a record whose completion handler broke (PRD 12.3).
+
+        The task has ended, so a record still in a live state could never be moved
+        again; every non-terminal status has an edge to FAILED (PRD 8.2).
+        """
+
+        store = submission.engine._store
+        try:
+            if store.get(submission.execution_id).status not in TERMINAL_STATUSES:
+                self._fail(
+                    store,
+                    submission.execution_id,
+                    INTERNAL_ERROR,
+                    "the completion of this execution failed",
+                )
+        except Exception:  # noqa: BLE001 - nothing may escape into the Qt slot
+            _LOGGER.exception("could not settle %s", submission.execution_id)
 
     def _start(self, submission: _Submission) -> None:
         """Take one QUEUED call to SCHEDULED, or to the record that says why not."""
@@ -235,10 +269,15 @@ class OperationTaskRunner:
             self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(error))
             return
 
-        task = self._new_task(self, execution_id, operation, snapshot)
-        dependent = _dependent_layers(engine, operation, submission.request)
-        if dependent:
-            task.setDependentLayers(dependent)
+        try:
+            task = self._new_task(self, execution_id, operation, snapshot)
+            dependent = _dependent_layers(engine, operation, submission.request)
+            if dependent:
+                task.setDependentLayers(dependent)
+        except Exception as error:  # noqa: BLE001 - a broken dependency is a FAILED record
+            _LOGGER.exception("%s: the task could not be built", operation.name)
+            self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(error))
+            return
         try:
             task_id = self._task_manager().addTask(task)
         except Exception:  # noqa: BLE001 - a PyQGIS refusal is still a submission failure
@@ -313,26 +352,34 @@ class OperationTaskRunner:
             _LOGGER.exception("progress for task %s failed", task_id)
 
     def _record_progress(self, task_id: int, progress: float) -> None:
+        if progress >= 100.0:
+            # Only the success transition may write 100 (PRD 6.6): QGIS reports 100 for
+            # every task whose run() returned True, cancelled and failed ones included,
+            # and nothing but SUCCEEDED can prove the work really finished.
+            return
         submission = self._submission_for(task_id)
         if submission is None:
             return
-        execution_id = submission.execution_id
         now = self._clock()
-        last = self._progress_written.get(execution_id)
-        if last is not None and now - last < self._progress_interval:
-            # One write per interval; the latest value is kept for the flush at the end.
-            self._progress_pending[execution_id] = progress
+        written = submission.progress_written
+        if written is not None and now - written < PROGRESS_INTERVAL_SECONDS:
+            # One write per interval; the newest value waits for the flush at the end.
+            submission.progress_pending = progress
             return
         store = submission.engine._store
+        execution_id = submission.execution_id
         record = store.get(execution_id)
-        if record.status in _TERMINAL:
+        if record.status in TERMINAL_STATUSES:
             return
         if record.status is ExecutionStatus.SCHEDULED:
             # The first report is what tells the main thread the task really started
             # (PRD 8.2: SCHEDULED -> RUNNING), since ``run`` is on another thread.
             record = store.transition(execution_id, ExecutionStatus.RUNNING)
+        # A value kept back inside the window is older than this one, so writing it
+        # at the end would move the record's progress backwards.
+        submission.progress_pending = None
         store.transition(execution_id, progress=progress)
-        self._progress_written[execution_id] = now
+        submission.progress_written = now
 
     def _submission_for(self, task_id: int) -> _Submission | None:
         for submission in self._active.values():
