@@ -164,7 +164,12 @@ class OperationEngine:
             return _receipt(record, accepted=False, reason="ALREADY_TERMINAL")
         if record.status is ExecutionStatus.QUEUED:
             # The queued callback will find the record cancelled and skip it (PRD 8.5).
-            return _receipt(self._store.transition(execution_id, ExecutionStatus.CANCELLED), True)
+            cancelled = self._store.transition(execution_id, ExecutionStatus.CANCELLED)
+            if record.strategy is ExecutionStrategy.BACKGROUND:
+                # A background call that never reached a task is still the adapter's
+                # waiting entry, and only the adapter can drop it from that queue.
+                self._cancel_task(execution_id)
+            return _receipt(cancelled, True)
         if record.status is ExecutionStatus.FINALIZING:
             # A cancel that arrives once results are being applied cannot be honoured.
             return _receipt(record, accepted=False, reason="FINALIZING")

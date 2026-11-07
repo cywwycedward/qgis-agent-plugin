@@ -480,6 +480,7 @@ def test_a_waiting_call_cancelled_before_its_turn_is_never_started(
     harness.submit(counting.name, {"amount": 1})
     harness.submit(counting.name, {"amount": 2})
     waiting = harness.submit(counting.name, {"amount": 3})
+    assert len(harness.runner._waiting) == 1
     harness.engine.cancel(waiting.execution_id)
 
     harness.run(harness.tasks[0])
@@ -488,6 +489,36 @@ def test_a_waiting_call_cancelled_before_its_turn_is_never_started(
     # preparing a snapshot nobody wants.
     assert harness.record(waiting).status is CANCELLED
     assert len(harness.tasks) == 2
+
+
+def test_cancelling_a_waiting_call_drops_it_from_the_waiting_queue(
+    counting: Counting,
+) -> None:
+    harness = Harness(counting)
+    harness.submit(counting.name, {"amount": 1})
+    harness.submit(counting.name, {"amount": 2})
+    waiting = harness.submit(counting.name, {"amount": 3})
+
+    harness.engine.cancel(waiting.execution_id)
+
+    # The engine's QUEUED branch told the adapter, and the adapter dropped the entry
+    # instead of keeping it until some task happened to finish.
+    assert list(harness.runner._waiting) == []
+    assert len(harness.runner._active) == 2  # the two running tasks are untouched
+
+
+def test_repeated_submit_and_cancel_leaves_nothing_waiting(counting: Counting) -> None:
+    harness = Harness(counting)
+    harness.submit(counting.name, {"amount": 1})
+    harness.submit(counting.name, {"amount": 2})
+
+    for amount in range(3, 8):
+        record = harness.submit(counting.name, {"amount": amount})
+        assert harness.engine.cancel(record.execution_id).status is CANCELLED
+
+    # The waiting deque may not grow with the number of cancelled calls: it is not
+    # a history, so nothing is left to clean up when a slot finally frees.
+    assert list(harness.runner._waiting) == []
 
 
 def test_a_dependency_that_raises_on_the_drain_path_still_ends_the_call() -> None:
@@ -778,3 +809,27 @@ def test_a_task_that_ends_without_a_result_is_failed(counting: Counting) -> None
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INTERNAL_ERROR
+
+
+def test_a_task_the_manager_dropped_without_a_completion_is_failed(
+    counting: Counting,
+) -> None:
+    harness = Harness(counting)
+    first = harness.submit(counting.name, {"amount": 1})
+    second = harness.submit(counting.name, {"amount": 2})
+    stale = harness.runner._active[first.execution_id].task_id
+    # QGIS drops the task without ever calling finished(): nothing else will report,
+    # and the record would hold one of the two slots for the rest of the session.
+    del harness.manager.tasks[stale]
+
+    third = harness.submit(counting.name, {"amount": 3})
+
+    record = harness.record(first)
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == INTERNAL_ERROR
+    assert record.error.message == "the task ended without a completion"
+    # The slot it held is free again, so the new call started instead of waiting.
+    assert harness.record(third).status is SCHEDULED
+    assert harness.record(second).status is SCHEDULED
+    assert first.execution_id not in harness.runner._active
