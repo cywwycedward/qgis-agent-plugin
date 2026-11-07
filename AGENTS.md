@@ -4,23 +4,32 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 
 ## 目录
 
-三层，箭头单向：契约与管线 → 命令 → 界面。
+三层，箭头单向：契约与管线 → 操作 → 入口。
 
 | 位置 | 放什么 |
 | --- | --- |
-| `src/qgis_agent_plugin/*.py` | 契约（`command`）、协议（`protocol`）、管线（`dispatch`）、异步操作（`operations`）、Qt 适配（`jobs`）、传输（`socket_bridge`）、插件入口（`plugin`） |
-| `src/qgis_agent_plugin/commands/` | 命令：一个文件一个命令，装着它的 `Params`、`Result` 和 `Command` |
-| `src/qgis_agent_plugin/ui/` | 坞窗与两个页面，唯一有窗口的地方 |
+| `src/qgis_agent_plugin/core/` | 契约与管线：`contracts`（Operation/Command/Query 与两个执行策略的协议）、`models`（DTO、状态枚举、错误码）、`registry`、`engine`、`execution_store`、`context`（工程代数 `project_epoch` 与主线程判定）、`config`（PRD 10.1 的七项配置）、`security`（允许目录与路径规范化）、`runners/`（`main_thread` 事件队列、`qgs_task` 后台适配） |
+| `src/qgis_agent_plugin/operations/` | 操作：一个文件一个能力族，装着它的 `Params`、`Result` 和 Operation 类，外加自己的清单元组；`__init__.py` 只做汇总（`register_all`） |
+| `src/qgis_agent_plugin/plugin.py` | 入口：`classFactory`、`initGui`/`unload`（PRD 9.3 六步）、`Supervisor`（卸载后仍活着的任务的托管） |
+| `src/qgis_agent_plugin/metadata.txt` | 插件元数据（QGIS 插件管理器读的那个） |
 
 放置规则：
 
-1. 一个命令一个文件；同能力的共享规则放 `<能力>/shared.py`，领域模型跟它的领域走（图层模型在 `commands/layer/report.py`，即便 project 的命令也要用它）。
-2. 被两个以上能力共享、又不属任何领域的规则，放 `commands/shared.py`。
-3. 包根只放不是命令、也不是界面的东西。
+1. 一个能力族一个文件；领域模型跟它的领域走（`LayerSummary` 在 `operations/layer.py`，project 的操作也用它的 `layer_count`）。
+2. 框架级 DTO、状态枚举、错误码只在 `core/models.py`；QGIS/Qt 对象永远不进 DTO。
+3. 被两个以上能力共享、又不属任何领域的规则放 `core/`（路径白名单是 `core/security.resolve_path`，工程代数与线程判定是 `core/context`）。
+4. `core/contracts.py` 与 `core/engine.py` 的公开签名是冻结面：后台只有 `prepare_main`/`execute_worker`/`finalize_main` 三个阶段，执行策略只有两个。要加第四个阶段或第三个策略，先改 PRD。
 
-导入层，由 `tests/` 在无 QGIS 的解释器里强制：契约、管线、命令声明必须能在裸解释器导入；QGIS 只能在函数体内 import（`plugin.context()`、各命令的 `run`、对 `jobs` 的引用）；只有 `plugin.py`、`jobs.py`、`ui/` 允许模块级 import Qt。
+导入层，由 `tests/test_package.py` 在无 QGIS 的子进程里强制：
 
-`tests/` 镜像机制层：`test_dispatch`、`test_operations`、`test_protocol`、`test_package`、`test_params_template`、`test_socket_bridge`、`test_project_gates`。
+- `core/*`、`operations/*`、`plugin.py` 必须能在裸解释器导入：**QGIS 与 Qt 只能在函数体内 import**（`plugin.initGui`/`unload`/`application_supervisor`/`read_settings`、`qgs_task.task_class`、`main_thread._post_to_event_queue`、各操作需要它的那一步）。
+- 出现 Qt/QGIS import 的地方只允许是 `plugin.py` 与 `core/runners/*`；`core/` 其余模块与 `operations/*` 一行都不许有。
+- 结果与错误只出 Pydantic DTO / 基本类型；绝不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举或 traceback。
+- 守卫同时断言九个 Operation 能在裸解释器里注册成功（PRD 7.1）。
+
+`tests/` 镜像机制层：`test_{contracts,models,registry,security}`（契约）、`test_{context,engine,execution_store}`（管线与状态机）、`test_{operations_project,operations_layer}`（操作）、`test_{qgs_task,background}`（后台适配）、`test_plugin_lifecycle`（加载/卸载、工程换代、Supervisor）、`test_package`（导入层）。
+
+运行时的两个观察面：Python Console 里 `iface.agent_registry` / `iface.agent_engine`（插件加载期间存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，默认七项见 `core/config.py`。
 
 ## Git branches
 

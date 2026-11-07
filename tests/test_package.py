@@ -28,6 +28,10 @@ from qgis_agent_plugin.core.runners import main_thread, qgs_task
 
 assert callable(qgis_agent_plugin.classFactory)
 assert callable(plugin.classFactory)
+assert callable(plugin.Plugin)
+assert callable(plugin.Supervisor)
+assert callable(plugin.application_supervisor)
+assert callable(plugin.read_settings)
 assert callable(operations.register_all)
 assert callable(context.require_main_thread)
 assert callable(engine.OperationEngine)
@@ -35,6 +39,23 @@ assert callable(execution_store.ExecutionStore)
 assert callable(main_thread.MainThreadRunner)
 assert callable(qgs_task.OperationTaskRunner)
 assert callable(qgs_task.task_class)
+
+# The nine operations of PRD 7.1 register in an interpreter that has no QGIS.
+filled = registry.OperationRegistry()
+operations.register_all(filled)
+assert len(filled.list_specs()) == 9, filled.list_specs()
+assert {spec.name for spec in filled.list_specs()} == {
+    "project.create",
+    "project.open",
+    "project.save",
+    "project.get_info",
+    "layer.add",
+    "layer.list",
+    "layer.get_info",
+    "layer.set_visibility",
+    "layer.sum_numeric_field",
+}
+
 leaked = sorted(
     name
     for name in sys.modules
