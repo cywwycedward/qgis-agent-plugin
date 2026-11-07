@@ -68,12 +68,16 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 - URL、provider URI、`/vsi*`、以及 Windows UNC 路径（`\\host\share\…`、`//host/share/…`、
   `\\?\…`）都在**任何 I/O 之前**拒掉：UNC 的解析本身就会连主机并带上当前 Windows 凭据，
   所以它和 URL 一样不能先进白名单再判。错误消息里**不含**原始路径。
-- `project.open` 的工程文件还会在 `read()` **之前**被扫一遍 `<datasource>`（`.qgs` 是 XML，
-  `.qgz` 是 zip 里的同一个 XML）：扫的是**原始字节**（不是解码后的文本），命中 `/vsi*`、URI scheme
-  （含 XYZ/WMS 写在 `…&url=https://…` 里的那个）或 UNC 前缀就立刻 `PATH_NOT_ALLOWED`。
-  标签内的空白合法（`<datasource >` 与 `<datasource>` 是同一个元素），所以匹配也接受它；
-  字节里出现 NUL 说明工程不是 UTF-8（UTF-16/UTF-32），直接 `PATH_NOT_ALLOWED`，不尝试解码；
-  单个工程文件（或 `.qgz` 的一个成员）超过 16 MB 也直接拒，不读进内存。
+- `project.open` 的工程文件还会在 `read()` **之前**被扫一遍（`.qgs` 是 XML，`.qgz` 是 zip 里的
+  同一个 XML）：扫的是**原始字节**（不是解码后的文本），一遍线性走完，不用正则、不 decode。
+  命中 `<datasource>` 里的 `/vsi*`、URI scheme（含 XYZ/WMS 写在 `…&url=https://…` 里的那个）
+  或 UNC 前缀就立刻 `PATH_NOT_ALLOWED`；标签内的空白合法（`<datasource >` 与 `<datasource>`
+  是同一个元素），所以匹配也接受它。同一次扫描还判四件事：字节里出现 NUL 说明工程不是 UTF-8
+  （UTF-16/UTF-32），直接 `PATH_NOT_ALLOWED`，不尝试解码；XML 嵌套超过 64 层
+  （`QgsProject.read()` 在深层嵌套上会爆栈、整个进程消失）直接 `PROJECT_OPEN_FAILED`；
+  XML 元素超过 200000 个（不是 QGIS 写得出的工程）也 `PROJECT_OPEN_FAILED`，判据是一次
+  `bytes.count`，不逐个元素走；工程文件本身、或 `.qgz` 里所有 `.qgs` 成员的**总量**超过 16 MB
+  也直接拒（按 `getinfo().file_size` 求和，一个成员都不解压），不读进内存。
   否则 `read()` 会先构造图层、先联网，再让逐层检查来“拒绝”。
 - **容器格式不在这一层策略内**：一个合法本地的 `.vrt` 内部可以写
   `<SourceFilename>/vsicurl/https://…</SourceFilename>`，`layer.add` 与 `project.open`
@@ -142,16 +146,25 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 数据源是另一回事：`read()` 会把它们全部构造出来，远程地址就在主线程上发 HTTP、UNC 就在
 主线程上做一次带 Windows 凭据的 SMB 连接。所以两步：
 
-1. **先扫字节，不碰数据源**：`read()` 之前读工程文件的原始字节并取 `<datasource>` 元素，命中
-   `/vsi*`、URI scheme（XYZ/WMS 把它写在 `…&url=https://…` 里，也算）或 UNC 前缀 → 直接
-   `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not opened`。
+1. **先扫字节，不碰数据源**：`read()` 之前把工程文件的原始字节走一遍（一次线性扫描，不用
+   正则、不 decode），取 `<datasource>` 元素，命中 `/vsi*`、URI scheme（XYZ/WMS 把它写在
+   `…&url=https://…` 里，也算）或 UNC 前缀 → 直接 `PATH_NOT_ALLOWED`，消息是
+   `the project file names a remote data source; it was not opened`。
    这一步只读字节，**当前工程原样保留**（已实测：两个含 `/vsicurl` / UNC 数据源的工程各
-   0–16 ms 返回，旧工程与它的图层都还在）。另外三种情况同样在读之前拒：
+   0–16 ms 返回，旧工程与它的图层都还在）。另外五种情况同样在读之前拒：
    - 文件不是 UTF-8（字节里有 NUL，例如 UTF-16 工程）→ `PATH_NOT_ALLOWED`，消息
      `the project file is not UTF-8; it was not opened`。QDomDocument 会读这种文件，而按 UTF-8
      解码后的文本扫描什么也找不到，所以判据是字节本身；
-   - 工程文件或 `.qgz` 的某个成员解压后超过 16 MB → `PATH_NOT_ALLOWED`，消息
-     `the project file is too large; it was not opened`（解压前先用 `getinfo().file_size` 判）；
+   - XML 嵌套超过 64 层 → `PROJECT_OPEN_FAILED`，消息里说 `nests deeper than 64 levels`。
+     `QgsProject.read()` 递归解析工程 XML，8000 层（56 KB）会让 C++ 栈溢出，进程直接消失
+     （实测 0xC00000FD，没有错误码、没有记录）；真实工程的嵌套在十层以内。深度是估计值，
+     CDATA/注释里的 `<` 也会被算成开标签，所以只会更早拒绝，不会漏；
+   - XML 元素超过 200000 个 → `PROJECT_OPEN_FAILED`，消息里说 `more than 200000 XML elements`。
+     扫描每个元素走一步，这个上限把最坏耗时定在有界范围（实测：16 MB 的重复空元素工程
+     用它拒在 5 ms 量级；真实工程远达不到这个元素数，16 MB 的工程文件本身也远大于实际）；
+   - 工程文件本身，或 `.qgz` 里**所有** `.qgs` 成员解压后的总量，超过 16 MB → `PATH_NOT_ALLOWED`，
+     消息 `the project file is too large; it was not opened`（解压前先用 `getinfo().file_size`
+     求和判，一个成员都不读）。逐个成员判不够：100 个 1 MB 成员的 112 KB 档案能吃掉 200 MB；
    - `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）→ `PROJECT_OPEN_FAILED`，用的是
      `read()` 失败时同一句消息。**这种档案不会交给 `read()`**：QGIS 3.44 在它上面会直接崩掉
      （实测，退出码 0xC0000005）。
@@ -176,9 +189,9 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里的数据源是远程 URI、`/vsi*`、UNC（**`read()` 之前**就拒）；或工程文件不是 UTF-8、超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里的数据源是远程 URI、`/vsi*`、UNC（**`read()` 之前**就拒）；或工程文件不是 UTF-8、工程文件或 `.qgz` 全部 `.qgs` 成员的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
-| `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
+| `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或工程文件的 XML 嵌套超过 64 层、XML 元素超过 200000 个（都在 `read()` 之前拒绝：前者会让 QGIS 解析器爆栈、进程消失，后者是标签垃圾不是工程），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
 成功路径同样会触发 `QgsProject.aboutToBeCleared`（`read()` 会清空旧工程），所以 `project_epoch` 加 1、
 旧代数的排队调用立即 `CANCELLED`；**本次调用自己照常成功**（实测：两个键都指向数据与工程所在目录，

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import types
 import zipfile
 from pathlib import Path
@@ -255,6 +256,27 @@ def qgz_bytes(directory: Path, name: str, member: bytes) -> Path:
     target = directory / name
     with zipfile.ZipFile(target, "w") as archive:
         archive.writestr("project.qgs", member)
+    return target
+
+
+# The audit's measured shapes: the old scan spent 661 s on the second one.
+UNCLOSED_DATASOURCES = 82_000
+DEEP_NESTING = 8_000
+
+
+def unclosed_project(directory: Path, name: str) -> Path:
+    """A project that is nothing but an unclosed ``<datasource>`` repeated."""
+
+    target = directory / name
+    target.write_bytes(b"<qgis>" + b"<datasource>" * UNCLOSED_DATASOURCES)
+    return target
+
+
+def nested_project(directory: Path, name: str, depth: int) -> Path:
+    """A well-formed project nested ``depth`` levels below its root element."""
+
+    target = directory / name
+    target.write_bytes(b"<qgis>" + b"<a>" * depth + b"</a>" * depth + b"</qgis>")
     return target
 
 
@@ -877,6 +899,166 @@ def test_a_qgz_member_over_the_scan_limit_is_refused_before_it_is_unpacked(
     )
 
     assert "too large" in failed.message
+
+
+def test_a_qgz_over_the_total_scan_budget_is_refused_before_members_are_unpacked(
+    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The limit used to be per member: 100 one-megabyte members passed it, were read
+    # into a list, joined into a second copy and peaked at 200 MB (measured).  The
+    # budget is the total, and it is checked before the first member is unpacked.
+    root = project_dir(tmp_path)
+    target = root / "many members.qgz"
+    member = b" " * (1024 * 1024)
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index in range(project.MAX_PROJECT_BYTES // len(member) + 1):
+            archive.writestr(f"part{index}.qgs", member)
+    # Every member is under the limit on its own, and the archive is tiny on disk.
+    assert target.stat().st_size < project.MAX_PROJECT_BYTES // 4
+
+    def read(self: zipfile.ZipFile, name: str) -> bytes:
+        raise AssertionError(f"the archive member {name} was unpacked before it was measured")
+
+    monkeypatch.setattr(zipfile.ZipFile, "read", read)
+    ctx = context(FakeProject(), roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert "too large" in failed.message
+
+
+def test_an_unclosed_datasource_project_is_refused_in_milliseconds(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The regex this scan replaced searched from every ``<datasource`` to the end of
+    # the file: 984 KB of them took 661 s on the main thread (measured) and matched
+    # nothing.  The depth bound ends the scan on the sixty-fifth opening tag.
+    root = project_dir(tmp_path)
+    target = unclosed_project(root, "unclosed.qgs")
+    assert target.stat().st_size > 900_000
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path is None
+    assert "nests deeper" in failed.message
+    assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
+
+
+def test_a_deeply_nested_project_is_refused_before_it_is_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``QgsProject.read()`` parses recursively: 8000 levels (56 KB) overflowed the C++
+    # stack and killed the process with 0xC00000FD, with no error code and no record
+    # (measured).  The scan bounds the depth before ``read()`` is given the file.
+    root = project_dir(tmp_path)
+    target = nested_project(root, "deep.qgs", DEEP_NESTING)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "nests deeper" in failed.message
+    assert "remote data source" not in failed.message
+
+
+def test_a_project_nested_up_to_the_depth_bound_is_still_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The bound may not turn an ordinary project into a failure: 64 levels is far
+    # deeper than any project QGIS writes, and it is still accepted.
+    root = project_dir(tmp_path)
+    target = nested_project(root, "nested.qgs", project.MAX_PROJECT_DEPTH - 1)
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert loaded.read_path == str(target)
+
+
+def test_a_one_megabyte_flat_project_is_scanned_linearly(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # A file that passes the element bound has to be walked to its end; a single
+    # linear pass means a megabyte of ordinary elements costs milliseconds, not a
+    # rescan per element.
+    root = project_dir(tmp_path)
+    target = root / "flat.qgs"
+    target.write_bytes(b"<qgis>" + b"<layer></layer>" * 69_915 + b"</qgis>")
+    assert target.stat().st_size > 1024 * 1024
+    assert target.read_bytes().count(b"<") < project.MAX_PROJECT_ELEMENTS
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path == str(target)
+    assert elapsed < 1.0, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
+
+
+def test_a_project_with_more_elements_than_the_scan_will_walk_is_refused(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # One Python step per element is the scan's cost, so tag spam that no QGIS project
+    # looks like is refused after a single ``bytes.count``, not a second-long walk.
+    root = project_dir(tmp_path)
+    target = root / "spam.qgs"
+    target.write_bytes(b"<qgis>" + b"<a></a>" * (project.MAX_PROJECT_ELEMENTS // 2 + 1))
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    started = time.monotonic()
+    failed = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    elapsed = time.monotonic() - started
+
+    assert loaded.read_path is None
+    assert "XML elements" in failed.message
+    assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
+
+
+def test_open_still_reads_a_project_whose_datasource_is_a_relative_path(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # QGIS stores relative paths by default, and a ``..`` inside one is resolved by
+    # the path policy: neither is a remote source or a structural defect.
+    root = project_dir(tmp_path)
+    (root / "nested").mkdir()
+    source = root / "nested" / ".." / "data.gpkg"
+    target = qgs_file(root, "relative.qgs", "../data.gpkg")
+    loaded = FakeProject(layers_after_read={"relative": FakeLayer(source=str(source))})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert result.layer_count == 1
+    assert loaded.removed == []
 
 
 def test_open_reports_an_encrypted_member_as_a_read_failure(
