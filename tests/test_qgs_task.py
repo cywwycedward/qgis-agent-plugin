@@ -633,6 +633,11 @@ def test_a_task_qgis_cancels_on_its_own_still_ends_cancelled(
     harness = Harness(counting)
     submitted = harness.submit(counting.name, {"amount": 1})
     task = harness.tasks[0]
+    if before is SCHEDULED:
+        # The worker must report nothing, or its first report is what moves the record
+        # to RUNNING and the completion never sees the SCHEDULED half of the branch.
+        counting.steps = 0
+    writes = watch_progress(harness.engine._store)
     if before is RUNNING:
         harness.manager.report(task, 10.0)  # the first report moves SCHEDULED -> RUNNING
     elif before is CANCEL_REQUESTED:
@@ -644,11 +649,17 @@ def test_a_task_qgis_cancels_on_its_own_still_ends_cancelled(
     task.cancel()
     harness.run(task)
 
+    # Both halves of the cancel branch are pinned here: a SCHEDULED record has no edge
+    # straight to CANCELLED, and a RUNNING one only reaches it through the request.
     record = harness.record(submitted)
     assert record.status is CANCELLED
     assert record.result is None
     assert record.error is None
     assert record.finished_at is not None
+    if before is SCHEDULED:
+        # A report here would move the record off SCHEDULED and quietly stop testing
+        # that half of the branch, so the case proves it saw none.
+        assert writes == []
 
 
 def test_a_cancelled_record_does_not_claim_full_progress(counting: Counting) -> None:
@@ -695,6 +706,32 @@ def test_a_completion_that_breaks_still_settles_the_record(counting: Counting) -
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INTERNAL_ERROR
+
+
+def test_a_slot_freed_by_a_broken_completion_still_starts_the_next_call(
+    counting: Counting,
+) -> None:
+    harness = Harness(counting)
+    first = harness.submit(counting.name, {"amount": 1})
+    harness.submit(counting.name, {"amount": 2})
+    waiting = harness.submit(counting.name, {"amount": 3})
+    assert harness.record(waiting).status is QUEUED
+    store = harness.engine._store
+    original = store.transition
+
+    def refusing(execution_id: str, status: Any = None, **values: Any) -> ExecutionRecord:
+        if status is ExecutionStatus.SUCCEEDED:
+            raise FrameworkError(INTERNAL_ERROR, "the store refused the write")
+        return original(execution_id, status=status, **values)
+
+    store.transition = refusing  # type: ignore[method-assign]
+
+    harness.run(harness.tasks[0])  # its own SUCCEEDED write is the failure
+
+    # PRD 12.3 / 8.5: the slot is released whether or not the completion went well,
+    # so the call waiting for it starts instead of sitting in QUEUED forever.
+    assert harness.record(first).status is FAILED
+    assert harness.record(waiting).status is SCHEDULED
 
 
 def test_an_unexpected_failure_keeps_its_type_and_not_its_text(
