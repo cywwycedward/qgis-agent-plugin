@@ -345,9 +345,7 @@ class FieldSum:
 
 class LayerSumNumericField(
     BaseQuery[SumNumericFieldParams, SumNumericFieldResult],
-    BackgroundOperationMixin[
-        SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum
-    ],
+    BackgroundOperationMixin[SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum],
 ):
     """Sum one numeric field off the main thread, over a snapshot (PRD 7.10).
 
@@ -361,9 +359,7 @@ class LayerSumNumericField(
     input_model = SumNumericFieldParams
     output_model = SumNumericFieldResult
 
-    def prepare_main(
-        self, ctx: OperationContext, request: SumNumericFieldParams
-    ) -> FieldValues:
+    def prepare_main(self, ctx: OperationContext, request: SumNumericFieldParams) -> FieldValues:
         from qgis.core import NULL, QgsVectorLayer
 
         layer = ctx.project.mapLayer(request.layer_id)

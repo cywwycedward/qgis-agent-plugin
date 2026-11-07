@@ -169,9 +169,7 @@ class Exploding(
     input_model = ExplodingParams
     output_model = ValueResult
 
-    def execute_main(
-        self, ctx: OperationContext, request: ExplodingParams
-    ) -> ValueResult:
+    def execute_main(self, ctx: OperationContext, request: ExplodingParams) -> ValueResult:
         CALLED.append(self.name)
         return ValueResult(value=request.value)
 
@@ -195,9 +193,7 @@ class RefusingInput(
     input_model = RefusingParams
     output_model = ValueResult
 
-    def execute_main(
-        self, ctx: OperationContext, request: RefusingParams
-    ) -> ValueResult:
+    def execute_main(self, ctx: OperationContext, request: RefusingParams) -> ValueResult:
         CALLED.append(self.name)
         return ValueResult(value=request.value)
 
@@ -243,8 +239,7 @@ class Harness:
 
     def records(self) -> list[ExecutionRecord]:
         return [
-            self.store.get(execution_id)
-            for execution_id in self.store.ids(set(ExecutionStatus))
+            self.store.get(execution_id) for execution_id in self.store.ids(set(ExecutionStatus))
         ]
 
 

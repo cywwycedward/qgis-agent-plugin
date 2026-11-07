@@ -51,9 +51,7 @@ Callback = Callable[[], None]
 # What F5 injects: called on the main thread, one turn after an accepted background
 # ``submit``, with the record still ``QUEUED``.  The adapter owns PREPARING, the
 # QgsTask submission and the completion callback; F2 owns none of that.
-BackgroundRunner = Callable[
-    ["OperationEngine", ExecutionRecord, BaseOperation, BaseModel], None
-]
+BackgroundRunner = Callable[["OperationEngine", ExecutionRecord, BaseOperation, BaseModel], None]
 
 # The second half of the same adapter: ask one task to stop.  ``cancel``, a replaced
 # project and ``shutdown`` all need it, and none may reach the global
@@ -273,9 +271,7 @@ class OperationEngine:
             policy=self._settings,
         )
 
-    def _validated_input(
-        self, operation: BaseOperation, arguments: dict[str, Any]
-    ) -> BaseModel:
+    def _validated_input(self, operation: BaseOperation, arguments: dict[str, Any]) -> BaseModel:
         """Validate the caller's arguments, never letting an exception out.
 
         Anything raised from here has already passed the control plane, so it has to
@@ -297,9 +293,7 @@ class OperationEngine:
             _LOGGER.exception("input validation for %s raised", operation.name)
             raise FrameworkError(INTERNAL_ERROR, _unexpected(error)) from error
 
-    def _run_queued(
-        self, execution_id: str, operation: BaseOperation, request: BaseModel
-    ) -> None:
+    def _run_queued(self, execution_id: str, operation: BaseOperation, request: BaseModel) -> None:
         """Run one queued main-thread call, unless it is no longer wanted."""
 
         record = self._store.get(execution_id)
@@ -372,9 +366,7 @@ class OperationEngine:
         )
 
 
-def _receipt(
-    record: ExecutionRecord, accepted: bool, reason: str | None = None
-) -> CancelReceipt:
+def _receipt(record: ExecutionRecord, accepted: bool, reason: str | None = None) -> CancelReceipt:
     return CancelReceipt(
         execution_id=record.execution_id,
         accepted=accepted,
@@ -400,8 +392,7 @@ def _paths(error: ValidationError) -> str:
     """Name the offending fields without echoing the caller's values (PRD 11.3)."""
 
     return ", ".join(
-        ".".join(str(part) for part in detail["loc"]) or "<root>"
-        for detail in error.errors()[:3]
+        ".".join(str(part) for part in detail["loc"]) or "<root>" for detail in error.errors()[:3]
     )
 
 

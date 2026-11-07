@@ -122,9 +122,7 @@ class ExecutionStore:
 
         self._prune()
         return [
-            record.execution_id
-            for record in self._records.values()
-            if record.status in statuses
+            record.execution_id for record in self._records.values() if record.status in statuses
         ]
 
     def transition(

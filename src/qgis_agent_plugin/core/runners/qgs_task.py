@@ -222,9 +222,7 @@ class OperationTaskRunner:
             self._running(store, execution_id, record)
             self._fail(store, execution_id, INTERNAL_ERROR, "the task ended without a result")
         else:
-            self._finish_results(
-                submission, self._running(store, execution_id, record), run.result
-            )
+            self._finish_results(submission, self._running(store, execution_id, record), run.result)
 
     def _abandon(self, submission: _Submission) -> None:
         """Settle a record whose completion handler broke (PRD 12.3).
@@ -339,9 +337,7 @@ class OperationTaskRunner:
             _LOGGER.exception("%s: finalize_main raised", submission.operation.name)
             self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(error))
             return
-        store.transition(
-            execution_id, ExecutionStatus.SUCCEEDED, result=serialised, progress=100
-        )
+        store.transition(execution_id, ExecutionStatus.SUCCEEDED, result=serialised, progress=100)
 
     def _progress_reported(self, task_id: int, progress: float) -> None:
         """The manager's progress signal, already delivered on the main thread."""
