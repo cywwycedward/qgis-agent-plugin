@@ -57,7 +57,7 @@
 | `TASK_SUBMISSION_FAILED` | 引擎 / 后台适配器 | 没有装后台适配器，或 `QgsTaskManager.addTask()` 返回 0（QGIS 拒绝接手） | 重试一次；持续失败说明 QGIS 任务系统有问题，`message` 里有原因类别 |
 | `STALE_PROJECT` | 后台适配器 / `finalize_main` | 任务运行期间工程被替换（`project_epoch` 变了），结果被拒绝 | 结果作废；在新工程上重新提交 |
 | `OUTPUT_VALIDATION_FAILED` | 引擎 | Operation 的返回值不符它自己声明的输出模型 | 构建缺陷，不是调用方的问题；报 bug |
-| `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常：`message` 只有 `类型名: unexpected failure`，或 `project.create` 的 `iface.newProject()` 返回 `False`，或任务结束但没有结果 | 先看本机日志里的堆栈；`INTERNAL_ERROR` 也可能是缺陷 F9 的症状（见 §5） |
+| `INTERNAL_ERROR` | 引擎 / 适配器 | 未预期异常，或状态机拒绕。`message` 是下列几种之一：`<异常类型名>: unexpected failure`（异常原文只进日志）、`QGIS did not create a new project`（`iface.newProject()` 返回 `False`）、`the task ended without a result`（`finished(false)` 且无异常、无取消）、`the completion of this execution failed`（完成回调自己抛了）、`<execution-id>: <旧状态> -> <新状态> is not a transition` 或 `<execution-id>: <状态> is final and cannot change`（`ExecutionStore` 拒绝的写入） | 先看本机日志里的堆栈；`message` 里带 execution id 的两条是状态机拒绕，属于引擎缺陷（不是调用方的问题） |
 
 补充：`unload()` 期间引擎先把每条活动后台记录写成 `CANCEL_REQUESTED`，所以卸载之后
 这些调用只会归档成 `CANCELLED` 或 `FAILED`，不会再进 `finalize_main` 去改工程（PRD 9.3.3）。
@@ -80,30 +80,11 @@
 已实测：`submit` 之后立刻 `cancel` 一个主线程调用，得到
 `{"accepted":true,"status":"CANCELLED"}`，事件循环之后仍是 `CANCELLED`。
 
-## 5. 已知缺陷：`project.create` / `project.open` 的成功路径（F9）
-
-真实 QGIS 里两个替换工程的 Operation **目前一定失败**，症状固定：
-
-```text
-FrameworkError: INTERNAL_ERROR | <execution-id>: CANCEL_REQUESTED -> SUCCEEDED is not a transition
-```
-
-- 原因：`QgsProject.read()` / `iface.newProject()` 会发 `aboutToBeCleared`，引擎把正在执行的
-  这条**主线程**记录也当成后台任务取消（`_stop_background` 没有按 strategy 过滤），
-  于是它从 `RUNNING` 变 `CANCEL_REQUESTED`，再想变 `SUCCEEDED` 就撞上状态机。
-- 现象：异常从 `run_sync` 抛给调用方，记录停在 `CANCEL_REQUESTED`。它**是非终态，但没有任何代码
-  再写它**：状态机本身允许 `CANCEL_REQUESTED -> CANCELLED/FAILED`，只是没有任务在跑、没有完成回调
-  会来；对它再 `cancel()` 只得到一条 `accepted=true` 的重复回执，状态不变。
-- 影响：`project.create`、`project.open` 的成功半边不可用；其它七个 Operation 不受影响。
-- 修复：F9（`fix/engine-background-cancel`，一行 strategy 过滤）。修复落地前，调用方应当
-  认为这两个 Operation 的“成功”路径不可用；`INVALID_CRS`、`PROJECT_REPLACE_REQUIRED`、
-  `PATH_NOT_ALLOWED`、`PROJECT_OPEN_FAILED` 这些**失败**路径照旧正常。
-
-## 6. 日志与排查
+## 5. 日志与排查
 
 - 每次状态迁移写一条标准 `logging` 记录（logger 名 `qgis_agent_plugin.core.execution_store`），
   含 `execution_id`、`operation`、`strategy`、`旧状态 -> 新状态`、耗时和错误码（PRD 11.3）。
   落到哪里由 QGIS 的日志配置决定；在 Console 里可以先 `import logging; logging.basicConfig(level=logging.INFO)`。
 - 排查顺序：`record.status` → `record.error.code` → `record.error.message` → 本机日志里的堆栈
-  （`INTERNAL_ERROR` 的 `message` 故意只有异常类型名）。
+  （`INTERNAL_ERROR` 的 `message` 故意只给类型名或固定短语，异常原文只进日志）。
 - 不要从 `message` 里找路径：路径与 provider URI 一律不回显（PRD 10.2、11.1）。

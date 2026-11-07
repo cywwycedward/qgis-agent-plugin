@@ -98,10 +98,11 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | `INTERNAL_ERROR` | `iface.newProject(promptToSaveFlag=False)` 返回 `False`；PRD 7.2 没给这种情况指定码 |
 | `INVALID_INPUT` | 未知字段 / 类型不符 / 空 `crs_authid` |
 
-成功路径会触发 `QgsProject.aboutToBeCleared`，因此 `project_epoch` 加 1，旧代数的排队调用
-立即 `CANCELLED`。**该成功路径当前有缺陷**：引擎会把正在执行的这条主线程记录也当成后台任务
-取消，导致真实 QGIS 里抛 `INTERNAL_ERROR` 且记录停在 `CANCEL_REQUESTED`。缺陷编号 F9，
-详见 `docs/ERRORS.md` §5。
+成功路径会触发 `QgsProject.aboutToBeCleared`（`iface.newProject` 会清空旧工程），因此
+`project_epoch` 加 1，旧代数的排队调用立即 `CANCELLED`。**本次调用自己不受影响**：`_stop_background`
+只对后台记录写取消请求，正在执行的主线程调用照常走到 `SUCCEEDED`（实测：`crs_authid` 被规范成
+`EPSG:3857`、`file_path: null`、`layer_count: 0`，epoch 1 → 2）。新建之后 `project.get_info` 的
+`is_dirty` 可能是 `true`（设置 CRS 就把工程标脏了），这是 QGIS 的事实，不是没保存成功。
 
 ## 3. `project.open`
 
@@ -127,10 +128,10 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 
 成功路径同样会触发 `QgsProject.aboutToBeCleared`（`read()` 会清空旧工程），所以 `project_epoch` 加 1、
-旧代数的排队调用立即 `CANCELLED`。**该成功路径当前有缺陷**：与 `project.create` 同因（缺陷 F9），
-真实 QGIS 里抛 `INTERNAL_ERROR`、记录停在 `CANCEL_REQUESTED`，本节返回字段表里的四个值在修复前拿不到。
-失败路径（`INVALID_INPUT`、`PATH_NOT_ALLOWED`、`PROJECT_REPLACE_REQUIRED`、`PROJECT_OPEN_FAILED`）
-不受影响。详见 `docs/ERRORS.md` §5。
+旧代数的排队调用立即 `CANCELLED`；**本次调用自己照常成功**（实测：打开一个含 1 个图层的工程得到
+`layer_count: 1`、`invalid_layer_count: 0`，epoch 0 → 1，记录终态 `SUCCEEDED`）。四个失败路径
+（`INVALID_INPUT`、`PATH_NOT_ALLOWED`、`PROJECT_REPLACE_REQUIRED`、`PROJECT_OPEN_FAILED`）与成功路径
+互不干扰。
 
 ## 4. `project.save`
 
@@ -317,7 +318,7 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | `EXECUTION_NOT_FOUND` | `get`/`cancel` 的 ID 不存在或已被淘汰（控制面） |
 | `TOO_MANY_EXECUTIONS` | `submit` 时排队数已达上限（实测：`max_pending=32` 时第 33 个 `submit` 得到 `FAILED`） |
 | `OUTPUT_VALIDATION_FAILED` | Operation 的返回值不合它自己声明的输出模型 |
-| `INTERNAL_ERROR` | 未预期异常；`message` 只有异常类型名，堆栈只进本机日志 |
+| `INTERNAL_ERROR` | 未预期异常；`message` 是下面几种之一（详见 `docs/ERRORS.md` §3）：`<异常类型名>: unexpected failure`、`QGIS did not create a new project`、`the task ended without a result`、`the completion of this execution failed`，或状态机拒绝的 `<id>: <旧状态> -> <新状态> is not a transition` |
 
 ## 12. 与 PRD 的差异（代码是事实）
 
@@ -327,4 +328,3 @@ spec.output_schema["required"]       # ['layer_id', 'name', 'kind', 'provider', 
 | 7.4 成功样例 `is_dirty: false` | 返回 `project.write()` 之后的真实值 | 通常情况下仍是 `false`，但这是读出来的，不是写死的 |
 | 6.1 “兼容 Pydantic v1/v2” | 只支持 v2，`pydantic_major` 恒为 2 | 已记录偏差；非 v2 的 pydantic 在插件导入时直接 `RuntimeError` |
 | 11.1 `error.details` | 字段存在但永远是 `null` | `FrameworkError` 只带 `code` + `message`，没有 details 通路 |
-| 7.2 / 7.3 成功替换工程 | 真实 QGIS 里会自取消（缺陷 F9） | 见 `docs/ERRORS.md` §5；修复前不要用 `project.create` / `project.open` 的成功路径 |

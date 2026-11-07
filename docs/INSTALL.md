@@ -141,19 +141,23 @@ F8 不做；F7 的 GUI 验收清单里有这一条）。
 
 ## 5. 开发日常
 
-| 命令 | 作用 | 实测结果（基 `74e7077`） |
+| 命令 | 作用 | 实测结果（基 `d7e18c4`，即 F9 合并后的 develop） |
 | --- | --- | --- |
-| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | `343 passed` |
+| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | `347 passed` |
 | `npm run test:verbose` | 同上，`-vv tests` | — |
 | `npm run lint` | `ruff check .` | `All checks passed!` |
 | `npm run format` | `ruff format .` | — |
 | `npm run deploy` | 镜像到 QGIS 插件目录 | 干跑见 §2 |
 
-测试不依赖 QGIS 运行环境：契约层、管线、操作和插件生命周期都能在**裸解释器**里跑（
-`qgis`/`PyQt5` 的 import 都在函数体内，`tests/test_package.py` 在子进程里强制这条规则）。
+测试集里**只有一条**需要真实的 QGIS 解释器：`tests/test_engine.py` 的
+`test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it`（它起一个 headless
+`QgsApplication` 跑真信号）。它带 `pytest.importorskip("qgis.core")`，所以在裸解释器里是 skip 而不是
+failed；其余全部用例在裸解释器里也能跑（`qgis`/`PyQt5` 的 import 都在函数体内，
+`tests/test_package.py` 在子进程里强制这条规则）。
 
 ```powershell
-& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests   # 343 passed
+& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests   # 346 passed, 1 skipped
+& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' -m pytest -q tests      # 347 passed
 ```
 
 ## 6. 排错
@@ -166,7 +170,6 @@ F8 不做；F7 的 GUI 验收清单里有这一条）。
 | 所有文件操作都 `PATH_NOT_ALLOWED` | 两个允许目录是空的（默认） | 见 §4；确认路径是绝对路径 |
 | `layer.set_visibility` 返回 `LAYER_NOT_IN_TREE` | 该图层是 `layer.add(add_to_legend=false)` 加进来的 | 用 `true` 重加，或只做 `layer.get_info` |
 | `run_sync` 报 `UNSUPPORTED_EXECUTION_MODE` | 对 `layer.sum_numeric_field` 用了 `run_sync` | 用 `submit` + `get` |
-| `project.create` / `project.open` 抛 `INTERNAL_ERROR ... CANCEL_REQUESTED -> SUCCEEDED` | 已知缺陷 F9 | 见 `docs/ERRORS.md` §5；等修复 |
 
 ## 7. 卸载
 
@@ -182,7 +185,7 @@ F8 不做；F7 的 GUI 验收清单里有这一条）。
 | 文件 | 内容 |
 | --- | --- |
 | `docs/OPERATIONS.md` | 九个 Operation 的参数/返回/错误码契约 |
-| `docs/ERRORS.md` | 25 个错误码、`cancel` 回执、已知缺陷 |
+| `docs/ERRORS.md` | 25 个错误码、`cancel` 回执、日志与排查 |
 | `docs/CONSOLE.md` | Python Console 样例，标注实测状态 |
 | `docs/qgis-sync-async.md` | QGIS 3.44 的线程模型，以及本插件怎么用它 |
 | `docs/QGIS_3.44_Agent_Operation_Framework_MVP_PRD_v1.0.md` | 规格基线（PRD，不改） |

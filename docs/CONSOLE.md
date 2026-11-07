@@ -247,15 +247,33 @@ open 不 discard -> FAILED  PROJECT_REPLACE_REQUIRED | ... pass discard_current=
 “缺失文件”归 `PATH_NOT_ALLOWED` 而不是 `PROJECT_OPEN_FAILED`：路径策略在读之前就要求文件存在。
 `PROJECT_OPEN_FAILED` 的 `message` 明说当前工程可能已经改变——不承诺回滚。
 
-`project.open(discard_current=true)` 与 `project.create` 的**成功**路径当前有缺陷（F9）：
-
-```text
-FrameworkError: INTERNAL_ERROR | <id>: CANCEL_REQUESTED -> SUCCEEDED is not a transition
+```python
+engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz", "discard_current": True})
+engine.run_sync("project.create", {"crs_authid": "epsg:3857", "discard_current": True})
 ```
 
-**未实测**：这两个 Operation 的成功路径（F9 修复后再补）。`project.create` 还会用
-`iface.newProject(promptToSaveFlag=False)`，headless 里只能用替身；它的失败路径都实测过
-（`INVALID_CRS`、`PROJECT_REPLACE_REQUIRED`，见 §9）。缺陷说明见 `docs/ERRORS.md` §5。
+已实测（`project.create` 是“已实测（GUI 未跑）”：headless 里没有 `iface.newProject()`，用等价替身
+“`QgsProject.instance().clear()` + 返回 `True`”；`project.open` 不经过 `iface`）：
+
+```text
+open demo.qgz   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
+                               "invalid_layer_count": 0}   ；lifecycle epoch 0 -> 1，记录 epoch 仍是 0
+create          -> SUCCEEDED  {"crs_authid": "EPSG:3857", "file_path": null, "layer_count": 0}
+                               ；lifecycle epoch 1 -> 2，记录 epoch 仍是 1
+create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dirty": true,
+                        "layer_count": 0, "project_epoch": 2}
+```
+
+三条要注意的事：
+
+- 替换工程会让 `project_epoch` 加 1（旧代数的排队调用因此 `CANCELLED`），但**记录里保存的是接受调用
+  时的那一代**，所以刚打开完的记录写着 `project_epoch: 0`，下一次调用才是 `1`、`2`。
+- `crs_authid` 为 `""` 不是错误：`QgsProject` 没有设 CRS 时就是这个值；`layer_count` 是打开的工程
+  里实际注册的图层数。
+- `create` 之后 `is_dirty` 是 `true`：新建工程设了 CRS 就会变脏，不代表没建成功。
+
+四个失败路径照旧有效（`open` 缺失文件归 `PATH_NOT_ALLOWED`、损坏文件 `PROJECT_OPEN_FAILED`、
+不传 `discard_current` 是 `PROJECT_REPLACE_REQUIRED`，`create` 的无效 CRS 是 `INVALID_CRS`）。
 
 ## 9. 常见错误速览
 
@@ -284,8 +302,7 @@ FrameworkError: INTERNAL_ERROR | <id>: CANCEL_REQUESTED -> SUCCEEDED is not a tr
 | 样例 | 为什么没跑 |
 | --- | --- |
 | `iface.agent_engine` / `iface.agent_registry` 本身 | 需要 QGIS Desktop 的 `iface`；headless 里用同一套类手工装配，`initGui` 的发布逻辑由单测覆盖 |
-| `project.create` 成功路径 | 需要真实 `iface.newProject()`，且被 F9 挡住 |
-| `project.open` 成功路径 | 被 F9 挡住（headless 探针里把“取消活动后台任务”换成只针对后台记录后，同一调用 SUCCEEDED，epoch 0 → 1） |
+| `project.create` 的 `iface.newProject(promptToSaveFlag=False)` 这一步 | 只有 GUI 里有它；headless 里用等价替身（`QgsProject.instance().clear()` + 返回 `True`），其余逻辑已实测 |
 | 运行中后台任务的 `CANCEL_REQUESTED -> CANCELLED` | 现有后台 Operation 太快，构造不出稳定窗口 |
 | 父级组隐藏时的 `visible=true / effective_visible=false` | 需要 GUI 图层树里的组；单测覆盖，Console 未跑 |
 | 多个后台任务排队（`max_active_background=2` 的 FIFO） | 探针里三次 9000 要素求和都在三轮事件循环内跑完，看不到第三个停在 `QUEUED`；单测覆盖该路径 |
