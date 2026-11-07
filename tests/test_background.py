@@ -11,6 +11,7 @@ and the real ``QgsTaskManager`` are the acceptance run's business.
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from typing import Any
@@ -321,6 +322,34 @@ def test_a_field_that_is_not_numeric_is_invalid_field_type() -> None:
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INVALID_FIELD_TYPE
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_value_is_refused_rather_than_put_in_the_record(value: float) -> None:
+    # A GeoPackage/SQLite DOUBLE can hold NaN and Infinity and QGIS hands it back as
+    # a float.  The sum then is NaN, the result model accepts it, and the record is
+    # no longer JSON an RFC 8259 parser reads (measured: allow_nan=False raises).
+    harness = harness_with(make_layer([(1.0,), (value,), (2.0,)]))
+
+    record = settled(harness, submit_sum(harness))
+
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == INVALID_FIELD_TYPE
+    assert "non-finite" in record.error.message
+    assert record.result is None
+    assert harness.tasks == []
+
+
+def test_a_sum_of_finite_values_is_still_written_and_parsed_strictly() -> None:
+    # The sibling of the case above: the refusal may not cost a normal sum its record.
+    harness = harness_with(make_layer([(1.5,), (2.5,)]))
+
+    record = settled(harness, submit_sum(harness))
+
+    assert record.status is SUCCEEDED
+    assert record.result is not None and record.result["total"] == 4.0
+    assert json.loads(json.dumps(record.result, allow_nan=False))["total"] == 4.0
 
 
 def test_more_features_than_the_limit_is_refused_not_truncated() -> None:
