@@ -10,10 +10,10 @@ worker reports progress through ``QgsTask.setProgress`` and the adapter reads it
 back from the manager's ``progressChanged`` signal, which Qt delivers on the main
 thread; the store is written at most once per 100 ms, except for the last value
 before the task ends.  Nothing may raise into a Qt slot or into the C++ task
-framework, so the worker's exception is captured as a diagnostic and both callbacks
-of the task shell are guarded.  And a ``QgsTask`` is never kept: QGIS deletes its
-C++ side as soon as the task ends, so only its task id is held while it lives and
-nothing of it survives into the record.
+framework, so the worker's exception is captured as a diagnostic and every Qt entry
+point of the adapter is guarded, the posted drain included.  And a ``QgsTask`` is
+never kept: QGIS deletes its C++ side as soon as the task ends, so only its task id
+is held while it lives and nothing of it survives into the record.
 
 A slot freed by a completion is filled one event-loop turn later, through the same
 poster the engine uses.  Submitting a task from inside another task's ``finished()``
@@ -207,7 +207,7 @@ class OperationTaskRunner:
             _LOGGER.exception("completion of %s failed", execution_id)
             self._abandon(submission, "the completion of this execution failed")
         finally:
-            self._post(self._drain)
+            self._post_drain()
 
     def _complete(
         self, submission: _Submission, run: OperationRun, task: Any, succeeded: bool
@@ -314,6 +314,21 @@ class OperationTaskRunner:
         self._active[execution_id] = submission
         store.transition(execution_id, ExecutionStatus.SCHEDULED)
 
+    def _post_drain(self) -> None:
+        """Post the drain behind the guard every other Qt slot here has.
+
+        The drain runs as a callback of its own now, so the ``finished`` slot that
+        used to catch its exceptions is no longer on its stack (A9).
+        """
+
+        def drain() -> None:
+            try:
+                self._drain()
+            except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 8.4, 11.3)
+                _LOGGER.exception("the background queue could not be drained")
+
+        self._post(drain)
+
     def _drain(self) -> None:
         """Start waiting calls while a slot is free, in submission order (PRD 8.5).
 
@@ -332,7 +347,14 @@ class OperationTaskRunner:
                     continue
             except FrameworkError:
                 continue
-            self._start(head)
+            try:
+                self._start(head)
+            except Exception as error:  # noqa: BLE001 - a drain defect may not stop the turn
+                _LOGGER.exception("%s: the drain could not start it", head.execution_id)
+                if head.execution_id not in self._active:
+                    # Nothing owns the popped call, so settling it is this loop's job;
+                    # an active entry is released by the completion of its own task.
+                    self._abandon(head, _unexpected(error))
 
     def _finish_results(self, submission: _Submission, record: Any, output: Any) -> None:
         """Validate the project generation, finalise, and write the result (PRD 9.2)."""

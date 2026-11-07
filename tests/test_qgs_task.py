@@ -566,6 +566,40 @@ def test_a_dependency_that_raises_on_the_drain_path_still_ends_the_call() -> Non
     assert record.error.code == INTERNAL_ERROR
 
 
+def test_a_drain_that_breaks_settles_that_call_and_starts_the_next(
+    counting: Counting, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness = Harness(counting)
+    harness.submit(counting.name, {"amount": 1})
+    harness.submit(counting.name, {"amount": 2})
+    broken = harness.submit(counting.name, {"amount": 3})
+    after = harness.submit(counting.name, {"amount": 4})
+    assert harness.record(after).status is QUEUED
+    store = harness.engine._store
+    original = store.transition
+
+    def refusing(execution_id: str, status: Any = None, **values: Any) -> ExecutionRecord:
+        if execution_id == broken.execution_id and status is ExecutionStatus.PREPARING:
+            raise RuntimeError("the store refused the write")
+        return original(execution_id, status=status, **values)
+
+    store.transition = refusing  # type: ignore[method-assign]
+
+    with caplog.at_level("ERROR"):
+        # The posted drain is a Qt slot of its own, so it needs its own guard (A9).
+        harness.run(harness.tasks[0])
+
+    # The popped call may not be left in QUEUED holding a slot nothing would free,
+    # and the break may not stop the drain from starting what is behind it.
+    settled = harness.record(broken)
+    assert settled.status is FAILED
+    assert settled.error is not None
+    assert settled.error.code == INTERNAL_ERROR
+    assert harness.record(after).status is SCHEDULED
+    assert len(harness.runner._active) == 2
+    assert "could not start it" in caplog.text
+
+
 # --- the progress window -----------------------------------------------------
 
 
