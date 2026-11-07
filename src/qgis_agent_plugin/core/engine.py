@@ -15,6 +15,7 @@ that seam.
 
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from collections.abc import Callable
@@ -55,6 +56,8 @@ BackgroundRunner = Callable[
 ]
 
 _QUEUED = frozenset({ExecutionStatus.QUEUED})
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class OperationEngine:
@@ -133,9 +136,14 @@ class OperationEngine:
         return self._store.get(execution_id)
 
     def get(self, execution_id: str) -> ExecutionRecord:
-        """One execution's snapshot; a missed or evicted id is ``EXECUTION_NOT_FOUND``."""
+        """One execution's snapshot; a missed or evicted id is ``EXECUTION_NOT_FOUND``.
 
-        self._require_open()
+        History stays readable after ``shutdown``: the plugin is gone, not the
+        session's records (PRD 6.6), so this asks for the main thread but not for
+        an open engine.
+        """
+
+        self._require_main_thread()
         return self._store.get(execution_id)
 
     def cancel(self, execution_id: str) -> CancelReceipt:
@@ -241,12 +249,22 @@ class OperationEngine:
     def _start_background(
         self, execution_id: str, operation: BaseOperation, request: BaseModel
     ) -> None:
-        """Hand an accepted background call to the installed adapter (F5)."""
+        """Hand an accepted background call to the installed adapter (F5).
+
+        This is the task-submission callback PRD 11.3 requires the engine to guard:
+        an adapter that raises must not reach the Qt slot, and the call must not be
+        left queued forever.
+        """
 
         runner = self._background_runner
         if runner is None or not self._is_live(execution_id):
             return
-        runner(self, self._store.get(execution_id), operation, request)
+        try:
+            runner(self, self._store.get(execution_id), operation, request)
+        except Exception as error:  # noqa: BLE001 - a submission callback may not raise
+            _LOGGER.exception("background runner failed for %s", execution_id)
+            if self._is_live(execution_id):
+                self._failed(execution_id, INTERNAL_ERROR, _unexpected(error))
 
     def _execute(
         self, record: ExecutionRecord, operation: BaseOperation, request: BaseModel
@@ -264,6 +282,7 @@ class OperationEngine:
             # An operation reports a business failure with a PRD 11.2 code.
             return self._failed(execution_id, error.code, error.message)
         except Exception as error:  # noqa: BLE001 - an operation's bug is a FAILED record
+            _LOGGER.exception("operation %s raised", operation.name)
             return self._failed(execution_id, INTERNAL_ERROR, _unexpected(error))
         try:
             result = _serialised_output(operation, output)
@@ -315,4 +334,11 @@ def _paths(error: ValidationError) -> str:
 
 
 def _unexpected(error: Exception) -> str:
-    return f"{type(error).__name__}: {error}"
+    """A caller-safe message: the type only, never the exception's own text.
+
+    An exception text can carry a path or a provider URI, and a record is handed to
+    the caller, so the text goes to the local log and not into ``error.message``
+    (PRD 11.1, 11.3).
+    """
+
+    return f"{type(error).__name__}: unexpected failure"

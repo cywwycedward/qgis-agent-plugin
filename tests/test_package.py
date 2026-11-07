@@ -22,11 +22,17 @@ import sys
 
 import qgis_agent_plugin
 from qgis_agent_plugin import operations, plugin
-from qgis_agent_plugin.core import config, contracts, models, registry, security
+from qgis_agent_plugin.core import config, context, contracts, engine, execution_store
+from qgis_agent_plugin.core import models, registry, security
+from qgis_agent_plugin.core.runners import main_thread
 
 assert callable(qgis_agent_plugin.classFactory)
 assert callable(plugin.classFactory)
 assert callable(operations.register_all)
+assert callable(context.require_main_thread)
+assert callable(engine.OperationEngine)
+assert callable(execution_store.ExecutionStore)
+assert callable(main_thread.MainThreadRunner)
 leaked = sorted(
     name
     for name in sys.modules

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -246,6 +248,30 @@ def test_a_finished_record_expires_after_its_ttl() -> None:
     with pytest.raises(FrameworkError) as caught:
         store.get("old")
     assert caught.value.code == EXECUTION_NOT_FOUND
+
+
+def test_reading_a_finished_record_past_its_ttl_is_not_found() -> None:
+    clock = Clock()
+    store = ExecutionStore(Settings(terminal_ttl_seconds=1800), clock=clock)
+    store.create(succeeded("old"))
+
+    # Only the clock moves: no other record finishes, so retention has to be applied
+    # on read as well (PRD 8.5, AT-24).
+    clock.advance(1800)
+    assert store.ids(TERMINAL_STATUSES) == []
+    with pytest.raises(FrameworkError) as caught:
+        store.get("old")
+    assert caught.value.code == EXECUTION_NOT_FOUND
+
+
+def test_the_finish_log_carries_the_duration_and_the_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = ExecutionStore(Settings())
+    with caplog.at_level("INFO"):
+        store.create(make_record(RUNNING))
+        move(store, "x", FAILED)
+    assert re.search(r"-> FAILED \(\d+\.\d{3}s, INTERNAL_ERROR\)", caplog.text)
 
 
 def test_ids_lists_only_the_requested_statuses() -> None:

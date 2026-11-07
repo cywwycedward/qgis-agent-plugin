@@ -7,6 +7,7 @@ thread rule is checked: nothing here needs QGIS or Qt (AT-04, AT-09, AT-24, AT-2
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any, cast
@@ -20,6 +21,7 @@ from qgis_agent_plugin.core.contracts import (
     BackgroundOperationMixin,
     BaseOperation,
     BaseQuery,
+    ExecutionStrategy,
     MainThreadOperationMixin,
     OperationContext,
     TaskControl,
@@ -45,6 +47,7 @@ from qgis_agent_plugin.core.models import (
     Params,
 )
 from qgis_agent_plugin.core.registry import OperationRegistry
+from qgis_agent_plugin.core.runners.main_thread import MainThreadRunner
 
 QUEUED = ExecutionStatus.QUEUED
 PREPARING = ExecutionStatus.PREPARING
@@ -389,20 +392,26 @@ def test_a_call_from_another_thread_is_wrong_thread() -> None:
     assert CALLED == []
 
 
-def test_a_closed_engine_refuses_new_calls() -> None:
+def test_a_closed_engine_refuses_new_work() -> None:
     harness = Harness(Echo())
     record = harness.engine.submit("test.echo", {})
     harness.engine.shutdown()
     calls = (
         lambda: harness.engine.run_sync("test.echo", {}),
         lambda: harness.engine.submit("test.echo", {}),
-        lambda: harness.engine.get(record.execution_id),
         lambda: harness.engine.cancel(record.execution_id),
     )
     for call in calls:
         with pytest.raises(FrameworkError) as caught:
             call()
         assert caught.value.code == ENGINE_CLOSING
+
+
+def test_the_history_is_still_readable_after_shutdown() -> None:
+    harness = Harness(Echo())
+    record = harness.engine.run_sync("test.echo", {})
+    harness.engine.shutdown()
+    assert harness.engine.get(record.execution_id).status is SUCCEEDED
 
 
 def test_shutdown_cancels_everything_that_never_started() -> None:
@@ -438,12 +447,13 @@ def test_an_operation_that_refuses_keeps_its_own_error_code() -> None:
     assert record.error.message == "path is not an allowed local file"
 
 
-def test_an_unexpected_exception_is_internal_error_without_a_traceback() -> None:
+def test_an_unexpected_exception_is_internal_error_without_the_exception_text() -> None:
     record = Harness(Breaking()).engine.run_sync("test.break", {})
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INTERNAL_ERROR
-    assert record.error.message == "RuntimeError: boom"
+    assert record.error.message == "RuntimeError: unexpected failure"
+    assert "boom" not in record.error.message
 
 
 def test_a_queued_call_is_cancelled_when_the_project_was_replaced() -> None:
@@ -474,6 +484,42 @@ def test_the_engine_hands_out_snapshots_only() -> None:
     assert fresh.result == {"value": "hello"}
 
 
-def test_an_operation_is_dispatched_by_its_name_and_kind() -> None:
-    harness = Harness(Echo())
-    assert harness.registry.get("test.echo").kind is OperationKind.QUERY
+def test_an_accepted_call_records_the_operation_it_ran() -> None:
+    record = Harness(Echo()).engine.run_sync("test.echo", {})
+    assert record.operation == "test.echo"
+    assert record.kind is OperationKind.QUERY
+    assert record.strategy is ExecutionStrategy.MAIN_THREAD
+
+
+def test_a_background_adapter_that_raises_ends_the_call_as_failed() -> None:
+    def adapter(
+        engine: OperationEngine, record: ExecutionRecord, operation: BaseOperation, request: Any
+    ) -> None:
+        raise RuntimeError("adapter blew up")
+
+    harness = Harness(Sum(), background_runner=adapter)
+    record = harness.engine.submit("test.sum", {})
+
+    harness.queue.tick()
+    failed = harness.store.get(record.execution_id)
+    assert failed.status is FAILED
+    assert failed.error is not None
+    assert failed.error.code == INTERNAL_ERROR
+    assert failed.error.message == "RuntimeError: unexpected failure"
+
+
+def test_a_queued_callback_that_raises_is_logged_and_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    posted: list[Callable[[], None]] = []
+    runner = MainThreadRunner(lambda execution_id: True, post=posted.append)
+
+    def boom() -> None:
+        raise RuntimeError("slot blew up")
+
+    runner.post("x", boom)
+    with caplog.at_level(logging.ERROR):
+        posted[0]()
+    assert "main-thread callback for x failed" in caplog.text
+    # The stack went to the log instead of into the Qt slot.
+    assert "slot blew up" in caplog.text

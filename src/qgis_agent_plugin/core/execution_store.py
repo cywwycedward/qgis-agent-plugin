@@ -7,9 +7,8 @@ rather than in the engine, because this is the one place a status is written: an
 edge the table does not list is a defect, and hiding it would leave a record in a
 state nobody can explain (PRD 8.2, 12.3).
 
-Retention is deliberately lazy: a finished record is dropped when the next one
-finishes, not by a timer, because nothing in the MVP reads the store while no
-execution is running.
+Retention is applied on access and whenever a record finishes, never by a timer:
+reading a record past its TTL has to look like the record is gone (PRD 8.5, AT-24).
 """
 
 from __future__ import annotations
@@ -17,6 +16,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Collection
+from datetime import datetime
 from typing import Any
 
 from .config import Settings
@@ -76,8 +76,9 @@ class ExecutionStore:
     """Activity reads and terminal history, capped and snapshotted (PRD 6.6, 8.5)."""
 
     def __init__(self, settings: Settings, *, clock: Callable[[], float] | None = None) -> None:
-        # shortcut: the TTL is applied when the next record finishes, not on its own
-        # timer; upgrade when an idle session has to report an expiry.
+        # shortcut: retention runs on access and on each finished record, so an expired
+        # record still occupies memory until something touches the store; upgrade when
+        # an idle session has to shrink on its own.
         self._max_terminal_records = settings.max_terminal_records
         self._terminal_ttl_seconds = settings.terminal_ttl_seconds
         self._clock = clock or time.monotonic
@@ -101,8 +102,13 @@ class ExecutionStore:
         return record.model_copy(deep=True)
 
     def get(self, execution_id: str) -> ExecutionRecord:
-        """An independent copy of the record, or ``EXECUTION_NOT_FOUND``."""
+        """An independent copy of the record, or ``EXECUTION_NOT_FOUND``.
 
+        Retention is applied first, so a record read past its TTL is already gone
+        instead of being returned one last time (PRD 8.5, AT-24).
+        """
+
+        self._prune()
         try:
             record = self._records[execution_id]
         except KeyError:
@@ -114,6 +120,7 @@ class ExecutionStore:
     def ids(self, statuses: Collection[ExecutionStatus]) -> list[str]:
         """The ids of every retained record in one of ``statuses``, oldest first."""
 
+        self._prune()
         return [
             record.execution_id
             for record in self._records.values()
@@ -182,7 +189,7 @@ class ExecutionStore:
             record.strategy,
             current.status,
             record.status,
-            f" ({record.error.code})" if record.error else "",
+            _log_details(record),
         )
         return record.model_copy(deep=True)
 
@@ -200,3 +207,22 @@ class ExecutionStore:
     def _forget(self, execution_id: str) -> None:
         self._records.pop(execution_id, None)
         self._terminal_at.pop(execution_id, None)
+
+
+def _log_details(record: ExecutionRecord) -> str:
+    """Elapsed time and error code for the last transition (PRD 11.3)."""
+
+    details = [
+        f"{_elapsed_seconds(record):.3f}s" if record.finished_at is not None else "",
+        record.error.code if record.error is not None else "",
+    ]
+    names = [detail for detail in details if detail]
+    return f" ({', '.join(names)})" if names else ""
+
+
+def _elapsed_seconds(record: ExecutionRecord) -> float:
+    """How long the call took, read from its own wall-clock stamps."""
+
+    created = datetime.fromisoformat(record.created_at)
+    finished = datetime.fromisoformat(record.finished_at or record.created_at)
+    return (finished - created).total_seconds()
