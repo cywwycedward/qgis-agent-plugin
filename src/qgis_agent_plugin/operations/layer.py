@@ -125,16 +125,19 @@ def layer_source_uri(source: Path, sub_layer: str | None) -> str:
 
     The path has been through ``resolve_path``, so it is a real local file and no
     untrusted string is being assembled here.  A sub-layer still needs the ogr
-    provider's own encoder: the OGR URI is ``path|layername=name``, and building
-    that by hand would let a ``|`` or a space in the path change its meaning.
+    provider's own encoder: how its URI joins a path and a layer name, and how it
+    escapes each part, is the provider's rule -- re-deriving the
+    ``path|layername=name`` shape by hand is a guess about that rule.
     """
 
     if sub_layer is None:
         return str(source)
     from qgis.core import QgsProviderRegistry
 
-    return QgsProviderRegistry.instance().providerMetadata("ogr").encodeUri(
-        {"path": str(source), "layerName": sub_layer}
+    return (
+        QgsProviderRegistry.instance()
+        .providerMetadata("ogr")
+        .encodeUri({"path": str(source), "layerName": sub_layer})
     )
 
 

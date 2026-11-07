@@ -345,9 +345,7 @@ def test_a_path_outside_the_allowed_roots_is_refused(
     assert project.mapLayers() == {}
 
 
-def test_a_source_qgis_cannot_load_is_invalid_layer(
-    fake_qgis: FakeQgis, data_root: Path
-) -> None:
+def test_a_source_qgis_cannot_load_is_invalid_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     fake_qgis.valid = False
     project = FakeProject()
     code = refuse(
@@ -377,14 +375,13 @@ def test_a_vector_source_is_added_through_ogr_without_a_sub_layer(
     assert result.provider == "ogr"
     assert result.crs_authid == "EPSG:4326"
     assert built.source_uri == str(source.resolve())
+    assert built.provider == "ogr"
     assert fake_qgis.encoded == []
     assert project.layers[result.layer_id] is built
     assert project.added == [(built, True)]
 
 
-def test_a_sub_layer_uri_comes_from_the_ogr_encoder(
-    fake_qgis: FakeQgis, data_root: Path
-) -> None:
+def test_a_sub_layer_uri_comes_from_the_ogr_encoder(fake_qgis: FakeQgis, data_root: Path) -> None:
     project = FakeProject()
     source = make_source(data_root, "roads with space.gpkg")
     result = ops.LayerAdd().execute_main(
@@ -408,9 +405,11 @@ def test_a_raster_source_is_added_through_gdal(fake_qgis: FakeQgis, data_root: P
         ops.LayerAddParams(**add_params(kind="raster", source_path=str(source))),
     )
 
+    built = fake_qgis.constructed[0]
     assert result.kind == "raster"
     assert result.provider == "gdal"
-    assert fake_qgis.constructed[0].source_uri == str(source.resolve())
+    assert built.source_uri == str(source.resolve())
+    assert built.provider == "gdal"
     assert fake_qgis.encoded == []
 
 
@@ -446,9 +445,7 @@ def test_layers_are_listed_in_id_order(fake_qgis: FakeQgis, data_root: Path) -> 
     for layer_id in ("zzz", "aaa", "mmm"):
         project.layers[layer_id] = make_layer(fake_qgis, layer_id)
 
-    result = ops.LayerList().execute_main(
-        make_context(project, data_root), ops.LayerListParams()
-    )
+    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
     assert [summary.layer_id for summary in result.layers] == ["aaa", "mmm", "zzz"]
 
 
@@ -459,9 +456,7 @@ def test_a_layer_without_a_tree_node_has_no_visibility(
     layer = make_layer(fake_qgis, "untreed")
     project.layers[layer.id()] = layer
 
-    result = ops.LayerList().execute_main(
-        make_context(project, data_root), ops.LayerListParams()
-    )
+    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
     summary = result.layers[0]
     assert summary.in_layer_tree is False
     assert summary.visible is None
@@ -477,9 +472,7 @@ def test_a_hidden_parent_group_keeps_own_and_effective_visibility_apart(
     project.layers[layer.id()] = layer
     project.root.nodes[layer.id()] = FakeNode(parent=FakeGroup(checked=False))
 
-    result = ops.LayerList().execute_main(
-        make_context(project, data_root), ops.LayerListParams()
-    )
+    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
     summary = result.layers[0]
     assert summary.in_layer_tree is True
     assert summary.visible is True
@@ -493,9 +486,7 @@ def test_a_layer_that_is_neither_vector_nor_raster_is_other(
     project.layers["plugin-1"] = FakeLayer("plugin-1", "annotations", provider="custom", authid="")
     project.root.nodes["plugin-1"] = FakeNode()
 
-    result = ops.LayerList().execute_main(
-        make_context(project, data_root), ops.LayerListParams()
-    )
+    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
     summary = result.layers[0]
     assert summary.kind == "other"
     assert summary.crs_authid == ""
@@ -563,9 +554,7 @@ def test_set_visibility_refuses_a_layer_without_a_tree_node(
     assert code == LAYER_NOT_IN_TREE
 
 
-def test_setting_the_same_state_changes_nothing(
-    fake_qgis: FakeQgis, data_root: Path
-) -> None:
+def test_setting_the_same_state_changes_nothing(fake_qgis: FakeQgis, data_root: Path) -> None:
     project = FakeProject()
     layer = make_layer(fake_qgis, "roads")
     project.layers[layer.id()] = layer
@@ -581,9 +570,7 @@ def test_setting_the_same_state_changes_nothing(
     assert (result.visible, result.effective_visible) == (True, True)
 
 
-def test_setting_a_new_state_toggles_only_that_node(
-    fake_qgis: FakeQgis, data_root: Path
-) -> None:
+def test_setting_a_new_state_toggles_only_that_node(fake_qgis: FakeQgis, data_root: Path) -> None:
     project = FakeProject()
     layer = make_layer(fake_qgis, "roads")
     project.layers[layer.id()] = layer
