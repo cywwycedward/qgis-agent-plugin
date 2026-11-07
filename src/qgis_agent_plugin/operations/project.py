@@ -53,13 +53,15 @@ PROJECT_SUFFIXES = (".qgs", ".qgz")
 # members that expand to gigabytes.  Real project files are far smaller.
 MAX_PROJECT_BYTES = 16 * 1024 * 1024
 
-# An XML nesting depth above this is refused before ``read()``.  ``QgsProject.read()``
-# parses the project recursively; on this machine (QGIS 3.44.13, Windows x64, default
-# stack) 5500 nested elements still opened and 6000 killed the process with 0xC00000FD
-# (measured, one probe per depth).  100 nested layer-tree groups -- a real project
-# QGIS writes -- are depth 105, so this is ten times a project QGIS writes and five
-# times below the smallest depth that was measured to crash.
-MAX_PROJECT_DEPTH = 1000
+# An XML nesting depth above this is refused before ``read()``.  The bound is set by
+# time, not by the crash: ``QgsProject.read()`` parses the project recursively and its
+# cost grows faster than the depth (measured on QGIS 3.44.13, Windows x64: 200 nested
+# layer-tree groups 0.28 s, 600 groups 8.84 s, 900 groups 30.11 s -- while a flat 4.2 MB
+# project read in 0.14 s, so those 30 s are the depth).  100 nested groups, a real
+# project QGIS writes, are depth 105; 256 keeps 2.4 times that and about half a second
+# by the measured curve.  5500 levels still opened and 6000 killed the process with
+# 0xC00000FD, but a file that merely takes 30 s has stopped the main thread already.
+MAX_PROJECT_DEPTH = 256
 
 # The parser is asked about at most this many tags.  Every element has one start tag,
 # so ``bytes.count(b"<")`` is an upper bound on the element count: one memchr pass
@@ -68,6 +70,13 @@ MAX_PROJECT_DEPTH = 1000
 # measured projects -- so this bound leaves a real project under it; tag spam is
 # refused by the count and never walked.
 MAX_PROJECT_TAGS = 400_000
+
+# The most members a ``.qgz`` may hold.  The byte budget counts decompressed bytes, so
+# an empty member costs nothing there -- but every member costs one ``ZipFile.open()``:
+# 100000 empty members in a 10.4 MB archive took 1.75 s (measured), linear in the count,
+# and the archive's own size is never checked.  A project archive is a ``.qgs`` and its
+# attachments, not thousands of entries.
+MAX_ARCHIVE_MEMBERS = 1000
 
 # What ``QgsProject.read()`` does with a ``.qgz``: it unpacks the whole archive, so a
 # member it cannot extract is not a member the scan may skip.  Encrypted members and
@@ -328,7 +337,14 @@ def _project_documents(path: Path) -> list[bytes]:
     documents: list[bytes] = []
     total = 0
     with zipfile.ZipFile(path) as archive:
-        for member in archive.infolist():
+        members = archive.infolist()
+        if len(members) > MAX_ARCHIVE_MEMBERS:
+            raise FrameworkError(
+                PROJECT_OPEN_FAILED,
+                f"the project archive has more than {MAX_ARCHIVE_MEMBERS} members; "
+                "it was not opened",
+            )
+        for member in members:
             if member.flag_bits & _ZIP_ENCRYPTED or member.compress_type not in _UNPACKABLE:
                 raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED)
             kept = bytearray() if member.filename.lower().endswith(".qgs") else None
@@ -367,6 +383,10 @@ def _scan_project_xml(text: bytes) -> None:
 
     if b"\x00" in text:
         raise FrameworkError(PATH_NOT_ALLOWED, "the project file is not UTF-8; it was not opened")
+    if _declares_entities(text):
+        raise FrameworkError(
+            PATH_NOT_ALLOWED, "the project file declares XML entities; it was not opened"
+        )
     if text.count(b"<") > MAX_PROJECT_TAGS:
         raise FrameworkError(
             PROJECT_OPEN_FAILED,
@@ -374,6 +394,12 @@ def _scan_project_xml(text: bytes) -> None:
         )
 
     depth = 0
+    open_datasources = 0
+    # The element that ended at the previous event.  The text after its closing tag
+    # -- its ``tail``, where ``<datasource><x/>/vsicurl/…</datasource>`` keeps the URI
+    # QGIS reads -- only arrives with the next parse event, and ``clear()`` drops it,
+    # so that element is checked one event later, before it is dropped.
+    pending: tuple[ET.Element, str] | None = None
     try:
         for event, element in ET.iterparse(io.BytesIO(text), events=("start", "end")):
             if event == "start":
@@ -384,39 +410,91 @@ def _scan_project_xml(text: bytes) -> None:
                         "the project file nests deeper than "
                         f"{MAX_PROJECT_DEPTH} levels; it was not opened",
                     )
+                if _local_name(element.tag) == "datasource":
+                    open_datasources += 1
                 continue
             depth -= 1
-            # An element's own text is complete when it ends; its children were
-            # already answered when they ended, so the subtree can be dropped here.
-            _refuse_if_remote_text(element)
-            element.clear()
+            name = _local_name(element.tag)
+            if name == "datasource":
+                open_datasources -= 1
+            # QDomElement::text() is the whole subtree's text, so the datasource checks
+            # apply to everything a datasource holds as well.
+            carrier = "datasource" if name == "datasource" or open_datasources else ""
+            _refuse_if_remote_text(element.text, carrier)
+            if pending is not None:
+                _refuse_if_remote_text(pending[0].tail, pending[1])
+                pending[0].clear()
+            pending = (element, carrier)
     except ET.ParseError:
         raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
 
 
-def _refuse_if_remote_text(element: ET.Element) -> None:
-    """Refuse an element whose text would make ``read()`` reach the network.
+def _declares_entities(text: bytes) -> bool:
+    """Whether the file declares XML entities, which expat expands before any budget.
 
-    ``datasource`` is the element QGIS takes a layer's source from, whatever its
-    namespace or case; the markers are also asked of every other element's text, so
-    renaming the carrier does not put the URI past the scan.  The parser has decoded
-    character references by now, so ``&#47;vsicurl&#47;`` reads as the path it names.
+    An internal subset is expanded while the file is parsed: a 1 MiB entity read 50
+    times made a 1 MiB project peak at 100 MiB (measured), and 8 MiB read 90 times
+    peaked at 1440 MiB -- while the tag count, the depth and the file size all stay
+    small.  QGIS writes ``<!DOCTYPE qgis PUBLIC '…' 'SYSTEM'>``, which has no ``[``,
+    so this refuses no project QGIS writes.
     """
 
-    text = element.text
+    if b"<!ENTITY" in text:
+        return True
+    start = text.find(b"<!DOCTYPE")
+    if start < 0:
+        return False
+    bracket = text.find(b"[", start)
+    end = text.find(b">", start)
+    return bracket >= 0 and (end < 0 or bracket < end)
+
+
+def _refuse_if_remote_text(text: str | None, name: str) -> None:
+    """Refuse text that would make ``read()`` reach the network.
+
+    ``datasource`` is the element QGIS takes a layer's source from, whatever its
+    namespace or case, and the whole element text is the source -- so a provider URI
+    with a ``://`` inside it is found there too.  Another element's text is not a
+    source QGIS reads: a layer's metadata holds the dataset's own DOI or URL, and
+    asking every element for ``://`` refused every project carrying one (A6 #3).
+    ``/vsi`` and a UNC prefix are asked of every element, so renaming the carrier
+    still does not put one past the scan.  The parser has decoded character references
+    by now, so ``&#47;vsicurl&#47;`` reads as the path it names.
+    """
+
     if not text:
         return
     stripped = text.strip()
+    if name == "datasource":
+        # QGIS writes a Delimited Text layer as ``file:./points.csv``; that prefix is
+        # not a scheme that reaches a host, while ``file://host/…`` still is (A6 #3).
+        stripped = _local_file_path(stripped) or stripped
     if (
-        "://" in text
-        or "/vsi" in text.lower()
+        "/vsi" in stripped.lower()
         or stripped.startswith(("\\\\", "//"))
-        or (_local_name(element.tag) == "datasource" and is_remote_uri(stripped))
+        or (name == "datasource" and ("://" in stripped or is_remote_uri(stripped)))
     ):
         raise FrameworkError(
             PATH_NOT_ALLOWED,
             "the project file names a remote data source; it was not opened",
         )
+
+
+def _local_file_path(text: str) -> str | None:
+    """The path a local ``file:`` URI names, or None when it names a host.
+
+    ``file:./points.csv`` and ``file:///C:/data/points.csv`` are local paths QGIS
+    writes for a CSV layer; ``file://host/share/…`` names a host and is left for the
+    caller to refuse.
+    """
+
+    if text[:5].lower() != "file:":
+        return None
+    rest = text[5:]
+    if not rest.startswith("//"):
+        return rest
+    authority = rest[2:]
+    return authority if authority.startswith("/") else None
 
 
 def _local_name(tag: str) -> str:

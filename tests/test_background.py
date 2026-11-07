@@ -341,6 +341,22 @@ def test_a_non_finite_value_is_refused_rather_than_put_in_the_record(value: floa
     assert harness.tasks == []
 
 
+def test_a_sum_of_finite_values_that_overflows_is_refused() -> None:
+    # Each value is finite, but 1e308 + 1e308 is Infinity: the old check asked every
+    # value, not the total, and wrote a SUCCEEDED record whose total=inf is not JSON
+    # an RFC 8259 parser reads (measured: json.dumps(..., allow_nan=False) raises).
+    harness = harness_with(make_layer([(1e308,), (1e308,), (5.0,)]))
+
+    record = settled(harness, submit_sum(harness))
+
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == INVALID_FIELD_TYPE
+    assert "not a finite number" in record.error.message
+    assert record.result is None
+    assert harness.tasks != []
+
+
 def test_a_sum_of_finite_values_is_still_written_and_parsed_strictly() -> None:
     # The sibling of the case above: the refusal may not cost a normal sum its record.
     harness = harness_with(make_layer([(1.5,), (2.5,)]))

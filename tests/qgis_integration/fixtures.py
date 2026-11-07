@@ -84,12 +84,16 @@ BUDGET_MEMBERS = 17
 # Just under the 16 MB scan budget, and millions of tags: refused after one
 # ``bytes.count``, not parsed element by element (AT-38).
 TAG_SPAM_PAIRS = 2_396_000
-# Layer tree nesting a project may carry: 100 groups are depth 105 in the written
-# XML (measured) and must open; the scan's limit is 1000 (AT-43).
-NESTED_GROUPS = 100
+# Layer tree nesting a project may carry: 200 groups are depth ~205 in the written
+# XML (measured) and must open; the scan's limit is 256 (AT-43).
+NESTED_GROUPS = 200
 # Labelled layers a normal project may carry: each label adds two tags whose
 # attribute value holds a bare ">", which the old scan counted as nesting (AT-40).
 LABELLED_LAYERS = 30
+# One internal-subset entity, repeated: expat expands it into element.text, so this
+# 1 MiB file costs the scan 50 MiB (AT-46).  QGIS's own doctype has no subset.
+ENTITY_BYTES = 1024 * 1024
+ENTITY_REFERENCES = 50
 
 
 @dataclass(frozen=True)
@@ -124,6 +128,7 @@ class Fixtures:
     encrypted_sibling: Path
     labelled: Path
     grouped: Path
+    entity_project: Path
     escape: Path | None
 
 
@@ -281,12 +286,20 @@ def build(root: Path) -> Fixtures:
     _write_encrypted_sibling(encrypted_sibling, raster)
 
     # Two ordinary projects the scan may not refuse: one with 30 labelled layers
-    # (each label writes a bare ">" inside an attribute) and one with 100 nested
+    # (each label writes a bare ">" inside an attribute) and one with 200 nested
     # layer-tree groups (AT-40, AT-43).
     labelled = data / "labelled.qgs"
     _write_labelled_project(labelled, cities, CITIES_LAYER, LABELLED_LAYERS)
     grouped = data / "grouped.qgs"
     _write_grouped_project(grouped, cities, CITIES_LAYER, NESTED_GROUPS)
+
+    # A file that declares an XML entity (A6 #2, AT-46).  The two ordinary projects
+    # the old scan also refused -- a Delimited Text layer spelled ``file:./points.csv``
+    # and a layer whose metadata carries a URL -- are written by their case instead:
+    # QGIS only spells the CSV source relatively once its providers are loaded, and
+    # ``build`` runs before the application starts (A6 #3, AT-47).
+    entity_project = data / "entity expansion.qgs"
+    _write_entity_project(entity_project)
 
     return Fixtures(
         root=data,
@@ -317,6 +330,7 @@ def build(root: Path) -> Fixtures:
         encrypted_sibling=encrypted_sibling,
         labelled=labelled,
         grouped=grouped,
+        entity_project=entity_project,
         escape=_junction(data / "escape", outside),
     )
 
@@ -434,6 +448,20 @@ def write_attribute_remote(path: Path, local_raster: Path, port: int) -> None:
     _write_project(path, [], [local_raster])
     _replace_first_datasource(
         path, f'<datasource x="/>">{REMOTE_LISTENER.format(port=port)}</datasource>'
+    )
+
+
+def write_mixed_content_remote(path: Path, local_raster: Path, port: int) -> None:
+    """A real project whose datasource holds its URI in a child element's tail.
+
+    ``<datasource><x/>/vsicurl/…</datasource>`` leaves ``element.text`` empty, and
+    QDomElement::text() concatenates the subtree, so ``read()`` saw the source while a
+    scan that only read ``element.text`` did not (A6 #1, AT-45).
+    """
+
+    _write_project(path, [], [local_raster])
+    _replace_first_datasource(
+        path, f"<datasource><x/>{REMOTE_LISTENER.format(port=port)}</datasource>"
     )
 
 
@@ -587,6 +615,67 @@ def _write_grouped_project(path: Path, source: Path, sub_layer: str, groups: int
     if not project.write(str(path)):
         raise RuntimeError(f"could not write {path}")
     project.clear()
+
+
+def write_csv_project(path: Path, data: Path) -> None:
+    """A real project whose Delimited Text layer QGIS spells ``file:./points.csv``.
+
+    Written into the CSV's own directory, after ``initQgis()``, so QGIS stores the
+    relative ``file:`` URI the scan used to refuse (A6 #3, AT-47).
+    """
+
+    from qgis.core import QgsProviderRegistry, QgsVectorLayer
+
+    csv = data / "points.csv"
+    csv.write_text("name,lon,lat\none,1.0,2.0\ntwo,3.0,4.0\n", encoding="utf-8")
+    metadata = QgsProviderRegistry.instance().providerMetadata("delimitedtext")
+    if metadata is None:
+        raise RuntimeError("the delimitedtext provider is not installed")
+    uri = metadata.encodeUri(
+        {"path": str(csv), "type": "csv", "xField": "lon", "yField": "lat", "crs": "EPSG:4326"}
+    )
+    layer = QgsVectorLayer(uri, "points", "delimitedtext")
+    if not layer.isValid():
+        raise RuntimeError(f"could not build a delimited text layer from {csv}")
+    project = QgsProject()
+    project.addMapLayer(layer, True)
+    if not project.write(str(path)):
+        raise RuntimeError(f"could not write {path}")
+    project.clear()
+    # The case is about the spelling QGIS chose; a build that stores it differently
+    # must fail here rather than pass as a case that never met the shape.
+    if f"<datasource>file:./{csv.name}</datasource>" not in path.read_text(encoding="utf-8"):
+        raise RuntimeError(f"{path} does not name its CSV as a relative file: URI")
+
+
+def write_metadata_project(path: Path, source: Path, sub_layer: str) -> None:
+    """A real project whose layer metadata carries the dataset's own URL (AT-47)."""
+
+    from qgis.core import QgsLayerMetadata, QgsVectorLayer
+
+    layer = QgsVectorLayer(f"{source}|layername={sub_layer}", "documented", "ogr")
+    metadata = QgsLayerMetadata()
+    metadata.setIdentifier("https://example.org/datasets/42")
+    metadata.setAbstract("Downloaded from https://example.org/data")
+    layer.setMetadata(metadata)
+    project = QgsProject()
+    project.addMapLayer(layer, True)
+    if not project.write(str(path)):
+        raise RuntimeError(f"could not write {path}")
+    project.clear()
+    text = path.read_text(encoding="utf-8")
+    if "<identifier>https://example.org/datasets/42</identifier>" not in text:
+        raise RuntimeError(f"{path} does not carry the metadata identifier")
+
+
+def _write_entity_project(path: Path) -> None:
+    """A project that declares one entity and reads it 50 times (A6 #2, AT-46)."""
+
+    entity = "A" * ENTITY_BYTES
+    path.write_text(
+        f'<!DOCTYPE qgis [<!ENTITY a "{entity}">]><qgis>{"<a>&a;</a>" * ENTITY_REFERENCES}</qgis>',
+        encoding="utf-8",
+    )
 
 
 def _junction(link: Path, target: Path) -> Path | None:

@@ -427,6 +427,12 @@ class LayerSumNumericField(
                 control.set_progress(100.0 * position / len(values))
             total += value
             count += 1
+        if not math.isfinite(total):
+            # Two finite values can still add up to Infinity (1e308 + 1e308), and a
+            # record whose ``total`` is Infinity is not JSON an RFC 8259 parser reads
+            # (measured: json.dumps(..., allow_nan=False) raises), so it is refused
+            # rather than delivered.
+            raise FrameworkError(INVALID_FIELD_TYPE, "the sum of the field is not a finite number")
         return FieldSum(
             count=count,
             total=total,
