@@ -22,8 +22,8 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 
 导入层，由 `tests/test_package.py` 在无 QGIS 的子进程里强制：
 
-- `core/*`、`operations/*`、`plugin.py` 必须能在裸解释器导入：**QGIS 与 Qt 只能在函数体内 import**（`plugin.initGui`/`unload`/`application_supervisor`/`read_settings`、`qgs_task.task_class`、`main_thread._post_to_event_queue`、各操作需要它的那一步）。
-- 出现 Qt/QGIS import 的地方只允许是 `plugin.py` 与 `core/runners/*`；`core/` 其余模块与 `operations/*` 一行都不许有。
+- `core/*`、`operations/*`、`plugin.py` 必须能在裸解释器导入：QGIS **只能在函数体内 import，没有例外**（`plugin.initGui`/`unload`/`application_supervisor`/`read_settings`、`qgs_task.task_class`、`main_thread._post_to_event_queue`、各操作需要它的那一步）。
+- Qt 同样默认在函数体内 import；**模块级** Qt import 的许可只给 `plugin.py` 与 `core/runners/*`（目前这两处也都在函数体内，许可留着但没用到）。`core/` 其余文件与 `operations/*` 只能在函数体内 import——守卫强制的是「模块级 import 会让裸解释器崩」，不是「文件里不许出现 QGIS/Qt 的 import」。
 - 结果与错误只出 Pydantic DTO / 基本类型；绝不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举或 traceback。
 - 守卫同时断言九个 Operation 能在裸解释器里注册成功（PRD 7.1）。
 

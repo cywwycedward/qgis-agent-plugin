@@ -357,6 +357,43 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
     assert len(fake_qgis.managers) == 3
 
 
+def test_unloading_keeps_a_task_that_is_still_running(fake_qgis) -> None:
+    """AT-13 and PRD 9.3.4/9.3.5: a live task outlives the ``Plugin`` instance.
+
+    The session the plugin built has to stay reachable -- from the application, not
+    from the instance QGIS is dropping -- until QGIS deletes the last task, and only
+    then may the supervisor let go of it.
+    """
+
+    iface = types.SimpleNamespace()
+    instance = plugin.Plugin(iface)
+    instance.initGui()
+    engine = instance.engine
+    supervisor = instance.supervisor
+    assert engine is not None and isinstance(supervisor, FakeQObject)
+
+    # QGIS has taken one task this plugin submitted, and it is still running.
+    fake_qgis.managers[-1].taskAdded.emit(1)
+
+    instance.unload()
+
+    # PRD 9.3.1: new work is refused at once.
+    with pytest.raises(FrameworkError) as refusal:
+        engine.run_sync("project.get_info", {})
+    assert refusal.value.code == ENGINE_CLOSING
+
+    # PRD 9.3.4: the live task is kept, not dropped with the plugin instance.  What
+    # the supervisor holds is exactly that -- see
+    # ``test_the_supervisor_lets_go_of_the_work_it_held``, where it is the only holder.
+    assert supervisor.live == frozenset({1})
+    assert supervisor.deleted is False
+
+    # PRD 9.3.5: the last task has terminated, so the shell clears itself.
+    fake_qgis.managers[-1].taskAboutToBeDeleted.emit(1)
+    assert supervisor.live == frozenset()
+    assert supervisor.deleted is True
+
+
 def test_a_replaced_project_bumps_the_epoch_once_and_drops_the_old_work(fake_qgis) -> None:
     iface = types.SimpleNamespace()
     instance = plugin.Plugin(iface)
