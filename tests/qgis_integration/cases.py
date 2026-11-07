@@ -1445,7 +1445,10 @@ def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
     if error is None:
         raise AssertionError("a failed record carries an error")
     require("XML tags" in error.message, f"the message: {error.message!r}")
-    require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s")
+    # A cold read of this 16.7 MB file was measured at 1.9 s in the first run of a full
+    # suite (234 ms warm), so the bound separates one bytes.count from a parse per
+    # element, not one disk cache from another.
+    require(elapsed < 5.0, f"the {on_disk} byte project took {elapsed:.2f}s")
     equal(project_layer_ids(), before, "the project's layers after the refusal")
     equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
     reset_project(ctx)
@@ -1530,7 +1533,11 @@ def at_40_open_reads_a_project_with_labelled_layers(ctx: Context) -> str:
         "the layers the labelled project holds",
     )
     equal(values["invalid_layer_count"], 0, "the invalid layers of the labelled project")
-    require(elapsed < 2.0, f"the {on_disk} byte project took {elapsed:.2f}s")
+    # Wall clock only separates "answered" from "stopped the main thread": the same
+    # 30-layer read measured 1.1 s and 2.1 s in two full runs on this box while the
+    # scan of the file was 31 ms in both, so a tighter bound is not a property of the
+    # code (recorded in docs/delegate/A7-fix.md).
+    require(elapsed < 20.0, f"the {on_disk} byte project took {elapsed:.2f}s")
     reset_project(ctx)
     return (
         f"a {on_disk} byte project with {fixtures.LABELLED_LAYERS} labelled layers: SUCCEEDED "
@@ -1632,7 +1639,7 @@ def at_43_open_reads_a_project_with_a_deep_group_tree(ctx: Context) -> str:
     )
     values = result_of(record)
     equal(values["layer_count"], 1, "the layers of the grouped project")
-    require(elapsed < 2.0, f"the {on_disk} byte project took {elapsed:.2f}s")
+    require(elapsed < 20.0, f"the {on_disk} byte project took {elapsed:.2f}s")
     reset_project(ctx)
     return (
         f"a {on_disk} byte project with {fixtures.NESTED_GROUPS} nested layer-tree groups "
@@ -1796,7 +1803,7 @@ def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
         equal(record.status, ExecutionStatus.SUCCEEDED, f"project.open on {label}")
         values = result_of(record)
         require(values["layer_count"] >= 1, f"the layers of {label}: {values['layer_count']}")
-        require(elapsed < 2.0, f"{label} took {elapsed:.2f}s")
+        require(elapsed < 20.0, f"{label} took {elapsed:.2f}s")
         evidence.append(
             f"{label}: SUCCEEDED with {values['layer_count']} layer in {elapsed * 1000:.0f} ms"
         )
@@ -1807,6 +1814,87 @@ def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
         "FAILED(PATH_NOT_ALLOWED) before this fix, while read() accepted them in 0.06 s "
         "(measured): a file: prefix is not a scheme that reaches a host, and a layer's "
         "metadata is not a data source"
+    )
+
+
+def at_48_open_refuses_a_source_split_across_child_elements(ctx: Context) -> str:
+    """The text of a datasource is every character data event of its subtree (A7 #1)."""
+
+    from qgis.core import QgsProject
+
+    reset_project(ctx)
+    ctx.add_layer(ctx.fixtures.cities, "at48 kept")
+    before = project_layer_ids()
+    file_before = QgsProject.instance().fileName()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+
+    connections = 0
+    evidence: list[str] = []
+    try:
+        for suffix in (".qgs", ".qgz"):
+            target = ctx.fixtures.root / f"split source{suffix}"
+            fixtures.write_split_content_remote(target, ctx.fixtures.raster, port)
+            started = time.monotonic()
+            record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+            elapsed = time.monotonic() - started
+            equal(record.status, ExecutionStatus.FAILED, f"project.open on a split source {suffix}")
+            equal(error_code(record), PATH_NOT_ALLOWED, f"the code for a split source {suffix}")
+            error = record.error
+            if error is None:
+                raise AssertionError("a failed record carries an error")
+            require("remote data source" in error.message, f"the message: {error.message!r}")
+            require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
+            evidence.append(f"{suffix} in {elapsed * 1000:.0f} ms")
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                break
+            connections += 1
+            connection.close()
+    finally:
+        listener.close()
+
+    equal(connections, 0, "TCP connections made while the projects were opened")
+    equal(project_layer_ids(), before, "the project's layers after the refusal")
+    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    reset_project(ctx)
+    return (
+        "<datasource>/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:<a port this case listens on>"
+        f"/never.tif: FAILED(PATH_NOT_ALLOWED) for {' and '.join(evidence)} with {connections} "
+        "TCP connections. Every fragment is an ordinary piece of a path; their concatenation "
+        "is the /vsicurl address QDom datasource.text() hands the provider, and the scan asked "
+        "each fragment separately while read() made 8 connections before the refusal (measured)"
+    )
+
+
+def at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory(ctx: Context) -> str:
+    """``/vsi`` names a virtual file system only at the start of a source (A7 #3)."""
+
+    reset_project(ctx)
+    target = ctx.fixtures.root / "vsi directory project.qgs"
+    fixtures.write_vsi_directory_project(target, ctx.fixtures.cities, fixtures.CITIES_LAYER)
+
+    started = time.monotonic()
+    record = ctx.run("project.open", {"path": str(target), "discard_current": True})
+    elapsed = time.monotonic() - started
+
+    equal(record.status, ExecutionStatus.SUCCEEDED, "project.open on a source inside vsi_data")
+    values = result_of(record)
+    require(values["layer_count"] == 1, f"the layers of the project: {values['layer_count']}")
+    require(elapsed < 20.0, f"the project took {elapsed:.2f}s")
+    layers = project_layer_ids()
+    reset_project(ctx)
+    return (
+        "a project whose datasource sits in a directory named vsi_data: SUCCEEDED with "
+        f"{values['layer_count']} layer in {elapsed * 1000:.0f} ms (it registered {len(layers)}). "
+        "/vsi is a GDAL file system only when it opens the path: the substring check refused the "
+        "project as a remote data source, while read() reads it (measured)"
     )
 
 
@@ -1863,4 +1951,6 @@ CASES = (
     ("AT-45", at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail),
     ("AT-46", at_46_open_refuses_a_project_that_declares_xml_entities),
     ("AT-47", at_47_open_reads_projects_the_old_scan_called_remote),
+    ("AT-48", at_48_open_refuses_a_source_split_across_child_elements),
+    ("AT-49", at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory),
 )

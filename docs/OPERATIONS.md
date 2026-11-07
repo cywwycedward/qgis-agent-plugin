@@ -69,13 +69,15 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
   `\\?\…`）都在**任何 I/O 之前**拒掉：UNC 的解析本身就会连主机并带上当前 Windows 凭据，
   所以它和 URL 一样不能先进白名单再判。错误消息里**不含**原始路径。
 - `project.open` 的工程文件还会在 `read()` **之前**被扫一遍（`.qgs` 是 XML，`.qgz` 是 zip 里的
-  同一个 XML）。这一层用的是**标准库 XML 解析器**（`xml.etree.ElementTree`），不是字节启发式：
-  前四轮的手写扫描被同样几种**合法 XML 形状**打穿（属性值里的 `>`、注释/CDATA 里的假闭合标签、
-  QGIS 自己写的 `>` 让深度计数器漂移），所以“有哪些数据源、嵌套多深”现在由解析器回答：
-  - 每个元素（按**本地名**，忽略命名空间前缀与大小写）的文本都问一次：出现 `/vsi`
-    （不区分大小写）或以 UNC 前缀（`\\`、`//`）开头 → `PATH_NOT_ALLOWED`，消息是
-    `the project file names a remote data source; it was not opened`。这两个标记本身就是
-    网络 I/O，**改成别的元素名跑不掉**。
+  同一个 XML）。这一层用的是**标准库 XML 解析器**（`xml.parsers.expat`，事件驱动、不建树），
+  不是字节启发式：前四轮的手写扫描被同样几种**合法 XML 形状**打穿（属性值里的 `>`、注释/CDATA
+  里的假闭合标签、QGIS 自己写的 `>` 让深度计数器漂移），所以“有哪些数据源、嵌套多深”现在由
+  解析器回答：
+  - 任何元素的文本节点只要**以** `/vsi`（不区分大小写）或 UNC 前缀（`\\`、`//`）**开头** →
+    `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not
+    opened`。这两个标记本身就是网络 I/O，**改成别的元素名跑不掉**；判的是开头而不是子串：
+    `D:/vsi_data/x.gpkg`、`./vsi_data/…` 这种普通本地路径与名字里带 `data/vsicache` 的图层
+    不再被误拒（A7 #3）。
   - `<datasource>` 是 QGIS 取图层数据源的地方，它的**整段文本**额外问一次：出现 `://`
     （XYZ/WMS 把 `…&url=https://…` 写在里面）或过 `is_remote_uri`（覆盖 `zip:…` 这类没有
     `//` 的 scheme）→ 同样拒。文本以 `file:` 开头时先剥掉前缀再判：`file:./points.csv`
@@ -83,11 +85,12 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
     别的元素的文本不是 QGIS 会去取的数据源：图层的 DOI/URL 元数据
     （`<identifier>https://…</identifier>`、`<abstract>Downloaded from https://…</abstract>`）
     不再被误判成远程。
-  - 元素的文本不止 `element.text`：`<datasource><x/>/vsicurl/…</datasource>` 的 URI 全在子
-    元素的 `tail` 里，而 QGIS 那边 `QDomElement::text()` 拼的是整棵子树的文本。扫描在下一个
-    解析事件里补查刚结束元素的 `tail`（`clear()` 会把它清掉，所以先查后清），并把“在
-    `<datasource>` 里”这个上下文一起带上，子元素里的 URI 一样拒（实测：只读 `element.text`
-    时 `read()` 会对这个形状发出 42 次 HTTP 请求）。
+  - 元素的文本不止 `element.text`，也不只是子元素的 `tail`：扫描收的是从 `<datasource>` 的
+    start 到匹配 end 之间的**每一个字符数据事件**，按文档顺序拼成一个串，在 end 时对整串判
+    一次——这就是 QGIS 那边 `QDomElement::text()` 的语义。所以
+    `<datasource>/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:9/never.tif</datasource>` 这种
+    五段拼出来的 `/vsicurl` 地址被当成一个地址拒掉（逐段判时它穿过了前扫，`project.open`
+    在失败之前先发了 8 次 TCP，实测，A7 #1）。
   - 解析器已经把字符引用解码了，所以 `&#47;vsicurl&#47;…` 与它指向的路径同一种判法。
   - 解析**之前**先拒带内部子集的 DOCTYPE（出现 `<!ENTITY`，或 `<!DOCTYPE` 后出现 `[`）：
     expat 会把实体展开进元素文本，展开后的体积不进任何预算（实测：1 MiB 实体读 50 次的
@@ -110,10 +113,14 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
   - 工程文件本身、或 `.qgz` 里**每个**成员解压后的**总量**超过 16 MB 也直接拒：
     `PATH_NOT_ALLOWED`，消息 `the project file is too large`。预算按**实际解压出来的字节**计
     （分块读，边读边累加，超了就停），不信 zip 清单里声明的大小；`.qgz` 的**每个**成员都要读
-    一遍（非 `.qgs` 的读完就丢），因为 `read()` 解压的是整个档案。
+    一遍（非 `.qgs` 的读完就丢），因为 `read()` 解压的是整个档案。**档案文件自己的大小**用同一条
+    16 MB 判据先查一遍（一次 `stat()`，在进 zip 之前）：解压后的预算对空成员不花钱，而
+    `zipfile` 要为 40 万个空成员的 39 MB 档案花 2.5 s、222 MiB 才轮到“成员太多”那条拒绝
+    （实测，A7 #2）。
   - `.qgz` 的**成员数**超过 `1000` 也在 `read()` 之前拒：`PROJECT_OPEN_FAILED`，消息里说
     `members`。字节预算按解压后的字节算，空成员不花钱，但每个成员都要 `open()` 一次——实测
-    10 万个空成员的 10.4 MB 档案让前扫忙 1.75 s，按成员数线性增长。
+    10 万个空成员的 10.4 MB 档案让前扫忙 1.75 s，按成员数线性增长；档案大小那条上限把这条的
+    成本也钉住了（16 MB 档案最多约 16 万个成员）。
   - `.qgz` 里声明了加密标志（`flag_bits & 0x1`）或压缩方法不是 stored/deflate 的成员，在
     `read()` **之前** `PROJECT_OPEN_FAILED`；成员边读边校验，清单没说但流里对不上的（CRC、
     声明尺寸）同样拒。理由是 QGIS 3.44 在加密成员上直接崩（实测 `0xC0000005`），
@@ -189,17 +196,20 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 数据源是另一回事：`read()` 会把它们全部构造出来，远程地址就在主线程上发 HTTP、UNC 就在
 主线程上做一次带 Windows 凭据的 SMB 连接。所以两步：
 
-1. **先用 XML 解析器问工程里有什么，不碰数据源**：`read()` 之前用标准库 `ElementTree` 解析
-   工程 XML，每个元素的文本里出现 `/vsi`、UNC 前缀（`\\`、`//`），或 `<datasource>` 元素的
-   **整段文本**（含子元素的 `tail`）里出现 `://` / 是个远程 URI（XYZ/WMS 把 `…&url=https://…`
+1. **先用 XML 解析器问工程里有什么，不碰数据源**：`read()` 之前用标准库 `expat` 解析
+   工程 XML，任何元素的文本节点以 `/vsi`、UNC 前缀（`\\`、`//`）**开头**，或 `<datasource>`
+   元素的**整段文本**（start 到匹配 end 之间的每个字符数据事件依序拼起来，即
+   `QDomElement::text()`）里出现 `://` / 是个远程 URI（XYZ/WMS 把 `…&url=https://…`
    写在文本里，也算）→ 直接 `PATH_NOT_ALLOWED`，消息是
    `the project file names a remote data source; it was not opened`。`<datasource>` 文本以
    `file:` 开头时先剥掉前缀：`file:./points.csv`（QGIS 自己写的 CSV 图层）与 `file:///C:/…`
    放行，`file://host/…` 仍拒；图层的 DOI/URL 元数据不是数据源，不再误拒。
-   这一步只读字节、只建一棵用完即弃的树，**当前工程原样保留**（已实测：含 `/vsicurl` / UNC
+   这一步只读字节、不建树，**当前工程原样保留**（已实测：含 `/vsicurl` / UNC
    数据源的工程 0–16 ms 返回，旧工程与它的图层都还在；一个把 `>` 藏在数据源属性里的工程
    返回 16 ms、监听端口 **0 次 TCP 连接**，旧扫描会给它 9 次；一个把 URI 放在子元素 `tail`
-   里的工程同样是 0 次 TCP，而只读 `element.text` 时 `read()` 会发出 42 次 HTTP 请求）。
+   里的工程同样是 0 次 TCP，而只读 `element.text` 时 `read()` 会发出 42 次 HTTP 请求；一个把
+   URI 拆成五段、夹在三个子元素之间的工程（`.qgs` 与 `.qgz`）也是 0 次连接，而逐段判时
+   `project.open` 在失败之前已发了 8 次 TCP，实测）。
    另外几种情况同样在读之前拒：
    - 文件不是 UTF-8（字节里有 NUL，例如 UTF-16 工程）→ `PATH_NOT_ALLOWED`，消息
      `the project file is not UTF-8; it was not opened`；
@@ -221,9 +231,12 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
      消息 `the project file is too large; it was not opened`。预算按**实际解压出的字节**分块
      累加（不信 zip 清单声明的尺寸），超了就停；非 `.qgs` 成员也会读一遍再丢，因为 `read()`
      解压的是整个档案。逐个成员判不够：100 个 1 MB 成员的 112 KB 档案能吃掉 200 MB；
+     **档案文件自己的大小**用同一条 16 MB 判据在进 zip 之前先查（一次 `stat()`）：解压后的
+     预算对空成员不花钱，而 `zipfile` 要为 40 万个空成员的 39 MB 档案花 2.5 s / 222 MiB 才
+     轮到“成员太多”那条拒绝（实测，A7 #2）；
    - `.qgz` 的**成员数**超过 1000 → `PROJECT_OPEN_FAILED`，消息里说 `members`。字节预算按解压
      后的字节算，空成员不花钱，但每个成员都要 `open()` 一次（实测：10 万个空成员的 10.4 MB
-     档案让前扫忙 1.75 s，按成员数线性增长）；
+     档案让前扫忙 1.75 s，按成员数线性增长；档案大小上限把这条的成本钉在 16 MB 以内）；
    - `.qgz` 里有加密（`flag_bits & 0x1`）或压缩方法不是 stored/deflate 的成员，或者流里
      对不上清单（CRC、尺寸）→ `PROJECT_OPEN_FAILED`，用的是 `read()` 失败时同一句消息。
      **这种档案不会交给 `read()`**：QGIS 3.44 在它上面会直接崩掉（实测，退出码 `0xC0000005`，
@@ -249,7 +262,7 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | 错误码 | 触发 |
 | --- | --- |
 | `INVALID_INPUT` | 路径不是绝对路径、后缀不对、未知字段、布尔类型不符 |
-| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里任何元素的文本带 `/vsi`、UNC 前缀，或 `<datasource>` 的整段文本（含子元素 `tail`）带 `://` / 是远程 URI / 以 `file://host` 开头（**`read()` 之前**就拒）；或工程文件不是 UTF-8、声明了 XML 实体、工程文件或 `.qgz` 每个成员解压后的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
+| `PATH_NOT_ALLOWED` | 文件不存在 / 不在允许根目录内 / 是网络 URI 或目录（“不存在”也归这里，已实测）；或工程文件里任何元素的文本以 `/vsi`、UNC 前缀**开头**，或 `<datasource>` 的整段文本（拼接后的，即 `QDomElement::text()`）带 `://` / 是远程 URI / 以 `file://host` 开头（**`read()` 之前**就拒）；或工程文件不是 UTF-8、声明了 XML 实体、工程文件或 `.qgz` 档案本身 / 每个成员解压后的总量超过 16 MB（同样在 `read()` 之前）；或工程里某层的数据源不在 `allowed_data_roots` 内（该层会被移除，见上） |
 | `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且 `discard_current` 不是 `true`（已实测） |
 | `PROJECT_OPEN_FAILED` | `project.read()` 返回 `False`，或工程 XML 嵌套超过 256 层、标签超过 400000 个、`.qgz` 成员超过 1000 个、不是合法 XML（都在 `read()` 之前拒绝：前者会让 QGIS 解析器爆栈、进程消失，其余不是工程），或 `.qgz` 里有取不出来的成员（加密、不支持的压缩方法）。消息里明说“当前工程可能已经改变”，**不承诺回滚**（损坏文件已实测） |
 

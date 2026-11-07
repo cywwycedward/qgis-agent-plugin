@@ -1281,6 +1281,40 @@ def test_open_refuses_a_remote_source_that_a_child_element_carries_in_its_tail(
 
 
 @pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
+def test_open_refuses_a_source_split_across_several_child_elements(
+    qgis: types.ModuleType, tmp_path: Path, suffix: str
+) -> None:
+    # QDomElement::text() is every character-data event of the datasource subtree, in
+    # document order.  None of these five fragments holds "/vsi", "://" or a UNC
+    # prefix, and their concatenation is the address read() reached: project.open made
+    # 8 TCP connections before it failed on this shape (measured, A7 #1).
+    xml = (
+        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
+        "<datasource>/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:9/never.tif</datasource>"
+        "</maplayer></projectlayers></qgis>"
+    )
+    root = project_dir(tmp_path)
+    if suffix == ".qgz":
+        target = qgz_bytes(root, f"split{suffix}", xml.encode("utf-8"))
+    else:
+        target = root / f"split{suffix}"
+        target.write_text(xml, encoding="utf-8")
+    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
+    ctx = context(loaded, roots=(root,))
+
+    failed = refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            ctx, project.ProjectOpenParams(path=str(target))
+        ),
+    )
+
+    assert loaded.read_path is None
+    assert "remote data source" in failed.message
+    assert REMOTE_SOURCE not in failed.message
+
+
+@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
 def test_open_refuses_a_project_that_declares_xml_entities(
     qgis: types.ModuleType, tmp_path: Path, suffix: str
 ) -> None:
@@ -1334,6 +1368,39 @@ def test_a_project_with_the_doctype_qgis_writes_is_still_read(
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
     assert loaded.read_path == str(target)
+
+
+@pytest.mark.parametrize(
+    "datasource,layername",
+    [
+        ("./vsi_data/x.gpkg", None),
+        ("C:/data/vsidata/x.gpkg", None),
+        ("a.gpkg", "data/vsicache"),
+    ],
+    ids=["relative-datasource", "absolute-datasource", "layer-name"],
+)
+def test_open_reads_a_project_whose_text_only_contains_vsi(
+    qgis: types.ModuleType, tmp_path: Path, datasource: str, layername: str | None
+) -> None:
+    # ``/vsi`` names a GDAL file system only when it opens the text: ``./vsi_data/``
+    # and ``C:/data/vsidata/`` are ordinary local directories, and a layer name is not
+    # a data source at all.  The substring check refused all three as remote (A7 #3).
+    root = project_dir(tmp_path)
+    where = f"<layername>{layername}</layername>" if layername else ""
+    target = root / "vsi text.qgs"
+    target.write_text(
+        "<qgis><projectlayers><maplayer>"
+        f"<datasource>{datasource}</datasource>{where}"
+        "</maplayer></projectlayers></qgis>",
+        encoding="utf-8",
+    )
+    loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
+    ctx = context(loaded, roots=(root,))
+
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
+
+    assert loaded.read_path == str(target)
+    assert result.layer_count == 1
 
 
 @pytest.mark.parametrize(
@@ -1446,6 +1513,47 @@ def test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked(
     # 1.75 s before the bound, when every member was opened in turn; what is left is
     # zipfile reading the 100000-entry central directory once (~0.6-1.0 s on this box).
     assert elapsed < 1.5, f"the {target.stat().st_size} byte archive took {elapsed:.2f}s"
+
+
+def test_a_qgz_over_the_size_budget_is_refused_before_its_directory_is_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # The member budget counts decompressed bytes, so an empty member costs nothing
+    # there: 400000 of them in a 39 MB archive kept the scan 2.48 s and peaked at
+    # 222 MiB before it refused with the member bound (measured, A7 #2).  The archive's
+    # own size is asked before zipfile reads the central directory it would then refuse.
+    root = project_dir(tmp_path)
+    target = root / "many empty members.qgz"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as archive:
+        for index in range(150_000):
+            archive.writestr(f"{index:x}", b"")
+        archive.writestr("padding.bin", b" " * (6 * 1024 * 1024))
+    assert target.stat().st_size > project.MAX_PROJECT_BYTES
+    loaded = FakeProject()
+    ctx = context(loaded, roots=(root,))
+
+    tracemalloc.start()
+    try:
+        started = time.monotonic()
+        failed = refused(
+            PATH_NOT_ALLOWED,
+            lambda: project.ProjectOpen().execute_main(
+                ctx, project.ProjectOpenParams(path=str(target))
+            ),
+        )
+        elapsed = time.monotonic() - started
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert loaded.read_path is None
+    # ``too large`` is the archive's own size; its member count is what an opened
+    # archive was refused for, after the 150001-entry directory had been built.
+    assert "too large" in failed.message
+    # The directory alone took 6.7 s and peaked at 66 MiB in the probe (tracemalloc
+    # on); what is left of this scan is one stat().
+    assert elapsed < 0.2, f"the {target.stat().st_size} byte archive took {elapsed:.2f}s"
+    assert peak < 64 * 1024 * 1024, f"the scan peaked at {peak / 1024 / 1024:.1f} MiB"
 
 
 def test_the_depth_bound_is_the_one_read_time_measured(
