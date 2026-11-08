@@ -22,7 +22,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from qgis.PyQt.QtCore import QLocale, QPointF, QRect, QSize, Qt, QTimer
+from qgis.PyQt.QtCore import QEvent, QLocale, QPointF, QRect, QSize, Qt, QTimer
 from qgis.PyQt.QtGui import (
     QDoubleValidator,
     QFont,
@@ -49,6 +49,7 @@ from qgis.PyQt.QtWidgets import (
     QScrollArea,
     QShortcut,
     QSizePolicy,
+    QSpacerItem,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -58,15 +59,8 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core.execution_store import TERMINAL_STATUSES
 from ..core.models import (
-    ENGINE_CLOSING,
     INTERNAL_ERROR,
     INVALID_INPUT,
-    INVALID_LAYER,
-    LAYER_NOT_FOUND,
-    PATH_NOT_ALLOWED,
-    PROJECT_PATH_REQUIRED,
-    PROJECT_REPLACE_REQUIRED,
-    TARGET_EXISTS,
     ExecutionRecord,
     ExecutionStatus,
     ExecutionStrategy,
@@ -89,7 +83,6 @@ _NUMBER = 1e12
 # The delegate's data roles on a selector row: the name is Qt.DisplayRole.
 _META_ROLE = Qt.UserRole + 1
 _DESTRUCTIVE_ROLE = Qt.UserRole + 2
-
 # Room either side of a selector row's two columns.
 _ROW_PAD = 10
 
@@ -124,23 +117,52 @@ _FIELD_LABELS = {
     "overwrite": "覆盖已有文件",
 }
 
-# What a failed call needs next, keyed by the PRD 11.2 code.  A wrong hint is worse
-# than none, so anything unlisted gets the generic line below.
-_HINTS = {
-    PATH_NOT_ALLOWED: "把这个目录写进配置 qgis_agent_plugin/allowed_data_roots 后重试。",
-    PROJECT_PATH_REQUIRED: "填写 .qgs 或 .qgz 的完整路径，再运行一次。",
-    PROJECT_REPLACE_REQUIRED: "勾上“丢弃当前工程”，或先保存当前工程。",
-    TARGET_EXISTS: "换一个文件名，或勾上“覆盖已有文件”。",
-    LAYER_NOT_FOUND: "先运行 layer.list，从结果里取 layer_id。",
-    INVALID_LAYER: "确认图层仍在本工程里：运行 layer.list 查看。",
-    INVALID_INPUT: "按错误信息改掉参数，再运行一次。",
-    ENGINE_CLOSING: "插件正在关闭，重新启用插件后再试。",
-    INTERNAL_ERROR: "重试一次；若反复出现，看 QGIS 日志。",
+# What a failure means, in the dock's own words: ``code -> (what happened, what next)``.
+# The engine's own message is kept as the label's tooltip -- it is written for a
+# caller, not for the operator, and half of it is English.
+_ERRORS = {
+    "OPERATION_NOT_FOUND": ("注册表里没有这个操作。", "重新启用插件，让九个操作重新注册。"),
+    "INVALID_OPERATION_DEFINITION": ("操作声明不合法，注册被拒。", "这是插件缺陷，看 QGIS 日志。"),
+    "DUPLICATE_OPERATION": ("同一个操作被注册了两次。", "这是插件缺陷，看 QGIS 日志。"),
+    "WRONG_THREAD": ("这个操作必须在主线程运行。", "重新启用插件后再试；持续出现就是缺陷。"),
+    "ENGINE_CLOSING": ("插件正在关闭，调用没有执行。", "重新启用插件后再试。"),
+    "UNSUPPORTED_EXECUTION_MODE": ("这个执行方式不受支持。", "这是插件缺陷，看 QGIS 日志。"),
+    "EXECUTION_NOT_FOUND": ("这次调用的记录已经不在了。", "重新运行一次。"),
+    "INVALID_INPUT": ("参数没有通过校验。", "按提示改掉参数，再运行一次。"),
+    "INVALID_CRS": ("坐标参考系写法不对。", "用 EPSG:4326 这样的写法重试。"),
+    "PROJECT_REPLACE_REQUIRED": (
+        "当前工程还有未保存的内容。",
+        "勾上“丢弃当前工程”，或先保存当前工程。",
+    ),
+    "PROJECT_OPEN_FAILED": (
+        "工程文件打不开。",
+        "确认文件存在、没有损坏，并且仍在允许的目录里。",
+    ),
+    "PROJECT_SAVE_FAILED": ("工程没有写出去。", "确认目标目录存在且可写，再运行一次。"),
+    "PROJECT_PATH_REQUIRED": ("没有给出工程文件路径。", "填写 .qgs 或 .qgz 的完整路径，再运行。"),
+    "TARGET_EXISTS": ("目标文件已经存在。", "换一个文件名，或勾上“覆盖已有文件”。"),
+    "PATH_NOT_ALLOWED": (
+        "这个路径不在允许的目录里。",
+        "把这个目录写进配置 qgis_agent_plugin/allowed_data_roots 后重试。",
+    ),
+    "INVALID_LAYER": ("这个图层不能用来做这件事。", "确认图层仍在本工程里，并检查类型与字段。"),
+    "LAYER_NOT_FOUND": ("工程里没有这个图层。", "先运行 layer.list，从结果里取 layer_id。"),
+    "LAYER_NOT_IN_TREE": ("图层不在图层面板里。", "把它加回图层面板后重试。"),
+    "INVALID_FIELD_TYPE": ("这个字段的类型不适合做这件事。", "换一个数值字段再运行。"),
+    "SNAPSHOT_LIMIT_EXCEEDED": (
+        "图层要素数超过快照上限。",
+        "调大 max_snapshot_features，或换一个小图层。",
+    ),
+    "TOO_MANY_EXECUTIONS": ("排队或并发到上限了。", "等正在运行的调用结束后重试。"),
+    "TASK_SUBMISSION_FAILED": ("后台任务没有提交成功。", "重试一次；仍然失败就重启 QGIS。"),
+    "STALE_PROJECT": ("调用开始时工程已经换了一代。", "确认当前工程后重新运行。"),
+    "OUTPUT_VALIDATION_FAILED": (
+        "操作的返回值不符合它声明的结构。",
+        "这是操作实现的缺陷，看 QGIS 日志。",
+    ),
+    "INTERNAL_ERROR": ("界面遇到意外错误，调用没有完成。", "重试一次；仍然出现就看 QGIS 日志。"),
 }
 _HINT = "按错误信息改掉参数再试；与参数无关时，重新启用插件。"
-
-# The result summary before anything ran; never a blank line.
-_NO_RECORD = "尚未运行"
 
 # The capsule's meaning, read out to a screen reader with the label.
 _STATE_HINTS = {
@@ -243,16 +265,81 @@ class _Combo(QComboBox):
         painter.drawLine(QPointF(x, y + 2.5), QPointF(x + 4, y - 2))
 
 
-class _RecordView(QPlainTextEdit):
-    """The record view: it takes whatever is left over, so its hint stays modest.
+class _Field(QLineEdit):
+    """A line edit that draws its own hint.
 
-    A plain text edit asks for a screenful, which makes a short dock squeeze the
-    form before the record.  A small hint and a stretch in the column invert that:
-    the form keeps its rows and the record absorbs the surplus.
+    Qt paints a ``QLineEdit`` placeholder as half-strength text whenever a
+    stylesheet is in force (3.3:1 on the light field) and ignores
+    ``QPalette::PlaceholderText``, so a default value shown that way is the least
+    readable text in the dock.  Painting the hint here keeps it at the theme's
+    muted colour -- and the tests measure the pixels, not this comment.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._hint = ""
+        self._hint_color: Any = None
+
+    def set_hint(self, text: str, color: Any) -> None:
+        self._hint = text
+        self._hint_color = color
+        self.update()
+
+    @property
+    def hint(self) -> str:
+        """The hint an empty field shows; the tests read this instead of a placeholder."""
+
+        return self._hint
+
+    def paintEvent(self, event: Any) -> None:
+        super().paintEvent(event)
+        if not self._hint or self.text() or not self.isEnabled() or self._hint_color is None:
+            return
+        painter = QPainter(self)
+        painter.setPen(self._hint_color)
+        flags = Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine
+        painter.drawText(self.rect().adjusted(9, 0, -9, 0), flags, self._hint)
+
+
+class _RecordView(QPlainTextEdit):
+    """The record view, plus the hint it shows while there is no record.
+
+    Qt paints a ``QPlainTextEdit`` placeholder behind the stylesheet's back: the
+    widget palette is ignored and half-strength text comes out at 3.4:1 on the
+    light field.  The dock states its own hint in its own colour instead.  The
+    view takes whatever is left over, so its size hint stays modest -- a plain
+    text edit asks for a screenful and would squeeze the form before the record.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hint = QLabel("", self.viewport())
+        self.hint.setObjectName("resultHint")
+        self.hint.setWordWrap(True)
+        self.hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.hint.hide()
+        self.viewport().installEventFilter(self)
+        self.textChanged.connect(self._sync_hint)
+
+    def set_hint(self, text: str, color: Any) -> None:
+        self.hint.setText(text)
+        self.hint.setStyleSheet(f"color: {color.name()}; background: transparent;")
+        self._sync_hint()
 
     def sizeHint(self) -> QSize:
         return QSize(320, 120)
+
+    def _sync_hint(self) -> None:
+        empty = not self.toPlainText()
+        if empty and self.hint.text():
+            self.hint.setGeometry(self.viewport().rect().adjusted(10, 8, -10, -8))
+        self.hint.setVisible(empty and bool(self.hint.text()))
+
+    def eventFilter(self, source: Any, event: Any) -> bool:
+        if source is self.viewport() and event.type() == QEvent.Resize:
+            self._sync_hint()
+        return super().eventFilter(source, event)
 
 
 class OperationDock(QDockWidget):
@@ -304,12 +391,13 @@ class OperationDock(QDockWidget):
         column.setContentsMargins(16, 16, 16, 16)
         column.setSpacing(0)
 
-        caption = QLabel("操作")
-        caption.setObjectName("caption")
         self.operations = _Combo()
         self.operations.setObjectName("operations")
         self.operations.setItemDelegate(_SpecDelegate(self.operations, self.look))
         self.operations.setAccessibleName("操作选择器")
+        self.operations.setAccessibleDescription(
+            "选择要运行的 Operation，右侧是它的类型与执行策略。"
+        )
         self.operations.setToolTip("选择要运行的 Operation。方向键切换，Ctrl+Return 运行。")
         self.operations.currentIndexChanged.connect(self._selection_changed)
 
@@ -322,7 +410,7 @@ class OperationDock(QDockWidget):
         self.details = QWidget()
         details = QVBoxLayout(self.details)
         details.setContentsMargins(0, 0, 0, 0)
-        details.setSpacing(2)
+        details.setSpacing(4)
         details.addWidget(self.meta)
         details.addWidget(self.summary)
         self.details.setVisible(False)
@@ -344,6 +432,8 @@ class OperationDock(QDockWidget):
         # Rows decide the height; below that it scrolls rather than squeezing the record.
         self.params.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.params.setMinimumHeight(24)
+        # An operation with no parameters hides the block, margins and all.
+        self.params.setVisible(False)
 
         self.run_button = QPushButton("运行")
         self.run_button.setObjectName("primary")
@@ -385,7 +475,7 @@ class OperationDock(QDockWidget):
         self.feedback.setAttribute(Qt.WA_StyledBackground, True)
         banner = QVBoxLayout(self.feedback)
         banner.setContentsMargins(12, 10, 12, 10)
-        banner.setSpacing(2)
+        banner.setSpacing(4)
         self.error_code = QLabel("")
         self.error_code.setObjectName("errorCode")
         self.error_message = QLabel("")
@@ -399,13 +489,15 @@ class OperationDock(QDockWidget):
         banner.addWidget(self.error_hint)
         self.feedback.setVisible(False)
 
-        self.result_summary = QLabel(_NO_RECORD)
+        self.result_summary = QLabel("")
         self.result_summary.setObjectName("resultSummary")
+        self.result_summary.setWordWrap(True)
+        self.result_summary.setVisible(False)
         self.result = _RecordView()
         self.result.setObjectName("result")
         self.result.setReadOnly(True)
         self.result.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.result.setPlaceholderText("运行一次后，这里显示 ExecutionRecord 的 JSON。")
+        self.result.set_hint("运行一次后，这里显示 ExecutionRecord 的 JSON。", self.look.muted)
         self.result.setMinimumHeight(110)
         self.result.setAccessibleName("执行记录 JSON")
         self.result.setAccessibleDescription("只读；可以全选复制，或点“复制 JSON”。")
@@ -420,14 +512,14 @@ class OperationDock(QDockWidget):
         output.addWidget(self.result, 1)
         output.addWidget(self.empty_state, 1)
 
-        column.addWidget(caption)
-        column.addSpacing(4)
+        self.space_before = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.space_after = QSpacerItem(0, 16, QSizePolicy.Minimum, QSizePolicy.Fixed)
         column.addWidget(self.operations)
-        column.addSpacing(6)
+        column.addSpacing(8)
         column.addWidget(self.details)
-        column.addSpacing(16)
+        column.addItem(self.space_before)
         column.addWidget(self.params)
-        column.addSpacing(16)
+        column.addItem(self.space_after)
         column.addLayout(actions)
         column.addSpacing(8)
         column.addWidget(self.progress)
@@ -503,7 +595,7 @@ class OperationDock(QDockWidget):
         self._record = None
         self._note = ""
         self.result.clear()
-        self.result_summary.setText(_NO_RECORD)
+        self._render_summary()
         self._hide_banner()
         if spec is not None:
             self.meta.setText(
@@ -529,26 +621,25 @@ class OperationDock(QDockWidget):
             self.form.removeRow(0)
         self.editors = {}
         if spec is None:
+            self.params.setVisible(False)
+            self.space_before.changeSize(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
             return
         properties = spec.input_schema.get("properties") or {}
         required = set(spec.input_schema.get("required") or ())
         for name, schema in properties.items():
             title = _FIELD_LABELS.get(name) or schema.get("title") or name
             kind = _kind(schema)
-            editor = _editor(kind, schema)
-            if isinstance(editor, QLineEdit):
-                _readable_placeholder(editor, self.look)
-                if name in required and not editor.placeholderText():
-                    editor.setPlaceholderText("必填")
+            editor = _editor(kind, schema, self.look)
             editor.setAccessibleName(title)
             editor.setToolTip(_field_tooltip(title, name, schema))
             self.editors[name] = (kind, editor)
             self.form.addRow(_field_label(title, name in required, self.look), editor)
-        if not properties:
-            hint = QLabel("这个操作不接受参数")
-            hint.setObjectName("summary")
-            hint.setWordWrap(True)
-            self.form.addRow(hint)
+        # Nothing to fill means no block at all: a one-line "takes no parameters"
+        # row under a 16 px gap read as an unfinished section, not as an answer.
+        self.params.setVisible(bool(properties))
+        self.space_before.changeSize(
+            0, 16 if properties else 0, QSizePolicy.Minimum, QSizePolicy.Fixed
+        )
         self._apply_tab_order()
 
     def _apply_tab_order(self) -> None:
@@ -574,7 +665,7 @@ class OperationDock(QDockWidget):
         self._note = ""
         self._record = None
         self.result.clear()
-        self.result_summary.setText(_NO_RECORD)
+        self._render_summary()
         self._hide_banner()
         self._apply_state("running")
         self._show_progress(0)
@@ -638,7 +729,7 @@ class OperationDock(QDockWidget):
             self._show_failure(error)
             return
         if receipt.accepted:
-            self._note = f"已请求取消（accepted=True, status={receipt.status.value}）"
+            self._note = "已请求取消（accepted=True）"
         else:
             self._note = f"取消未被受理（reason={receipt.reason or '未知'}）"
         self._render_summary()
@@ -720,35 +811,53 @@ class OperationDock(QDockWidget):
         else:
             self.progress.setVisible(False)
         if record.error is not None:
-            self._show_banner(record.error.code, record.error.message)
+            self._show_engine_error(record.error.code, record.error.message)
         else:
             self._hide_banner()
 
     def _show_failure(self, error: Exception) -> None:
-        """Show what the engine refused with; never let it reach the Qt slot."""
+        """A failure the engine raised: no record came back, so the dock clears."""
 
         if isinstance(error, FrameworkError):
-            self._show_problem(error.code, error.message)
-            return
-        self._show_problem(INTERNAL_ERROR, f"界面收到一个意外错误：{type(error).__name__}: {error}")
+            code, detail = error.code, error.message
+        else:
+            code, detail = INTERNAL_ERROR, f"{type(error).__name__}: {error}"
+        self._clear_result()
+        self._show_engine_error(code, detail)
+
+    def _show_engine_error(self, code: str, detail: str) -> None:
+        """Name a failure in the dock's words; the engine's text becomes the tooltip.
+
+        Half of what the engine writes is English, and it is written for a caller;
+        this panel is the operator's.
+        """
+
+        happened, next_step = _ERRORS.get(code, (f"引擎返回：{detail}", _HINT))
+        self._show_banner(code, happened, next_step, detail)
 
     def _show_problem(self, code: str, message: str) -> None:
-        """A failure with no record of its own: the call never became an execution."""
+        """A failure the form found itself, already in the dock's words."""
+
+        self._clear_result()
+        self._show_banner(code, message, _ERRORS.get(code, ("", _HINT))[1], message)
+
+    def _clear_result(self) -> None:
+        """Forget the record being shown: the call never produced one."""
 
         self._record = None
         self._note = ""
         self.result.clear()
+        self._render_summary()
         self._hide_banner()
-        self.result_summary.setText("本次调用没有产生执行记录")
         self._apply_state("failed")
         self.progress.setVisible(False)
-        self._show_banner(code, message)
 
-    def _show_banner(self, code: str, message: str) -> None:
+    def _show_banner(self, code: str, message: str, hint: str, detail: str = "") -> None:
         self.error_code.setText(code)
         self.error_message.setText(message)
-        self.error_hint.setText(_HINTS.get(code, _HINT))
-        self.feedback.setAccessibleDescription(f"错误 {code}：{message}。{_HINTS.get(code, _HINT)}")
+        self.error_message.setToolTip(detail)
+        self.error_hint.setText(hint)
+        self.feedback.setAccessibleDescription(f"错误 {code}：{message}。{hint}")
         self.feedback.setVisible(True)
 
     def _hide_banner(self) -> None:
@@ -783,16 +892,23 @@ class OperationDock(QDockWidget):
             self.progress.setRange(0, 0)
 
     def _render_summary(self) -> None:
-        """``状态 · 进度 · 耗时``, plus whatever the cancel receipt added."""
+        """Progress and time, under the result: the capsule is the only place that
+        names the state, and a record with nothing to measure shows no line."""
 
         if self._record is None:
-            self.result_summary.setText(_NO_RECORD)
+            self.result_summary.setVisible(False)
             return
-        line = (
-            f"{theme.STATE_LABELS[_state_of(self._record.status)]}"
-            f" · {self._record.progress:.0f}% · {_duration(self._record)}"
-        )
-        self.result_summary.setText(f"{line} · {self._note}" if self._note else line)
+        if _state_of(self._record.status) == "running":
+            line = f"进度 {self._record.progress:.0f}%" if self._record.progress > 0 else ""
+        else:
+            line = f"耗时 {_duration(self._record)}"
+        if self._note:
+            line = f"{line} · {self._note}" if line else self._note
+        if not line:
+            self.result_summary.setVisible(False)
+            return
+        self.result_summary.setText(line)
+        self.result_summary.setVisible(True)
 
     def _end_polling(self) -> None:
         self.timer.stop()
@@ -861,14 +977,6 @@ def _field_tooltip(title: str, name: str, schema: dict[str, Any]) -> str:
     return tooltip
 
 
-def _readable_placeholder(editor: QLineEdit, look: theme.Theme) -> None:
-    """The placeholder carries the default value, so it is text, not a whisper."""
-
-    palette = editor.palette()
-    palette.setColor(QPalette.PlaceholderText, look.muted)
-    editor.setPalette(palette)
-
-
 def _kind(schema: dict[str, Any]) -> str:
     """The editor kind for one property, looking through a nullable ``anyOf``."""
 
@@ -881,7 +989,7 @@ def _kind(schema: dict[str, Any]) -> str:
     return "text"
 
 
-def _editor(kind: str, schema: dict[str, Any]) -> Any:
+def _editor(kind: str, schema: dict[str, Any], look: theme.Theme) -> Any:
     """One editor for a field; the schema's default is shown, not filled in.
 
     Except a checkbox: it has no empty state, so its default is its initial state.
@@ -901,7 +1009,7 @@ def _editor(kind: str, schema: dict[str, Any]) -> Any:
             editor.addItem(str(value), value)
         editor.setCurrentIndex(0)
         return editor
-    editor = QLineEdit()
+    editor = _Field()
     if kind == "integer":
         editor.setValidator(QIntValidator(-_INTEGER, _INTEGER, editor))
     elif kind == "number":
@@ -911,7 +1019,7 @@ def _editor(kind: str, schema: dict[str, Any]) -> Any:
         validator.setLocale(QLocale("C"))
         editor.setValidator(validator)
     if default is not None:
-        editor.setPlaceholderText(json.dumps(default) if kind == "json" else str(default))
+        editor.set_hint(json.dumps(default) if kind == "json" else str(default), look.muted)
     return editor
 
 

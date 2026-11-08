@@ -21,11 +21,18 @@ import re
 import sys
 import time
 import types
+from collections import Counter
 from typing import Any
 
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# The offscreen platform has no font database of its own: without one no glyph is
+# painted, and the pixel probes below would be measuring blank widgets.
+for _fonts in (r"C:\Windows\Fonts", "/usr/share/fonts"):
+    if os.path.isdir(_fonts):
+        os.environ.setdefault("QT_QPA_FONTDIR", _fonts)
+        break
 
 pytest.importorskip("qgis.PyQt.QtWidgets", reason="the operation dock needs Qt")
 
@@ -60,7 +67,7 @@ from qgis_agent_plugin.core.models import (
 from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.operations import register_all
 from qgis_agent_plugin.ui import theme
-from qgis_agent_plugin.ui.dock import _DESTRUCTIVE_ROLE, _META_ROLE, OperationDock
+from qgis_agent_plugin.ui.dock import _DESTRUCTIVE_ROLE, _META_ROLE, OperationDock, _Field
 
 # Every editor kind in one schema: text, bool, integer, number, enum, a nullable
 # string and a nullable array, with two required fields and defaults on the rest.
@@ -227,6 +234,32 @@ def _fields(form: QFormLayout) -> list[Any]:
     return [form.itemAt(row, QFormLayout.FieldRole).widget() for row in range(form.rowCount())]
 
 
+def _painted_contrast(widget: Any) -> float:
+    """WCAG ratio between the glyphs a widget actually painted and its own background.
+
+    The pixels, not the theme: Qt draws a styled ``QLineEdit`` placeholder at half
+    strength no matter what the palette says, and a table of intended colours is
+    exactly what let that pass review.
+    """
+
+    image = widget.grab().toImage()
+    assert image.width() > 40 and image.height() > 12, (widget.size(), image.size())
+    counts: Counter[str] = Counter()
+    for y in range(4, max(5, image.height() - 4)):
+        for x in range(6, max(7, image.width() - 6)):
+            counts[image.pixelColor(x, y).name()] += 1
+    background = QColor(counts.most_common(1)[0][0])
+    base = theme.relative_luminance(background)
+    strongest = background
+    for name in counts:
+        color = QColor(name)
+        if abs(theme.relative_luminance(color) - base) > abs(
+            theme.relative_luminance(strongest) - base
+        ):
+            strongest = color
+    return theme.contrast(strongest, background)
+
+
 def _light_palette() -> QPalette:
     palette = QPalette()
     for role, color in {
@@ -300,8 +333,9 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
         dock.operations.setCurrentIndex(row)
         properties = spec.input_schema["properties"]
         assert set(dock.editors) == set(properties)
-        # An operation without parameters still gets its one "takes no arguments" row.
-        assert dock.form.rowCount() == max(len(properties), 1)
+        # No parameters means no parameter block, not a one-line apology row.
+        assert dock.form.rowCount() == len(properties)
+        assert dock.params.isHidden() is not bool(properties)
 
 
 def test_the_dock_is_something_a_real_main_window_accepts(qapp: Any) -> None:
@@ -330,9 +364,9 @@ def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
     assert isinstance(editors["flag"], QCheckBox)
     assert editors["flag"].isChecked()
     assert isinstance(editors["count"], QLineEdit)
-    assert editors["count"].placeholderText() == "3"
+    assert editors["count"].hint == "3"
     assert isinstance(editors["ratio"], QLineEdit)
-    assert editors["ratio"].placeholderText() == "0.5"
+    assert editors["ratio"].hint == "0.5"
     assert isinstance(editors["kind"], QComboBox)
     assert [editors["kind"].itemText(row) for row in range(editors["kind"].count())] == [
         "默认（raster）",
@@ -341,9 +375,10 @@ def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
     ]
     assert editors["kind"].currentIndex() == 0
     assert isinstance(editors["name"], QLineEdit)
-    assert editors["name"].placeholderText() == "必填"
+    # A required field with no default says so once, in its label -- not twice.
+    assert editors["name"].hint == ""
     assert isinstance(editors["items"], QLineEdit)
-    assert editors["items"].placeholderText() == "[1, 2]"
+    assert editors["items"].hint == "[1, 2]"
     # The field labels are the dock's words where it has them, and are marked when required.
     assert "必填" in dock.form.labelForField(editors["name"]).text()
     assert "必填" in dock.form.labelForField(editors["kind"]).text()
@@ -408,14 +443,14 @@ def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
     dock = OperationDock(registry, FakeEngine())
     assert _fields(dock.form) == [dock.editors["alpha"][1], dock.editors["beta"][1]]
     dock.result.setPlainText("{}")
-    dock._show_banner(INTERNAL_ERROR, "boom")
+    dock._show_problem(INTERNAL_ERROR, "boom")
 
     dock.operations.setCurrentIndex(1)
 
     assert set(dock.editors) == {"gamma"}
     assert _fields(dock.form) == [dock.editors["gamma"][1]]
     assert dock.result.toPlainText() == ""
-    assert dock.result_summary.text() == "尚未运行"
+    assert dock.result_summary.isHidden()
     assert dock.feedback.isHidden()
     assert dock.state == "idle"
 
@@ -436,7 +471,8 @@ def test_the_idle_state_offers_a_run_and_nothing_to_cancel(qapp: Any) -> None:
     assert not dock.copy_button.isEnabled()
     assert dock.progress.isHidden()
     assert dock.feedback.isHidden()
-    assert dock.result_summary.text() == "尚未运行"
+    # No record, nothing to measure: the capsule alone names the state.
+    assert dock.result_summary.isHidden()
     # Every control says what it is, and the state says what it means.
     for control in (dock.operations, dock.run_button, dock.cancel_button, dock.copy_button):
         assert control.accessibleName().strip()
@@ -461,7 +497,7 @@ def test_a_running_background_call_locks_the_form_and_offers_cancel(qapp: Any) -
     assert not dock.progress.isHidden()
     # No number yet, so the bar is indeterminate rather than frozen at zero.
     assert (dock.progress.minimum(), dock.progress.maximum()) == (0, 0)
-    assert "运行中" in dock.result_summary.text()
+    assert dock.result_summary.isHidden()
 
     dock.shutdown()
 
@@ -477,7 +513,8 @@ def test_the_bar_becomes_real_progress_when_the_runner_reports_it(qapp: Any) -> 
 
     assert _wait_until(lambda: dock.progress.maximum() == 100)
     assert dock.progress.value() == 40
-    assert "40%" in dock.result_summary.text()
+    assert dock.result_summary.text() == "进度 40%"
+    assert "运行中" not in dock.result_summary.text()
 
     dock.shutdown()
 
@@ -493,7 +530,9 @@ def test_a_successful_call_ends_ok_with_copyable_json(qapp: Any) -> None:
     assert dock.feedback.isHidden()
     assert dock.copy_button.isEnabled()
     assert dock.run_button.isEnabled()
-    assert dock.result_summary.text() == "完成 · 100% · 1.0 s"
+    # The summary carries what the capsule cannot: how long it took.
+    assert dock.result_summary.text() == "耗时 1.0 s"
+    assert "完成" not in dock.result_summary.text()
     shown = json.loads(dock.result.toPlainText())
     assert shown["status"] == "SUCCEEDED"
     assert shown["result"] == {"layer_count": 0}
@@ -513,9 +552,13 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     assert dock.capsule.text() == "失败"
     assert not dock.feedback.isHidden()
     assert dock.error_code.text() == PATH_NOT_ALLOWED
-    assert dock.error_message.text() == "outside the allowed roots"
+    assert dock.error_message.text() == "这个路径不在允许的目录里。"
+    # The engine's own message is kept, but only as the tooltip.
+    assert "outside the allowed roots" in dock.error_message.toolTip()
     assert "allowed_data_roots" in dock.error_hint.text()
     assert PATH_NOT_ALLOWED in dock.feedback.accessibleDescription()
+    assert dock.result_summary.text() == "耗时 1.0 s"
+    assert "失败" not in dock.result_summary.text()
     # The record itself is still there to copy.
     assert json.loads(dock.result.toPlainText())["status"] == "FAILED"
 
@@ -629,6 +672,66 @@ def test_no_module_but_the_theme_names_a_colour(qapp: Any) -> None:
             assert re.search(r"#[0-9a-fA-F]{3,8}", handle.read()) is None, name
 
 
+def test_the_painted_hint_clears_the_contrast_floor(qapp: Any) -> None:
+    """The default value in an empty field is text, so it must read as text.
+
+    Measured on the pixels the widget paints, in both palettes: the previous
+    guard asserted a palette role Qt never used, so it stayed green while the
+    hint rendered at 3.3:1.
+    """
+
+    original = QApplication.palette()
+    try:
+        for palette in (_light_palette(), _dark_palette()):
+            QApplication.setPalette(palette)
+            dock = OperationDock(FakeRegistry(_spec(schema=FORM)), FakeEngine())
+            dock.show()
+            QTest.qWait(60)
+            assert _painted_contrast(dock.editors["count"][1]) >= theme.BODY
+            assert _painted_contrast(dock.result) >= theme.BODY
+            dock.close()
+    finally:
+        QApplication.setPalette(original)
+
+
+def test_the_hint_probe_notices_a_weak_hint(qapp: Any) -> None:
+    """The guard can fail: a hint at a third strength measures below the floor."""
+
+    palette = QApplication.palette()
+    field = _Field()
+    field.resize(180, 30)
+    weak = theme.mix(palette.color(QPalette.Base), palette.color(QPalette.Text), 0.35)
+    field.set_hint("EPSG:4326", weak)
+    field.show()
+    QTest.qWait(40)
+
+    assert _painted_contrast(field) < theme.BODY
+    field.close()
+
+
+def test_a_submitted_value_stays_readable_while_it_runs(qapp: Any) -> None:
+    """Disabling the form stops edits, not reading: the value being run stays legible."""
+
+    engine = FakeEngine(
+        submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
+        get=_record(ExecutionStatus.RUNNING, ExecutionStrategy.BACKGROUND, progress=0),
+    )
+    dock = OperationDock(
+        FakeRegistry(_spec(strategy=ExecutionStrategy.BACKGROUND, schema=FORM)), engine
+    )
+    dock.show()
+    dock.editors["name"][1].setText("roads")
+    dock.run()
+    QTest.qWait(60)
+
+    field = dock.editors["name"][1]
+    assert not field.isEnabled()
+    assert _painted_contrast(field) >= theme.BODY
+
+    dock.shutdown()
+    dock.close()
+
+
 # --- running, polling and cancel ---------------------------------------------
 
 
@@ -685,8 +788,8 @@ def test_a_submit_that_is_refused_at_once_is_not_polled(qapp: Any) -> None:
     dock.run()
 
     assert not dock.timer.isActive()
-    assert "no runner" in dock.error_message.text()
     assert dock.error_code.text() == INTERNAL_ERROR
+    assert "no runner" in dock.error_message.toolTip()
 
 
 def test_cancel_shows_the_receipt_then_the_cancelled_record(qapp: Any) -> None:
@@ -734,9 +837,11 @@ def test_a_refused_call_is_shown_in_the_dock_not_raised(qapp: Any) -> None:
 
     assert dock.capsule.text() == "失败"
     assert dock.error_code.text() == ENGINE_CLOSING
-    assert "shutting down" in dock.error_message.text()
+    assert dock.error_message.text() == "插件正在关闭，调用没有执行。"
+    assert "shutting down" in dock.error_message.toolTip()
     assert "重新启用" in dock.error_hint.text()
     assert dock.result.toPlainText() == ""
+    assert dock.result_summary.isHidden()
     assert dock.run_button.isEnabled()
     assert not dock.copy_button.isEnabled()
 
@@ -748,9 +853,21 @@ def test_an_unexpected_failure_is_shown_not_raised(qapp: Any) -> None:
     dock.run()
 
     assert dock.error_code.text() == INTERNAL_ERROR
-    assert "RuntimeError" in dock.error_message.text()
-    assert "boom" in dock.error_message.text()
+    assert dock.error_message.text() == "界面遇到意外错误，调用没有完成。"
+    assert "RuntimeError" in dock.error_message.toolTip()
+    assert "boom" in dock.error_message.toolTip()
     assert dock.run_button.isEnabled()
+
+
+def test_an_error_without_a_sentence_falls_back_to_the_engine_text(qapp: Any) -> None:
+    """A code this build has no words for shows what the engine said, marked as such."""
+
+    dock = _dock(FakeEngine())
+    dock._show_engine_error("FUTURE_CODE", "something new happened")
+
+    assert dock.error_code.text() == "FUTURE_CODE"
+    assert "引擎返回" in dock.error_message.text()
+    assert "something new happened" in dock.error_message.text()
 
 
 def test_a_failure_while_polling_ends_the_poll_and_is_shown(qapp: Any) -> None:

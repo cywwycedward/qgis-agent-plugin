@@ -43,7 +43,6 @@ QDockWidget, QWidget#dockBody { background: $surface; }
 QWidget#dockBody { color: $text; }
 
 QLabel { color: $text; font-size: $bodypt; }
-QLabel#caption { color: $muted; font-size: $smallpt; }
 QLabel#meta { color: $muted; font-family: "$mono"; font-size: $smallpt; }
 QLabel#summary { color: $muted; font-size: $bodypt; }
 QLabel#fieldLabel { color: $muted; font-size: $bodypt; }
@@ -70,7 +69,9 @@ QComboBox::down-arrow { image: none; }
 QComboBox:hover, QLineEdit:hover { border-color: $muted; }
 QComboBox:focus, QLineEdit:focus { border-color: $accent; }
 QComboBox:disabled, QLineEdit:disabled {
-    color: $disabled; border-color: $border; background: $hover;
+    /* Disabled here means "cannot be changed while it runs", not "cannot be read":
+       the submitted value stays at full text colour; only the field's skin dims. */
+    color: $text; border-color: $border; background: $hover;
 }
 QComboBox QAbstractItemView {
     background: $field; color: $text; border: 1px solid $border;
@@ -250,17 +251,19 @@ class Theme:
         )
 
     def pairs(self) -> dict[str, tuple[Any, Any, float]]:
-        """Every text-on-background pair the dock paints, with its floor.
+        """Every text-on-background pair the QSS paints, with its floor.
 
-        ``tests/test_ui_dock.py`` walks this instead of guessing which colours meet
-        where: one list, one place to add a pair.
+        Only colours a stylesheet rule sets appear here; the two places Qt paints
+        behind the stylesheet's back -- the line-edit hint and the record
+        placeholder -- are measured from rendered pixels in ``test_ui_dock``
+        instead, because asserting a palette role Qt ignores proved nothing.
         """
 
         pairs = {
             "text on surface": (self.text, self.surface, BODY),
             "muted on surface": (self.muted, self.surface, BODY),
             "text on field": (self.text, self.field, BODY),
-            "placeholder on field": (self.muted, self.field, BODY),
+            "text on disabled field": (self.text, self.hover, BODY),
             "label on accent": (self.on_accent, self.accent, BODY),
         }
         background, text, muted, code = self.banner()
