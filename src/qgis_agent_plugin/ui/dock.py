@@ -618,7 +618,6 @@ class OperationDock(QDockWidget):
         if not self.isVisible():
             return
         width = max(0, self.width() - 32)  # the body's 16 px margins
-        width = max(0, self.width() - 32)  # the body's 16 px margins
         for block in (self.details, self.feedback, self.empty_state):
             if block.isHidden():
                 block.setMinimumHeight(0)

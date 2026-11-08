@@ -216,6 +216,8 @@ class Theme:
     disabled: Any
     accent: Any
     on_accent: Any
+    accent_hover: Any
+    accent_pressed: Any
     ok: Any
     warn: Any
     danger: Any
@@ -265,6 +267,8 @@ class Theme:
             "text on field": (self.text, self.field, BODY),
             "text on disabled field": (self.text, self.hover, BODY),
             "label on accent": (self.on_accent, self.accent, BODY),
+            "label on accent hover": (self.on_accent, self.accent_hover, BODY),
+            "label on accent pressed": (self.on_accent, self.accent_pressed, BODY),
         }
         background, text, muted, code = self.banner()
         pairs.update(
@@ -292,8 +296,8 @@ class Theme:
             "hover": self.hover.name(),
             "disabled": self.disabled.name(),
             "accent": self.accent.name(),
-            "accent_hover": self.accent.lighter(115).name(),
-            "accent_pressed": self.accent.darker(110).name(),
+            "accent_hover": self.accent_hover.name(),
+            "accent_pressed": self.accent_pressed.name(),
             "on_accent": self.on_accent.name(),
             "banner": background.name(),
             "banner_text": text.name(),
@@ -320,6 +324,12 @@ def build(palette: Any) -> Theme:
     accent = readable(palette.color(QPalette.Highlight), surface, LARGE)
     on_accent = QColor(palette.color(QPalette.HighlightedText))
     accent = accent_for(on_accent, accent)
+    # The two button states step away from the label colour, so their contrast can
+    # only rise.  (Moving the fill *towards* the text is what put the light theme's
+    # hover fill at 4.31:1 while the resting fill sat at 5.39.)
+    toward_dark = relative_luminance(on_accent) > 0.5
+    accent_hover = accent.darker(112) if toward_dark else accent.lighter(112)
+    accent_pressed = accent.darker(125) if toward_dark else accent.lighter(125)
     tones = {
         name: readable(QColor.fromHslF(hue / 360.0, 0.62, 0.50), surface)
         for name, hue in _HUES.items()
@@ -336,6 +346,8 @@ def build(palette: Any) -> Theme:
         disabled=mix(surface, text, 0.35),
         accent=accent,
         on_accent=on_accent,
+        accent_hover=accent_hover,
+        accent_pressed=accent_pressed,
         ok=tones["ok"],
         warn=tones["warn"],
         danger=tones["danger"],
