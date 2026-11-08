@@ -51,7 +51,7 @@ class FakeLayer:
 
 
 class FakeProject:
-    """A project that keeps the id it will report for an added layer."""
+    """A project with QGIS's real addMapLayer rule: a duplicate id is refused."""
 
     def __init__(self) -> None:
         self.layers: dict[str, Any] = {}
@@ -65,10 +65,10 @@ class FakeProject:
         return dict(self.layers)
 
     def addMapLayer(self, layer: Any, add_to_legend: bool = True) -> Any:
-        # A stand-in for the project's own id bookkeeping: what the project holds is
-        # the id that counts, and it is not necessarily the id the caller used.
+        # Measured on 3.44.13: a second layer with an existing id is not added and
+        # the project returns None, leaving the first layer in place.
         if layer.id() in self.layers:
-            layer.layer_id = f"{layer.id()}-in-project"
+            return None
         self.layers[layer.id()] = layer
         self.added.append(layer)
         return layer
@@ -293,6 +293,7 @@ class FakeQgis:
         self.seed_layers: tuple[Any, ...] = ()
         self.contexts: list[Any] = []
         self.feedback: list[Any] = []
+        self.take_result_none = False
         holder = self
 
         class QgsProcessingContext:
@@ -308,6 +309,8 @@ class FakeQgis:
                 return self.store
 
             def takeResultLayer(self, layer_id: str) -> Any | None:
+                if holder.take_result_none:
+                    return None
                 return self.store.take(layer_id)
 
         class QgsProcessingFeedback:
@@ -937,6 +940,43 @@ def test_a_layer_source_outside_the_roots_is_refused(
 
 
 @pytest.mark.parametrize(
+    "type_",
+    [
+        "idw_interpolation_data",
+        "tininputlayers",
+        "alignrasterlayers",
+        "dxflayers",
+        "vectortilewriterlayers",
+    ],
+)
+def test_a_parameter_type_carrying_layers_inside_its_value_is_refused(
+    fake_qgis: FakeQgis, data_root: Path, type_: str
+) -> None:
+    """QGIS loads the sources inside these values, so the plugin cannot pass them on."""
+    install(fake_qgis, FakeDefinition("LAYERS", type_), results={})
+    code = refuse(
+        ops.ProcessingRunAlgorithm(),
+        make_context(FakeProject(), data_root),
+        run_params({"LAYERS": [{"layer": "https://example.com/layers.gpkg", "type": 0}]}),
+    )
+    assert code == INVALID_INPUT
+    assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
+
+
+def test_a_nested_layer_reference_is_refused_even_when_it_names_a_project_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """The refusal is about the parameter type, not about the particular value."""
+    install(fake_qgis, FakeDefinition("LAYERS", "dxflayers"), results={})
+    code = refuse(
+        ops.ProcessingRunAlgorithm(),
+        make_context(project_with_layers("roads"), data_root),
+        run_params({"LAYERS": [{"layer": "roads"}]}),
+    )
+    assert code == INVALID_INPUT
+
+
+@pytest.mark.parametrize(
     "value",
     ["TEMPORARY_OUTPUT", "C:/data/out.gpkg", "", {"type": "memory"}, 5],
     ids=["temporary", "path", "empty", "object", "number"],
@@ -960,6 +1000,22 @@ def test_an_unset_destination_is_left_unset(fake_qgis: FakeQgis, data_root: Path
         make_context(FakeProject(), data_root), run_params({"OUTPUT": None})
     )
     assert fake_qgis.registry.instances[0].calls[2][1] == {"OUTPUT": None}
+
+
+def test_an_unset_file_input_is_left_unset(fake_qgis: FakeQgis, data_root: Path) -> None:
+    install(fake_qgis, FakeDefinition("MASK", "file"), results={})
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"MASK": None})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"MASK": None}
+
+
+def test_an_unset_provider_connection_is_left_unset(fake_qgis: FakeQgis, data_root: Path) -> None:
+    install(fake_qgis, FakeDefinition("CONNECTION", "providerconnection"), results={})
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"CONNECTION": None})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"CONNECTION": None}
 
 
 @pytest.mark.parametrize(
@@ -1106,22 +1162,6 @@ def test_a_temporary_result_layer_is_moved_into_the_project(
     assert context.store.layers == {}
 
 
-def test_the_result_reports_the_id_the_project_gave_the_layer(
-    fake_qgis: FakeQgis, data_root: Path
-) -> None:
-    temporary = FakeLayer("memory-out")
-    install(fake_qgis, results={"OUTPUT": "memory-out"}, layers=(temporary,))
-    # A different layer already holds that id, so the project has to rename the new one.
-    project = project_with_layers("memory-out")
-
-    result = ops.ProcessingRunAlgorithm().execute_main(
-        make_context(project, data_root), run_params({})
-    )
-    assert result.outputs == {"OUTPUT": "memory-out-in-project"}
-    assert project.layers["memory-out-in-project"] is temporary
-    assert project.layers["memory-out"] is not temporary
-
-
 def test_a_result_that_names_a_project_layer_keeps_its_id(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
@@ -1145,13 +1185,44 @@ def test_a_repeated_result_id_resolves_to_the_same_project_layer(
         results={"FIRST": "memory-out", "SECOND": ["memory-out"]},
         layers=(temporary,),
     )
-    project = project_with_layers("memory-out")
+    project = FakeProject()
 
     result = ops.ProcessingRunAlgorithm().execute_main(
         make_context(project, data_root), run_params({})
     )
-    assert result.outputs == {"FIRST": "memory-out-in-project", "SECOND": ["memory-out-in-project"]}
+    # The same result id is taken from the context once and added once.
+    assert result.outputs == {"FIRST": "memory-out", "SECOND": ["memory-out"]}
     assert fake_qgis.contexts[0].store.taken == ["memory-out"]
+    assert project.added == [temporary]
+
+
+def test_a_project_id_collision_is_an_internal_error(fake_qgis: FakeQgis, data_root: Path) -> None:
+    temporary = FakeLayer("memory-out")
+    install(fake_qgis, results={"OUTPUT": "memory-out"}, layers=(temporary,))
+    existing = FakeLayer("memory-out")
+    project = FakeProject()
+    project.layers["memory-out"] = existing
+
+    with pytest.raises(FrameworkError) as caught:
+        ops.ProcessingRunAlgorithm().execute_main(make_context(project, data_root), run_params({}))
+    assert caught.value.code == INTERNAL_ERROR
+    # The project refused the second layer with that id; the first one is untouched.
+    assert project.mapLayer("memory-out") is existing
+    assert project.added == []
+
+
+def test_a_layer_the_context_cannot_hand_over_is_an_internal_error(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    temporary = FakeLayer("memory-out")
+    install(fake_qgis, results={"OUTPUT": "memory-out"}, layers=(temporary,))
+    fake_qgis.take_result_none = True
+    project = FakeProject()
+
+    with pytest.raises(FrameworkError) as caught:
+        ops.ProcessingRunAlgorithm().execute_main(make_context(project, data_root), run_params({}))
+    assert caught.value.code == INTERNAL_ERROR
+    assert project.added == []
 
 
 def test_a_failed_result_removes_only_the_layers_this_run_added(

@@ -59,12 +59,29 @@ _MEMORY_OUTPUT = "memory:"
 # public spelling shared by the model serialiser and ``qgis_process``, which is why
 # this module can tell a file input from a layer reference without importing the
 # definition classes.  A parameter type not named here is passed through untouched;
-# the three families below are the ones the PRD gives a boundary rule.
+# the families below are the ones the PRD gives a boundary rule.
 _FILE_PARAMETER = "file"
 _LAYER_PARAMETERS = frozenset(
     {"source", "vector", "raster", "mesh", "layer", "multilayer", "pointcloud"}
 )
 _CONNECTION_PARAMETERS = frozenset({"providerconnection", "databaseschema", "databasetable"})
+
+# These types carry layer ids *inside* their values, each in its own shape (measured on
+# 3.44.13: ``native:alignrasters``, ``native:dxfexport``, ``native:tinmeshcreation``,
+# ``native:writevectortiles_*`` and the old ``qgis:*interpolation`` family).  QGIS
+# resolves those inner strings itself, so passing one through would load a source the
+# path policy never saw (PRD §3.2.2, §8.3).  The plugin refuses the family until it
+# learns each shape; ``relief_colors``, ``aggregates`` and ``meshdatasetgroups`` carry
+# values only and still pass through.
+_COMPOSITE_LAYER_PARAMETERS = frozenset(
+    {
+        "idw_interpolation_data",
+        "tininputlayers",
+        "alignrasterlayers",
+        "dxflayers",
+        "vectortilewriterlayers",
+    }
+)
 
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
@@ -242,21 +259,28 @@ def _is_optional(definition: Any) -> bool:
 def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> Any:
     """The value to hand QGIS for one declared parameter.
 
-    Destinations, file inputs and layer references are the three families the PRD
-    gives a boundary rule; anything else is passed through as it arrived, because
-    the plugin does not re-implement a second parameter schema (PRD §3.2.2).
+    ``None`` is "not provided" for every family, so the native check decides whether
+    it is acceptable; every provided value is judged here.  Destinations, file
+    inputs, layer references and the types that hide layer references get a boundary
+    rule; anything else is passed through as it arrived, because the plugin does not
+    re-implement a second parameter schema (PRD §3.2.2).
     """
 
+    if value is None:
+        return value
+
     if definition.isDestination():
-        # ``None`` is "no output requested" and cannot create a file; every other
-        # spelling is a disk target this build has no write access for.
-        if value is None or (isinstance(value, str) and value.startswith(_MEMORY_OUTPUT)):
+        if isinstance(value, str) and value.startswith(_MEMORY_OUTPUT):
             return value
         raise FrameworkError(PATH_NOT_ALLOWED, "only a memory output target is allowed")
 
     kind = definition.type()
     if kind in _CONNECTION_PARAMETERS:
         raise FrameworkError(PATH_NOT_ALLOWED, "a provider connection is not an allowed input")
+    if kind in _COMPOSITE_LAYER_PARAMETERS:
+        raise FrameworkError(
+            INVALID_INPUT, "a parameter with layer references inside its value is not supported"
+        )
     if kind == _FILE_PARAMETER:
         if not isinstance(value, str):
             raise FrameworkError(INVALID_INPUT, "a file parameter takes one path")
