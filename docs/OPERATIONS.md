@@ -1,8 +1,13 @@
-# 九个 Operation 的契约（以代码为准）
+# 十七个 Operation 的契约（以代码为准）
 
-结论：本插件的全部能力就是下面九个 Operation。表里每一项都能在代码里找到出处，
-默认值与校验规则来自 `src/qgis_agent_plugin/operations/*.py` 的输入模型，错误码来自
-`core/models.py` 的 `ERROR_CODES`；与 PRD 的差异集中在 §12，不要照 PRD 的示例写调用方。
+结论：本插件的全部能力就是十七个 Operation（v1 九个 + v2 八个）。下表是 v1 那九个，
+每一项都能在代码里找到出处，默认值与校验规则来自 `src/qgis_agent_plugin/operations/*.py` 的输入模型，
+错误码来自 `core/models.py` 的 `ERROR_CODES`；与 PRD 的差异集中在 §12，不要照 PRD 的示例写调用方。
+
+v2 新增的八个（`layer.list_style_categories` / `layer.get_qml` / `layer.list_available_renderers` /
+`layer.get_renderer` / `layer.set_renderer` 与 `processing.list_algorithms` / `processing.get_algorithm_info` /
+`processing.run_algorithm`）的完整契约是 `docs/QGIS_Agent_Processing_Style_Operation_PRD_v2.md` §2–§7
+（与 3.44.13 实测不符的三处按该 PRD §13 与本轮宪章 §7 的勘误落地），本文件不复制一份。
 
 | # | Operation | kind | strategy | destructive | 必填参数 | 一句话 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -18,8 +23,8 @@
 
 读这张表的三个前提：
 
-- **只有 8 个能在 `run_sync` 里跑**。第 9 个必须 `submit`；`run_sync` 会被拒绝
-  `UNSUPPORTED_EXECUTION_MODE`（控制面异常，不建记录，已实测）。
+- **只有 16 个能在 `run_sync` 里跑**。唯一的后台 Operation `layer.sum_numeric_field` 必须 `submit`；
+  对它调 `run_sync` 会被拒绝 `UNSUPPORTED_EXECUTION_MODE`（控制面异常，不建记录，已实测）。
 - **所有输入模型都是 `extra="forbid"`**（`core/models.py::Params`）：多写一个键不是被忽略，
   而是 `FAILED(INVALID_INPUT)`，`message` 里带出错字段名，例如
   `project.get_info: invalid input at discard_current`（已实测）。
@@ -159,8 +164,8 @@ spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_
 
 | 方法 | 能调谁 | 返回 |
 | --- | --- | --- |
-| `run_sync(name, args)` | 只有 main_thread 的 8 个 | 终态记录（`SUCCEEDED` / `FAILED`） |
-| `submit(name, args)` | 全部 9 个 | 刚创建的记录快照，通常是 `QUEUED` |
+| `run_sync(name, args)` | 只有 main_thread 的 16 个 | 终态记录（`SUCCEEDED` / `FAILED`） |
+| `submit(name, args)` | 全部 17 个 | 刚创建的记录快照，通常是 `QUEUED` |
 | `get(execution_id)` | — | 记录副本；未知 ID 抛 `EXECUTION_NOT_FOUND` |
 | `cancel(execution_id)` | — | `CancelReceipt`，见 `docs/ERRORS.md` §4 |
 | `shutdown()` | — | 无返回值；插件 `unload` 内部调用，之后新请求得 `ENGINE_CLOSING` |

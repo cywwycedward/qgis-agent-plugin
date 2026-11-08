@@ -1,4 +1,4 @@
-"""The plugin surface: nine operations, one session per load, and what unload leaves.
+"""The plugin surface: seventeen operations, one session per load, and what unload leaves.
 
 PRD 1.3 (the Console reaches the engine), 9.1 (the epoch), 9.3 (the six steps of
 ``unload``) and AT-25 (three loads and unloads) are decided here.  QGIS and Qt are
@@ -32,7 +32,7 @@ from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.core.runners import qgs_task
 from qgis_agent_plugin.operations import register_all
 
-# The PRD 7.1 table, spelled out: the build registers this set or it is wrong.
+# The PRD v2 §2 table, spelled out: the build registers this set or it is wrong.
 PRD_NAMES = frozenset(
     {
         "project.create",
@@ -44,6 +44,14 @@ PRD_NAMES = frozenset(
         "layer.get_info",
         "layer.set_visibility",
         "layer.sum_numeric_field",
+        "layer.list_style_categories",
+        "layer.get_qml",
+        "layer.list_available_renderers",
+        "layer.get_renderer",
+        "layer.set_renderer",
+        "processing.list_algorithms",
+        "processing.get_algorithm_info",
+        "processing.run_algorithm",
     }
 )
 
@@ -208,7 +216,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
 # --- what the build ships ----------------------------------------------------
 
 
-def test_the_build_registers_exactly_the_nine_operations_of_the_prd() -> None:
+def test_the_build_registers_exactly_the_seventeen_operations_of_the_prd() -> None:
     registry = OperationRegistry()
 
     register_all(registry)

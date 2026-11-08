@@ -19,6 +19,7 @@ the engine and Qt, and the first two are QGIS-free.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
@@ -107,6 +108,9 @@ _KINDS = {
     "array": "json",
     "object": "json",
 }
+
+# Where a property schema's ``$ref`` points: the definition table next to it.
+_DEFS = "#/$defs/"
 
 # The operation's own field names in the dock's language; a field this map has not
 # met yet shows the schema's title, so a new operation still gets a usable form.
@@ -669,10 +673,11 @@ class OperationDock(QDockWidget):
             return
         properties = spec.input_schema.get("properties") or {}
         required = set(spec.input_schema.get("required") or ())
+        defs = spec.input_schema.get("$defs") or {}
         for name, schema in properties.items():
             title = _FIELD_LABELS.get(name) or schema.get("title") or name
-            kind = _kind(schema)
-            editor = _editor(kind, schema, self.look)
+            kind = _kind(schema, defs)
+            editor = _editor(kind, schema, self.look, defs)
             editor.setAccessibleName(title)
             editor.setToolTip(_field_tooltip(title, name, schema))
             self.editors[name] = (kind, editor)
@@ -1046,10 +1051,28 @@ def _field_tooltip(title: str, name: str, schema: dict[str, Any]) -> str:
     return tooltip
 
 
-def _kind(schema: dict[str, Any]) -> str:
-    """The editor kind for one property, looking through a nullable ``anyOf``."""
+def _branches(schema: dict[str, Any], defs: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """A property schema, then every branch its ``$ref`` and unions reach into.
 
-    for option in (schema, *(schema.get("anyOf") or ())):
+    ``layer.set_renderer`` publishes its renderer as ``{"$ref": "#/$defs/RendererConfig"}``
+    and the discriminated union sits behind that definition, not on the property, so
+    the definition table travels with the schema.
+    """
+
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith(_DEFS):
+        yield from _branches(defs.get(ref[len(_DEFS) :]) or {}, defs)
+        return
+    yield schema
+    for key in ("oneOf", "anyOf"):
+        for branch in schema.get(key) or ():
+            yield from _branches(branch, defs)
+
+
+def _kind(schema: dict[str, Any], defs: dict[str, Any]) -> str:
+    """The editor kind for one property, looking through ``$ref`` and its unions."""
+
+    for option in _branches(schema, defs):
         if "enum" in option:
             return "enum"
         kind = _KINDS.get(str(option.get("type")))
@@ -1058,7 +1081,7 @@ def _kind(schema: dict[str, Any]) -> str:
     return "text"
 
 
-def _editor(kind: str, schema: dict[str, Any], look: theme.Theme) -> Any:
+def _editor(kind: str, schema: dict[str, Any], look: theme.Theme, defs: dict[str, Any]) -> Any:
     """One editor for a field; the schema's default is shown, not filled in.
 
     Except a checkbox: it has no empty state, so its default is its initial state.
@@ -1074,7 +1097,7 @@ def _editor(kind: str, schema: dict[str, Any], look: theme.Theme) -> Any:
         editor.setEditable(False)
         if default is not None:
             editor.addItem(f"默认（{default}）", None)
-        for value in _enum_values(schema):
+        for value in _enum_values(schema, defs):
             editor.addItem(str(value), value)
         editor.setCurrentIndex(0)
         return editor
@@ -1092,8 +1115,8 @@ def _editor(kind: str, schema: dict[str, Any], look: theme.Theme) -> Any:
     return editor
 
 
-def _enum_values(schema: dict[str, Any]) -> list[Any]:
-    for option in (schema, *(schema.get("anyOf") or ())):
+def _enum_values(schema: dict[str, Any], defs: dict[str, Any]) -> list[Any]:
+    for option in _branches(schema, defs):
         if "enum" in option:
             return list(option["enum"])
     return []

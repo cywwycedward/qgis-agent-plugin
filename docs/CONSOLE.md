@@ -1,8 +1,8 @@
 # Python Console 调用样例
 
 结论：本插件在 Python Console 里只有两个入口——`iface.agent_engine`（调用）和
-`iface.agent_registry`（看契约）。八个 Operation 用 `run_sync` 同步执行，唯一的后台 Operation
-用 `submit` + `get`。下面每段样例都标了实测状态：标“已实测”的是真跑过的，输出是从 Console
+`iface.agent_registry`（看契约）。十六个 Operation 用 `run_sync` 同步执行，唯一的后台 Operation
+（`layer.sum_numeric_field`）用 `submit` + `get`。下面每段样例都标了实测状态：标“已实测”的是真跑过的，输出是从 Console
 里摘的摘要；标“未实测”的写明为什么没跑。
 
 ## 0. 实测环境与标注约定
@@ -29,17 +29,19 @@
 ```python
 registry = iface.agent_registry
 engine = iface.agent_engine
-len(registry.list_specs())  # 9
+len(registry.list_specs())  # 17
 [s.name for s in registry.list_specs()]
 ```
 
 实测（headless，同一 registry）：
 
 ```text
-9
-['layer.add', 'layer.get_info', 'layer.list', 'layer.set_visibility',
- 'layer.sum_numeric_field', 'project.create', 'project.get_info',
- 'project.open', 'project.save']
+17
+['layer.add', 'layer.get_info', 'layer.get_qml', 'layer.get_renderer',
+ 'layer.list', 'layer.list_available_renderers', 'layer.list_style_categories',
+ 'layer.set_renderer', 'layer.set_visibility', 'layer.sum_numeric_field',
+ 'processing.get_algorithm_info', 'processing.list_algorithms', 'processing.run_algorithm',
+ 'project.create', 'project.get_info', 'project.open', 'project.save']
 ```
 
 `unload` 之后这两个属性会被撤掉，`hasattr(iface, "agent_engine")` 变 `False`。
