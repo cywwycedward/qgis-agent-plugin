@@ -100,6 +100,7 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 
 | 区域 | 内容 |
 | --- | --- |
+| 空态 | 注册表为空时，下拉框显示“没有可用的操作”，结果区位置换成一段教学文字（为什么为空、先看哪里），不是一行灰字 |
 | 选择器 | 一个下拉框，每项左边是 `name`，右边等宽小字是 `kind · strategy`；`destructive=true` 的操作在左侧带一个警示色点，选中后摘要行也会标“可破坏”。一个都没有时下拉框显示“没有可用的操作” |
 | 摘要 | 选中操作的类型/策略一行（等宽小字），下面是 `description`（次要色，自动换行）。没有描述就不占行 |
 | 参数 | 由 `input_schema` 生成，一字段一行：标签（次要色）+ 编辑器，必填的标签后面有小号“必填” |
@@ -122,8 +123,8 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
   `qgis_agent_plugin/allowed_data_roots`。
 
 配色不写死：坞窗的全部颜色由 `ui/theme.py` 从 `QApplication.palette()` 推导（浅色与深色主题都成立，
-正文/次要文字 ≥ 4.5:1，胶囊 ≥ 3:1，有测试逐对断言），`grep -n '#[0-9a-fA-F]\{3,8\}' src/qgis_agent_plugin/ui/`
-只会在 `theme.py` 里命中。
+正文/次要文字 ≥ 4.5:1，胶囊 ≥ 3:1，有测试逐对断言）。`src/qgis_agent_plugin/ui/` 里**一个十六进制
+颜色都没有**，连 `theme.py` 也不写：全部由调色板角色算出。
 
 `iface` 没有 `addDockWidget` 的宿主（例如只 fake 了接口的测试）会改用 `iface.mainWindow().addDockWidget(...)`；
 连主窗口也没有就不建坞窗，会话其余部分照常；两处用的是同一个宿主对象，所以撤销也是对称的。
