@@ -56,6 +56,11 @@ Done means the change is on `develop` through a merge commit (`git log --merges 
 
 ## Agent skills
 
+### Delegation (`hc` + `herdr-app`)
+
+How to hand work to other agents, how they exchange results, and the five steps a feature goes through.
+See `docs/agents/delegation.md`.
+
 ### Issue tracker
 
 GitHub Issues via the `gh` CLI. See `docs/agents/issue-tracker.md`.
