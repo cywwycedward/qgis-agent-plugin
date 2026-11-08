@@ -17,7 +17,10 @@ lossless JSON form is refused rather than ``str()``-ed.  A run may touch a file
 only through a parameter whose native definition says it is a file input (checked
 with ``resolve_path``) or a layer the current project already holds; every
 destination is refused unless it names QGIS's in-memory provider, because the
-settings of this build grant no data-file write access (PRD §3.2.2, §8.3).
+settings of this build grant no data-file write access (PRD §3.2.2, §8.3).  ``None``
+always means "not provided": it is handed on for the native check to judge, so an
+absent or null destination ends as ``INVALID_INPUT`` from QGIS instead of a path
+verdict this module has no basis for.
 
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
@@ -515,6 +518,8 @@ class ProcessingRunAlgorithm(
             raise
 
 
+# The module's one tuple: ``operations/__init__.py`` imports it and must not define
+# a second copy.
 PROCESSING_OPERATIONS = (
     ProcessingListAlgorithms,
     ProcessingGetAlgorithmInfo,
