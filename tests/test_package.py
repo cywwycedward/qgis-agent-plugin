@@ -21,7 +21,7 @@ _GUARD = """
 import sys
 
 import qgis_agent_plugin
-from qgis_agent_plugin import operations, plugin
+from qgis_agent_plugin import operations, plugin, ui
 from qgis_agent_plugin.core import config, context, contracts, engine, execution_store
 from qgis_agent_plugin.core import models, registry, security
 from qgis_agent_plugin.core.runners import main_thread, qgs_task
@@ -61,6 +61,26 @@ leaked = sorted(
     if name.split(".")[0] in {"qgis", "PyQt5", "PyQt6", "PySide2", "PySide6"}
 )
 assert not leaked, leaked
+
+# The dock is the one module allowed to import Qt at module level, so it is asked
+# for last, and only where Qt exists: it may reach ``qgis.PyQt``, never the QGIS
+# API.  The Qt surface is imported first, so anything the dock pulls in after it is
+# a QGIS module it had no business importing.
+try:
+    import qgis.PyQt.QtWidgets  # noqa: F401 - the Qt surface the dock may use
+except ImportError:
+    pass
+else:
+    qt_loaded = set(sys.modules)
+    from qgis_agent_plugin.ui import dock
+
+    assert callable(dock.OperationDock)
+    reached = sorted(
+        name
+        for name in sys.modules
+        if (name == "qgis" or name.startswith("qgis.")) and name not in qt_loaded
+    )
+    assert not reached, reached
 """
 
 

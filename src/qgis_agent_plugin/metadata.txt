@@ -2,8 +2,8 @@
 name=QGIS Agent
 qgisMinimumVersion=3.44
 qgisMaximumVersion=3.44.99
-description=Operation framework for QGIS Desktop: nine project and layer operations with typed JSON contracts, progress, cancellation and execution ids.
-about=Adds an OperationRegistry and an OperationEngine to the QGIS Python Console (iface.agent_registry and iface.agent_engine). Nine operations run there -- project.create/open/save/get_info and layer.add/list/get_info/set_visibility/sum_numeric_field -- either on the main thread (engine.run_sync) or as a cancellable QgsTask (engine.submit, engine.get, engine.cancel). Every call answers with a JSON-serialisable record: status, progress, result, error code and execution id. Work is local and in-process; there is no network server, no socket and no remote caller. File access is denied until allowed_data_roots and allowed_project_roots are set in QgsSettings under the qgis_agent_plugin group.
+description=Operation framework for QGIS Desktop: nine project and layer operations with typed JSON contracts, progress, cancellation and execution ids, plus a dock window for running any of them by hand.
+about=Adds an OperationRegistry and an OperationEngine to the QGIS Python Console (iface.agent_registry and iface.agent_engine), and an "QGIS Agent 操作" dock window that lists every registered operation, builds a form from its input schema and shows the execution record as JSON. Nine operations run there -- project.create/open/save/get_info and layer.add/list/get_info/set_visibility/sum_numeric_field -- either on the main thread (engine.run_sync) or as a cancellable QgsTask (engine.submit, engine.get, engine.cancel). Every call answers with a JSON-serialisable record: status, progress, result, error code and execution id. Work is local and in-process; there is no network server, no socket and no remote caller. File access is denied until allowed_data_roots and allowed_project_roots are set in QgsSettings under the qgis_agent_plugin group.
 version=0.1.0
 author=geo-map-data maintainers
 email=
