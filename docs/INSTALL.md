@@ -96,30 +96,53 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 插件启用后会多一个坞窗，标题 **QGIS Agent 操作**，停靠在主窗口右侧：`视图 → 面板` 里勾它，
 或右键工具栏空白处。它给人工验证九个 Operation 用，不属于 PRD 的框架面。
 
-| 区域 | 行为 |
+一次测试三步：**选操作 → 填必要的参数 → 运行并读懂结果**。界面自上而下：
+
+| 区域 | 内容 |
 | --- | --- |
-| 操作列表 | 全部已注册 Operation，按 name 升序，标签是 `name  [kind · strategy]`（例：`layer.add  [command · main_thread]`）。一个都没有时显示“没有注册的操作” |
-| 参数表单 | 由该 Operation 的 `input_schema` 生成，一字段一行；`*` 是必填。`bool` 勾选框、`integer`/`number` 数字框、`enum` 下拉，其余单行文本；`schema` 里的 `default` 已填好 |
-| 运行 | `main_thread` 直接 `engine.run_sync`（同步，运行期间按钮禁用）；`background` 走 `engine.submit`，然后每 200 ms 轮询 `engine.get`，状态行显示 status 与进度。“运行”在该后台调用到终态前一直禁用，所以一次只跟一个调用 |
-| 取消 | 只有后台调用运行中可点：调 `engine.cancel(id)`，回执（`accepted`/`status`/`reason`）显示在状态行；终态后自动禁用 |
-| 结果 | 只读文本框是 `ExecutionRecord` 的 JSON（`model_dump(mode="json")`，`ensure_ascii=False, indent=2`）。失败时 `error.code`/`error.message` 显示在表单下方 |
+| 选择器 | 一个下拉框，每项左边是 `name`，右边等宽小字是 `kind · strategy`；`destructive=true` 的操作在左侧带一个警示色点，选中后摘要行也会标“可破坏”。一个都没有时下拉框显示“没有可用的操作” |
+| 摘要 | 选中操作的类型/策略一行（等宽小字），下面是 `description`（次要色，自动换行）。没有描述就不占行 |
+| 参数 | 由 `input_schema` 生成，一字段一行：标签（次要色）+ 编辑器，必填的标签后面有小号“必填” |
+| 动作条 | 主按钮“运行”（强调色，全坞窗唯一）、次按钮“取消”（仅后台调用运行中可点）、文字按钮“复制 JSON”（结果为空时禁用）、右侧状态胶囊 |
+| 状态胶囊 | `就绪 / 运行中 / 完成 / 失败 / 已取消 / 无操作`，各有自己的颜色与文案；运行中下面还有一条进度条 |
+| 错误区 | 只在失败时出现：等宽的 `CODE` + 一句中文“发生了什么” + 一句“接下来怎么办”。已知错误码的句子由坞窗给（引擎原文只在这个标签的鼠标悬停提示里）；映射不到的码才把引擎原文标成“引擎返回：…” |
+| 结果 | 上方一行小字：运行中给 `进度 n%`，结束给 `耗时 12 ms`（取消过就追加回执）。状态词只在胶囊里出现一次；没有记录时这一行不占位。下面是只读、可选中、等宽的 `ExecutionRecord` JSON |
+
+键盘：`Ctrl+Return`（或 `Ctrl+Enter`）运行；`Tab` 顺序是 选择器 → 各参数 → “运行”。
+运行期间选择器与参数禁用（避免一次运行被另一个操作顶掉），后台调用可点“取消”。
 
 两条容易误解的规则：
 
-- **留空 = 用模型默认值**。字段清空就不提交（`bool` 例外：勾选框始终提交自己的状态，所以
-  `add_to_legend` 的默认 `true` 会以“已勾选”出现）。数组/对象字段填 JSON 文本；解析失败时
-  红字提示且**不会**调用引擎。
+- **留空 = 用模型默认值**。文本/数字/JSON 字段清空就不提交，`schema` 里的 `default` 以灰色提示文字
+  显示在空框里，所以“空着”看得见；下拉框第一项是 `默认（值）`，选中它同样不提交。两个例外：勾选框始终提交
+  自己的状态（`add_to_legend` 的默认 `true` 会以“已勾选”出现）；数组/对象填 JSON 文本，解析失败时
+  错误区给 `INVALID_INPUT` 且**不会**调用引擎。没有默认值的必填字段空着，标签后的“必填”是它唯一的标记（不在框里重复）。
 - **默认配置下第一条错误就是 `PATH_NOT_ALLOWED`**。两个允许目录为空时，`layer.add`、
-  `project.open`、`project.save` 都会被拒（见 §4），这不是坞窗的问题。
+  `project.open`、`project.save` 都会被拒（见 §4），这不是坞窗的问题；错误区会直接提示去配
+  `qgis_agent_plugin/allowed_data_roots`。
+
+配色不写死：坞窗的全部颜色由 `ui/theme.py` 从 `QApplication.palette()` 推导（浅色与深色主题都成立，
+正文/次要文字 ≥ 4.5:1，胶囊 ≥ 3:1，有测试逐对断言），`grep -n '#[0-9a-fA-F]\{3,8\}' src/qgis_agent_plugin/ui/`
+只会在 `theme.py` 里命中。
 
 `iface` 没有 `addDockWidget` 的宿主（例如只 fake 了接口的测试）会改用 `iface.mainWindow().addDockWidget(...)`；
 连主窗口也没有就不建坞窗，会话其余部分照常；两处用的是同一个宿主对象，所以撤销也是对称的。
 坞窗是 `QDockWidget`（`addDockWidget` 只收这个类型）。禁用插件时坞窗随 `unload` 一起撤掉（停轮询定时器、
 `removeDockWidget`、`deleteLater`），重复启用/禁用不会留两个坞窗或两个定时器。
 
-实测：坞窗的表单生成、两条执行路径、轮询与取消、生命周期由 `tests/test_ui_dock.py` 在
-`QT_QPA_PLATFORM=offscreen` 下覆盖（不需要 QGIS）；**真 QGIS 里的外观与交互未实测**，需要人工
-打开一次确认停靠位置与中文标签。
+实测：选择器与表单生成、六种状态、`Ctrl+Return`、焦点顺序、两套调色板的对比度、两条执行路径、
+轮询与取消、生命周期由 `tests/test_ui_dock.py` 在 `QT_QPA_PLATFORM=offscreen` 下覆盖（不需要 QGIS）。
+**真 QGIS 里的外观与交互未实测**：offscreen 下没有字体库，截图要额外设 `QT_QPA_FONTDIR=C:\Windows\Fonts`，
+所以截图只代表布局与配色，不代表真机上的字体渲染。
+
+本机交接截图（`docs/delegate/` 已 gitignore，不入库）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `docs/delegate/F11-shots/light-360.png` | 浅色、宽 360：`layer.add` 的完整表单（`idle`） |
+| `docs/delegate/F11-shots/light-460.png` | 浅色、宽 460：`PATH_NOT_ALLOWED` 失败态（错误区 + JSON） |
+| `docs/delegate/F11-shots/dark-360.png` | 深色、宽 360：后台运行中（胶囊 + 42% 进度条 + 表单禁用） |
+| `docs/delegate/F11-shots/dark-460.png` | 深色、宽 460：成功（胶囊 + 摘要 + JSON） |
 
 ## 4. 配置（PRD 10.1 的七项）
 
