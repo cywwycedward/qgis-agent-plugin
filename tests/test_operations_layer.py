@@ -21,6 +21,8 @@ from pydantic import ValidationError
 from qgis_agent_plugin.core.config import Settings
 from qgis_agent_plugin.core.contracts import OperationContext
 from qgis_agent_plugin.core.models import (
+    INTERNAL_ERROR,
+    INVALID_INPUT,
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     LAYER_NOT_IN_TREE,
@@ -29,6 +31,42 @@ from qgis_agent_plugin.core.models import (
 )
 from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.operations import layer as ops
+
+# The PRD's fixed category names.  The fake gives each name its own bit in this
+# order, and the style tests assert the operations return exactly these names.
+VECTOR_CATEGORIES = (
+    "LayerConfiguration",
+    "Symbology",
+    "Symbology3D",
+    "Labeling",
+    "Fields",
+    "Forms",
+    "Actions",
+    "MapTips",
+    "Diagrams",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "GeometryOptions",
+    "Relations",
+    "Temporal",
+    "Legend",
+    "Elevation",
+    "Notes",
+)
+
+RASTER_CATEGORIES = (
+    "LayerConfiguration",
+    "Symbology",
+    "Labeling",
+    "MapTips",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "Temporal",
+    "Elevation",
+    "Notes",
+)
 
 # --- the fake QGIS -----------------------------------------------------------
 
@@ -41,8 +79,31 @@ class FakeCrs:
         return self._authid
 
 
+class FakeRenderer:
+    """Enough of a renderer: the type name the read side reports."""
+
+    def __init__(self, renderer_type: str) -> None:
+        self._renderer_type = renderer_type
+
+    def type(self) -> str:
+        return self._renderer_type
+
+
+class FakeDocument:
+    """Stand-in for ``QDomDocument``: the fake layer decides what it holds."""
+
+    def __init__(self) -> None:
+        self.content = ""
+
+    def setContent(self, xml: str) -> None:
+        self.content = xml
+
+    def toString(self) -> str:
+        return self.content
+
+
 class FakeLayer:
-    """Enough of ``QgsMapLayer``: identity, provider, CRS, validity."""
+    """Enough of ``QgsMapLayer``: identity, provider, CRS, validity, style."""
 
     def __init__(
         self,
@@ -57,6 +118,12 @@ class FakeLayer:
         self.provider = provider
         self.authid = authid
         self.valid = valid
+        # The style read side: a geometry type, a renderer and a native export.
+        self.geometry = 0
+        self.renderer_value: FakeRenderer | None = None
+        self.style_xml = "<qgis/>"
+        self.style_error = ""
+        self.style_exports: list[tuple[Any, Any]] = []
 
     def id(self) -> str:
         return self.layer_id
@@ -72,6 +139,17 @@ class FakeLayer:
 
     def isValid(self) -> bool:
         return self.valid
+
+    def geometryType(self) -> int:
+        return self.geometry
+
+    def renderer(self) -> FakeRenderer | None:
+        return self.renderer_value
+
+    def exportNamedStyle(self, document: FakeDocument, context: Any, categories: Any) -> str:
+        self.style_exports.append((context, categories))
+        document.setContent(self.style_xml)
+        return self.style_error
 
 
 class FakeGroup:
@@ -153,6 +231,43 @@ class FakeQgis:
         self.valid = True
         holder = self
 
+        # The live registries: renderer names the operations must read, not guess.
+        self.vector_renderer_types: list[str] = []
+        self.raster_renderer_types: list[str] = []
+        self.renderer_registry_layers: list[Any] = []
+        self.raster_registries_built = 0
+
+        QgsMapLayer = type(
+            "QgsMapLayer",
+            (),
+            {category: 1 << position for position, category in enumerate(VECTOR_CATEGORIES)}
+            | {"AllStyleCategories": (1 << len(VECTOR_CATEGORIES)) - 1},
+        )
+
+        class QgsReadWriteContext:
+            pass
+
+        class VectorRendererRegistry:
+            def renderersList(self, layer: Any) -> list[str]:
+                holder.renderer_registry_layers.append(layer)
+                return list(holder.vector_renderer_types)
+
+        vector_registry = VectorRendererRegistry()
+
+        class QgsApplication:
+            @staticmethod
+            def rendererRegistry() -> VectorRendererRegistry:
+                return vector_registry
+
+        class QgsRasterRendererRegistry:
+            def __init__(self) -> None:
+                holder.raster_registries_built += 1
+
+            def renderersList(self) -> list[str]:
+                return list(holder.raster_renderer_types)
+
+        Qgis = types.SimpleNamespace(GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2))
+
         class QgsVectorLayer(FakeLayer):
             def __init__(self, uri: str, name: str, provider: str, layer_id: str | None = None):
                 super().__init__(
@@ -190,6 +305,11 @@ class FakeQgis:
         self.QgsVectorLayer = QgsVectorLayer
         self.QgsRasterLayer = QgsRasterLayer
         self.QgsProviderRegistry = QgsProviderRegistry
+        self.QgsMapLayer = QgsMapLayer
+        self.QgsReadWriteContext = QgsReadWriteContext
+        self.QgsApplication = QgsApplication
+        self.QgsRasterRendererRegistry = QgsRasterRendererRegistry
+        self.Qgis = Qgis
 
     def providerMetadata(self, name: str) -> Any:
         self.provider_names.append(name)
@@ -204,9 +324,20 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
         QgsVectorLayer=fake.QgsVectorLayer,
         QgsRasterLayer=fake.QgsRasterLayer,
         QgsProviderRegistry=fake.QgsProviderRegistry,
+        QgsMapLayer=fake.QgsMapLayer,
+        QgsReadWriteContext=fake.QgsReadWriteContext,
+        QgsApplication=fake.QgsApplication,
+        QgsRasterRendererRegistry=fake.QgsRasterRendererRegistry,
+        Qgis=fake.Qgis,
     )
-    monkeypatch.setitem(sys.modules, "qgis", fake_module("qgis", core=core))
+    pyqt = fake_module("qgis.PyQt")
+    qtxml = fake_module("qgis.PyQt.QtXml", QDomDocument=FakeDocument)
+    pyqt = fake_module("qgis.PyQt", QtXml=qtxml)
+    qgis_module = fake_module("qgis", core=core, PyQt=pyqt)
+    monkeypatch.setitem(sys.modules, "qgis", qgis_module)
     monkeypatch.setitem(sys.modules, "qgis.core", core)
+    monkeypatch.setitem(sys.modules, "qgis.PyQt", pyqt)
+    monkeypatch.setitem(sys.modules, "qgis.PyQt.QtXml", qtxml)
     return fake
 
 
@@ -697,3 +828,326 @@ def test_the_layer_module_imports_without_qgis() -> None:
         [sys.executable, "-c", _GUARD], capture_output=True, text=True, env=env, cwd=root
     )
     assert result.returncode == 0, result.stderr
+
+
+# --- the style reads (PRD v2 §4, §5.1–5.3) ----------------------------------
+
+STYLE_READS = (
+    ops.LayerListStyleCategories,
+    ops.LayerGetQml,
+    ops.LayerListAvailableRenderers,
+    ops.LayerGetRenderer,
+)
+
+
+def style_layer(
+    fake: FakeQgis,
+    project: FakeProject,
+    layer_id: str,
+    kind: str = "vector",
+    name: str = "layer",
+) -> Any:
+    layer = make_layer(fake, layer_id, name=name, kind=kind)
+    project.layers[layer.id()] = layer
+    return layer
+
+
+def style_request(operation: Any, layer_id: str, **overrides: Any) -> Any:
+    return operation.input_model.model_validate({"layer_id": layer_id, **overrides})
+
+
+def category_flag(fake: FakeQgis, names: Any) -> int:
+    flag = 0
+    for name in names:
+        flag |= getattr(fake.QgsMapLayer, name)
+    return flag
+
+
+def test_a_spatial_vector_layer_has_the_eighteen_categories_in_order(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    style_layer(fake_qgis, project, "roads")
+
+    result = ops.LayerListStyleCategories().execute_main(
+        make_context(project, data_root),
+        ops.LayerListStyleCategoriesParams(layer_id="roads"),
+    )
+    assert result.layer_id == "roads"
+    assert tuple(result.categories) == VECTOR_CATEGORIES
+    assert set(result.model_dump()) == {"layer_id", "categories"}
+
+
+def test_a_raster_layer_has_the_ten_categories_in_order(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    style_layer(fake_qgis, project, "dem", kind="raster")
+
+    result = ops.LayerListStyleCategories().execute_main(
+        make_context(project, data_root),
+        ops.LayerListStyleCategoriesParams(layer_id="dem"),
+    )
+    assert tuple(result.categories) == RASTER_CATEGORIES
+
+
+@pytest.mark.parametrize("operation", STYLE_READS)
+def test_every_style_read_refuses_an_unknown_layer(
+    fake_qgis: FakeQgis, data_root: Path, operation: Any
+) -> None:
+    ctx = make_context(FakeProject(), data_root)
+    assert refuse(operation(), ctx, style_request(operation, "missing")) == LAYER_NOT_FOUND
+
+
+@pytest.mark.parametrize("operation", STYLE_READS)
+def test_every_style_read_refuses_an_invalid_layer(
+    fake_qgis: FakeQgis, data_root: Path, operation: Any
+) -> None:
+    project = FakeProject()
+    broken = style_layer(fake_qgis, project, "broken")
+    broken.valid = False
+
+    ctx = make_context(project, data_root)
+    assert refuse(operation(), ctx, style_request(operation, "broken")) == INVALID_LAYER
+
+
+@pytest.mark.parametrize("operation", STYLE_READS)
+def test_every_style_read_refuses_a_layer_without_a_style(
+    fake_qgis: FakeQgis, data_root: Path, operation: Any
+) -> None:
+    project = FakeProject()
+    table = style_layer(fake_qgis, project, "table")
+    table.geometry = 4  # Qgis.GeometryType.NullGeometry
+    project.layers["plugin-1"] = FakeLayer("plugin-1", "annotations", provider="custom", authid="")
+
+    ctx = make_context(project, data_root)
+    for layer_id in ("table", "plugin-1"):
+        assert refuse(operation(), ctx, style_request(operation, layer_id)) == INVALID_LAYER
+
+
+def test_get_qml_without_categories_exports_the_whole_applicable_set(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+    layer.style_xml = '<!DOCTYPE qgis>\n<qgis styleCategories="AllStyleCategories"/>\n'
+
+    result = ops.LayerGetQml().execute_main(
+        make_context(project, data_root), ops.LayerGetQmlParams(layer_id="roads")
+    )
+    assert result.qml == layer.style_xml
+    assert set(result.model_dump()) == {"layer_id", "qml"}
+    context, flag = layer.style_exports[0]
+    assert isinstance(context, fake_qgis.QgsReadWriteContext)
+    assert flag == category_flag(fake_qgis, VECTOR_CATEGORIES)
+
+
+def test_get_qml_uses_the_raster_set_for_a_raster_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "dem", kind="raster")
+
+    ops.LayerGetQml().execute_main(
+        make_context(project, data_root), ops.LayerGetQmlParams(layer_id="dem")
+    )
+    assert layer.style_exports[0][1] == category_flag(fake_qgis, RASTER_CATEGORIES)
+
+
+def test_get_qml_only_ors_the_requested_categories(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+
+    ops.LayerGetQml().execute_main(
+        make_context(project, data_root),
+        ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology", "Labeling"]),
+    )
+    assert layer.style_exports[0][1] == category_flag(fake_qgis, ("Symbology", "Labeling"))
+
+
+@pytest.mark.parametrize("categories", [[], ["Symbology", "Symbology"]])
+def test_get_qml_refuses_an_empty_or_repeating_category_list(
+    fake_qgis: FakeQgis, data_root: Path, categories: list[str]
+) -> None:
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+
+    code = refuse(
+        ops.LayerGetQml(),
+        make_context(project, data_root),
+        ops.LayerGetQmlParams(layer_id="roads", categories=categories),
+    )
+    assert code == INVALID_INPUT
+    assert layer.style_exports == []
+
+
+def test_get_qml_refuses_a_category_the_layer_does_not_have(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "dem", kind="raster")
+
+    code = refuse(
+        ops.LayerGetQml(),
+        make_context(project, data_root),
+        ops.LayerGetQmlParams(layer_id="dem", categories=["Symbology3D"]),
+    )
+    assert code == INVALID_INPUT
+    assert layer.style_exports == []
+
+
+def test_an_unknown_category_name_is_refused_by_the_model() -> None:
+    with pytest.raises(ValidationError):
+        ops.LayerGetQmlParams.model_validate({"layer_id": "roads", "categories": ["Avaiable"]})
+
+
+def test_a_failed_native_export_is_internal_error_without_the_native_message(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    # 3.44's binding signals a failed export with a non-empty message instead of
+    # the (message, ok) pair PRD v2 §4.3 describes.
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+    layer.style_error = "C:/secret/roads.qml: permission denied"
+
+    with pytest.raises(FrameworkError) as caught:
+        ops.LayerGetQml().execute_main(
+            make_context(project, data_root), ops.LayerGetQmlParams(layer_id="roads")
+        )
+    assert caught.value.code == INTERNAL_ERROR
+    assert "secret" not in caught.value.message
+
+
+def test_an_exporter_that_raises_is_internal_error(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+
+    def explode(*_: Any) -> str:
+        raise RuntimeError("C:/secret/roads.qml")
+
+    layer.exportNamedStyle = explode
+    with pytest.raises(FrameworkError) as caught:
+        ops.LayerGetQml().execute_main(
+            make_context(project, data_root), ops.LayerGetQmlParams(layer_id="roads")
+        )
+    assert caught.value.code == INTERNAL_ERROR
+    assert "secret" not in caught.value.message
+
+
+def test_the_vector_renderer_list_is_sorted_and_deduplicated(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    fake_qgis.vector_renderer_types = ["singleSymbol", "RuleRenderer", "singleSymbol"]
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+
+    result = ops.LayerListAvailableRenderers().execute_main(
+        make_context(project, data_root),
+        ops.LayerListAvailableRenderersParams(layer_id="roads"),
+    )
+    assert result.renderer_types == ["RuleRenderer", "singleSymbol"]
+    assert set(result.model_dump()) == {"renderer_types"}
+    assert fake_qgis.renderer_registry_layers == [layer]
+    assert fake_qgis.raster_registries_built == 0
+
+
+def test_the_raster_renderer_list_comes_from_the_raster_registry(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    fake_qgis.raster_renderer_types = ["singlecolor", "multibandcolor", "singlecolor"]
+    project = FakeProject()
+    style_layer(fake_qgis, project, "dem", kind="raster")
+
+    result = ops.LayerListAvailableRenderers().execute_main(
+        make_context(project, data_root),
+        ops.LayerListAvailableRenderersParams(layer_id="dem"),
+    )
+    assert result.renderer_types == ["multibandcolor", "singlecolor"]
+    assert fake_qgis.renderer_registry_layers == []
+    assert fake_qgis.raster_registries_built == 1
+
+
+def test_get_renderer_reads_the_active_type_of_vector_and_raster(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    vector = style_layer(fake_qgis, project, "roads")
+    vector.renderer_value = FakeRenderer("categorizedSymbol")
+    raster = style_layer(fake_qgis, project, "dem", kind="raster")
+    raster.renderer_value = FakeRenderer("singlebandgray")
+    ctx = make_context(project, data_root)
+
+    def renderer_type(layer_id: str) -> str:
+        result = ops.LayerGetRenderer().execute_main(
+            ctx, ops.LayerGetRendererParams(layer_id=layer_id)
+        )
+        return result.renderer_type
+
+    assert renderer_type("roads") == "categorizedSymbol"
+    assert renderer_type("dem") == "singlebandgray"
+
+
+def test_a_layer_without_a_renderer_reports_an_empty_type(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    style_layer(fake_qgis, project, "roads")
+
+    result = ops.LayerGetRenderer().execute_main(
+        make_context(project, data_root), ops.LayerGetRendererParams(layer_id="roads")
+    )
+    assert result.renderer_type == ""
+    assert set(result.model_dump()) == {"layer_id", "renderer_type"}
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        ops.LayerListStyleCategoriesParams,
+        ops.LayerGetQmlParams,
+        ops.LayerListAvailableRenderersParams,
+        ops.LayerGetRendererParams,
+    ],
+)
+def test_a_style_read_request_needs_a_layer_id_and_forbids_extras(model: Any) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({"layer_id": ""})
+    with pytest.raises(ValidationError):
+        model.model_validate({"layer_id": "roads", "editable": True})
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (
+            ops.LayerListStyleCategoriesResult,
+            {"layer_id": "roads", "categories": [], "editable": True},
+        ),
+        (ops.LayerGetQmlResult, {"layer_id": "roads", "qml": "", "categories": []}),
+        (ops.LayerListAvailableRenderersResult, {"renderer_types": [], "count": 0}),
+        (ops.LayerGetRendererResult, {"layer_id": "roads", "renderer_type": "", "config": {}}),
+    ],
+)
+def test_a_style_read_result_forbids_an_extra_field(model: Any, payload: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+def test_the_style_reads_register_as_main_thread_queries() -> None:
+    registry = OperationRegistry()
+    for operation in (
+        ops.LayerListStyleCategories(),
+        ops.LayerGetQml(),
+        ops.LayerListAvailableRenderers(),
+        ops.LayerGetRenderer(),
+    ):
+        registry.register(operation)
+
+    assert [
+        (spec.name, spec.kind, spec.strategy, spec.destructive) for spec in registry.list_specs()
+    ] == [
+        ("layer.get_qml", "query", "main_thread", False),
+        ("layer.get_renderer", "query", "main_thread", False),
+        ("layer.list_available_renderers", "query", "main_thread", False),
+        ("layer.list_style_categories", "query", "main_thread", False),
+    ]

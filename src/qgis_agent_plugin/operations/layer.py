@@ -14,11 +14,19 @@ tuple of plain floats, and checked against the project generation on the way bac
 ``visible`` and ``effective_visible`` are deliberately two fields.  A layer's own
 check state can be true while its parent group hides it, and reporting one number
 for both would make a toggle look like it failed (PRD 7.7, AT-21B).
+
+The style reads (``layer.list_style_categories``, ``layer.get_qml``,
+``layer.list_available_renderers``, ``layer.get_renderer``) describe what a layer
+already carries without changing it.  Which categories apply is the PRD's fixed
+list, not something read back out of the XML; the QML itself comes from the
+layer's own native export; and both renderer lists come from the live QGIS
+registries rather than a table kept here.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -34,7 +42,9 @@ from ..core.contracts import (
     TaskControl,
 )
 from ..core.models import (
+    INTERNAL_ERROR,
     INVALID_FIELD_TYPE,
+    INVALID_INPUT,
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     LAYER_NOT_IN_TREE,
@@ -458,3 +468,269 @@ class LayerSumNumericField(
 
     def dependent_layer_ids(self, request: SumNumericFieldParams) -> list[str]:
         return [request.layer_id]
+
+
+# --- reading the style: categories, QML and renderer types -------------------
+
+# The 18 QgsMapLayer.StyleCategory names in the order QGIS declares them, and the
+# subset QgsRasterLayer actually exports (PRD v2 4.1-4.2).  They are names here,
+# not flags: the bit flag is only built for a request, so this module still loads
+# without QGIS.
+StyleCategoryName = Literal[
+    "LayerConfiguration",
+    "Symbology",
+    "Symbology3D",
+    "Labeling",
+    "Fields",
+    "Forms",
+    "Actions",
+    "MapTips",
+    "Diagrams",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "GeometryOptions",
+    "Relations",
+    "Temporal",
+    "Legend",
+    "Elevation",
+    "Notes",
+]
+
+VECTOR_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
+    "LayerConfiguration",
+    "Symbology",
+    "Symbology3D",
+    "Labeling",
+    "Fields",
+    "Forms",
+    "Actions",
+    "MapTips",
+    "Diagrams",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "GeometryOptions",
+    "Relations",
+    "Temporal",
+    "Legend",
+    "Elevation",
+    "Notes",
+)
+
+RASTER_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
+    "LayerConfiguration",
+    "Symbology",
+    "Labeling",
+    "MapTips",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "Temporal",
+    "Elevation",
+    "Notes",
+)
+
+
+def layer_for_style(project: Any, layer_id: str) -> Any:
+    """The layer behind an id, when it is a valid spatial vector or raster.
+
+    The whole read side is defined only for those two shapes.  A vector table, an
+    invalid layer or somebody else's layer type is ``INVALID_LAYER`` rather than
+    an empty answer, because "no categories" and "not applicable" are different
+    results (PRD v2 4.2, 5.2).
+    """
+
+    from qgis.core import Qgis
+
+    layer = project.mapLayer(layer_id)
+    if layer is None:
+        raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+    if not layer.isValid():
+        raise FrameworkError(INVALID_LAYER, "the layer is not valid")
+    kind = layer_kind(layer)
+    if kind == "raster":
+        return layer
+    if kind == "vector" and layer.geometryType() in (
+        Qgis.GeometryType.Point,
+        Qgis.GeometryType.Line,
+        Qgis.GeometryType.Polygon,
+    ):
+        return layer
+    raise FrameworkError(INVALID_LAYER, "the layer is not a spatial vector or raster layer")
+
+
+def style_categories(layer: Any) -> tuple[StyleCategoryName, ...]:
+    """The categories that apply to an already-vetted layer, in PRD order."""
+
+    return RASTER_STYLE_CATEGORIES if layer_kind(layer) == "raster" else VECTOR_STYLE_CATEGORIES
+
+
+def style_category_flag(names: Sequence[str]) -> Any:
+    """The native bit flag naming exactly ``names``, in their given order."""
+
+    from qgis.core import QgsMapLayer
+
+    flag = getattr(QgsMapLayer, names[0])
+    for name in names[1:]:
+        flag = flag | getattr(QgsMapLayer, name)
+    return flag
+
+
+class LayerListStyleCategoriesParams(Params):
+    layer_id: StrictStr = Field(min_length=1)
+
+
+class LayerListStyleCategoriesResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_id: StrictStr
+    categories: list[StyleCategoryName]
+
+
+class LayerGetQmlParams(Params):
+    layer_id: StrictStr = Field(min_length=1)
+    categories: list[StyleCategoryName] | None = None
+
+
+class LayerGetQmlResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_id: StrictStr
+    qml: StrictStr
+
+
+class LayerListAvailableRenderersParams(Params):
+    layer_id: StrictStr = Field(min_length=1)
+
+
+class LayerListAvailableRenderersResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    renderer_types: list[StrictStr]
+
+
+class LayerGetRendererParams(Params):
+    layer_id: StrictStr = Field(min_length=1)
+
+
+class LayerGetRendererResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_id: StrictStr
+    renderer_type: StrictStr
+
+
+class LayerListStyleCategories(
+    BaseQuery[LayerListStyleCategoriesParams, LayerListStyleCategoriesResult],
+    MainThreadOperationMixin[LayerListStyleCategoriesParams, LayerListStyleCategoriesResult],
+):
+    """The QML categories this layer type has, whether or not they are populated."""
+
+    name = "layer.list_style_categories"
+    description = "List the QML style categories that apply to one layer"
+    input_model = LayerListStyleCategoriesParams
+    output_model = LayerListStyleCategoriesResult
+
+    def execute_main(
+        self, ctx: OperationContext, request: LayerListStyleCategoriesParams
+    ) -> LayerListStyleCategoriesResult:
+        layer = layer_for_style(ctx.project, request.layer_id)
+        return LayerListStyleCategoriesResult(
+            layer_id=request.layer_id,
+            categories=list(style_categories(layer)),
+        )
+
+
+class LayerGetQml(
+    BaseQuery[LayerGetQmlParams, LayerGetQmlResult],
+    MainThreadOperationMixin[LayerGetQmlParams, LayerGetQmlResult],
+):
+    """One layer's style as the QML the layer itself exports, in memory only."""
+
+    name = "layer.get_qml"
+    description = "Export one layer's current style as QML XML in memory"
+    input_model = LayerGetQmlParams
+    output_model = LayerGetQmlResult
+
+    def execute_main(self, ctx: OperationContext, request: LayerGetQmlParams) -> LayerGetQmlResult:
+        from qgis.core import QgsReadWriteContext
+        from qgis.PyQt.QtXml import QDomDocument
+
+        layer = layer_for_style(ctx.project, request.layer_id)
+        applicable = style_categories(layer)
+        if request.categories is None:
+            chosen = applicable
+        else:
+            chosen = tuple(request.categories)
+            if not chosen:
+                raise FrameworkError(INVALID_INPUT, "categories must not be empty")
+            if len(set(chosen)) != len(chosen):
+                raise FrameworkError(INVALID_INPUT, "categories must not repeat")
+            if any(name not in applicable for name in chosen):
+                raise FrameworkError(INVALID_INPUT, "a category does not apply to this layer")
+
+        document = QDomDocument()
+        try:
+            # 3.44's binding returns the export's error message (empty on success)
+            # and fills the document; it does not return (message, ok) as PRD v2 4.3
+            # says -- checked against this install's QgsMapLayer.exportNamedStyle.
+            message = layer.exportNamedStyle(
+                document, QgsReadWriteContext(), style_category_flag(chosen)
+            )
+        except Exception as error:  # noqa: BLE001 - any exporter failure is one refusal
+            raise FrameworkError(INTERNAL_ERROR, "the layer style could not be exported") from error
+        if message:
+            # The native message may name a file, so it stays out of the record.
+            raise FrameworkError(INTERNAL_ERROR, "the layer style could not be exported")
+        return LayerGetQmlResult(layer_id=request.layer_id, qml=document.toString())
+
+
+class LayerListAvailableRenderers(
+    BaseQuery[LayerListAvailableRenderersParams, LayerListAvailableRenderersResult],
+    MainThreadOperationMixin[LayerListAvailableRenderersParams, LayerListAvailableRenderersResult],
+):
+    """The renderer type names the live QGIS registries offer for this layer."""
+
+    name = "layer.list_available_renderers"
+    description = "List the renderer type names the QGIS registries offer for one layer"
+    input_model = LayerListAvailableRenderersParams
+    output_model = LayerListAvailableRenderersResult
+
+    def execute_main(
+        self, ctx: OperationContext, request: LayerListAvailableRenderersParams
+    ) -> LayerListAvailableRenderersResult:
+        from qgis.core import QgsApplication, QgsRasterRendererRegistry
+
+        layer = layer_for_style(ctx.project, request.layer_id)
+        if layer_kind(layer) == "raster":
+            # QgsApplication.rasterRendererRegistry() is SIP_SKIP in 3.44 and the
+            # class does not bind instance(), so a registry object is the only
+            # Python path to the raster list (PRD v2 5.2 names the accessor that
+            # this build does not expose).
+            renderer_types = QgsRasterRendererRegistry().renderersList()
+        else:
+            renderer_types = QgsApplication.rendererRegistry().renderersList(layer)
+        return LayerListAvailableRenderersResult(renderer_types=sorted(set(renderer_types)))
+
+
+class LayerGetRenderer(
+    BaseQuery[LayerGetRendererParams, LayerGetRendererResult],
+    MainThreadOperationMixin[LayerGetRendererParams, LayerGetRendererResult],
+):
+    """The type name of the renderer the layer currently has, if any."""
+
+    name = "layer.get_renderer"
+    description = "Read the type name of one layer's current renderer"
+    input_model = LayerGetRendererParams
+    output_model = LayerGetRendererResult
+
+    def execute_main(
+        self, ctx: OperationContext, request: LayerGetRendererParams
+    ) -> LayerGetRendererResult:
+        layer = layer_for_style(ctx.project, request.layer_id)
+        renderer = layer.renderer()
+        return LayerGetRendererResult(
+            layer_id=request.layer_id,
+            renderer_type="" if renderer is None else renderer.type(),
+        )
