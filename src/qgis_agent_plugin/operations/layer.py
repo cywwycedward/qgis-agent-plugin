@@ -1051,7 +1051,15 @@ def category_key(field: Any, value: Any) -> tuple[str, Any]:
     if field.isNumeric():
         if isinstance(value, (bool, str)):
             raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
-        return ("number", float(value))
+        try:
+            number = float(value)
+        except OverflowError:
+            # An integer the float cannot hold is not finite for this purpose, and it
+            # must not reach either the dedupe key or the native category.
+            raise FrameworkError(
+                INVALID_INPUT, "a category value does not fit the field type"
+            ) from None
+        return ("number", number)
     if isinstance(value, (bool, str)):
         return ("value", value)
     raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
@@ -1172,8 +1180,10 @@ def raster_renderer(layer: Any, config: RasterRendererConfig) -> Any:
         # The enhancement takes the band's own data type, or a float band's values
         # would be clipped to an 8-bit range before the stretch sees them.
         enhancement = QgsContrastEnhancement(provider.dataType(band))
-        enhancement.setMinimumValue(config.min)
-        enhancement.setMaximumValue(config.max)
+        # The algorithm setter below builds the lookup table once; the two values
+        # only store their bounds (PRD v2 7.1).
+        enhancement.setMinimumValue(config.min, False)
+        enhancement.setMaximumValue(config.max, False)
         enhancement.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum)
         renderer.setContrastEnhancement(enhancement)
         return renderer

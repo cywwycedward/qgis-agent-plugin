@@ -501,13 +501,17 @@ class FakeQgis:
                 self.minimum: float | None = None
                 self.maximum: float | None = None
                 self.algorithm: int | None = None
+                self.minimum_table: bool | None = None
+                self.maximum_table: bool | None = None
 
-            def setMinimumValue(self, value: float) -> None:
+            def setMinimumValue(self, value: float, generateTable: bool = True) -> None:
                 self.minimum = value
+                self.minimum_table = generateTable
                 holder.events.append("minimum")
 
-            def setMaximumValue(self, value: float) -> None:
+            def setMaximumValue(self, value: float, generateTable: bool = True) -> None:
                 self.maximum = value
+                self.maximum_table = generateTable
                 holder.events.append("maximum")
 
             def setContrastEnhancementAlgorithm(self, algorithm: int) -> None:
@@ -1767,6 +1771,8 @@ def test_a_single_band_gray_renderer_carries_its_stretch(
     assert enhancement.data_type == fake_qgis.raster_data_type
     assert (enhancement.minimum, enhancement.maximum) == (0.0, 2500.0)
     assert enhancement.algorithm == fake_qgis.QgsContrastEnhancement.StretchToMinimumMaximum
+    # The bounds only store their values; the algorithm setter builds the table once.
+    assert (enhancement.minimum_table, enhancement.maximum_table) == (False, False)
     assert layer.events == [
         "construct:singlebandgray",
         "minimum",
@@ -1797,7 +1803,13 @@ def test_a_multiband_renderer_may_repeat_a_band(fake_qgis: FakeQgis, data_root: 
     assert result.renderer_type == "multibandcolor"
 
 
-def test_a_pseudocolor_renderer_carries_its_stops(fake_qgis: FakeQgis, data_root: Path) -> None:
+@pytest.mark.parametrize(
+    ("interpolation", "ramp_type"),
+    [("linear", "Interpolated"), ("discrete", "Discrete"), ("exact", "Exact")],
+)
+def test_a_pseudocolor_renderer_carries_its_stops(
+    fake_qgis: FakeQgis, data_root: Path, interpolation: str, ramp_type: str
+) -> None:
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=1)
 
@@ -1808,7 +1820,7 @@ def test_a_pseudocolor_renderer_carries_its_stops(fake_qgis: FakeQgis, data_root
             {
                 "type": "singlebandpseudocolor",
                 "band": 1,
-                "interpolation": "discrete",
+                "interpolation": interpolation,
                 "stops": [
                     {"value": 0, "color": "#2665B8"},
                     {"value": 1000, "color": "#F2E9A4"},
@@ -1823,7 +1835,7 @@ def test_a_pseudocolor_renderer_carries_its_stops(fake_qgis: FakeQgis, data_root
     assert renderer.band == 1
     ramp = renderer.shader.function
     assert isinstance(ramp, fake_qgis.QgsColorRampShader)
-    assert ramp.ramp_type == fake_qgis.QgsColorRampShader.Discrete
+    assert ramp.ramp_type == getattr(fake_qgis.QgsColorRampShader, ramp_type)
     assert [(item.value, item.color.name()) for item in ramp.items] == [
         (0.0, "#2665b8"),
         (1000.0, "#f2e9a4"),
@@ -2056,6 +2068,29 @@ def test_a_category_value_the_field_cannot_hold_is_refused(
         ),
     )
     assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_an_unrepresentable_category_value_is_refused(fake_qgis: FakeQgis, data_root: Path) -> None:
+    """An int too large for a float is a bad value, not an internal failure."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
+    layer.field_list = [FakeField("population", numeric=True)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "pop",
+            {
+                "type": "categorizedSymbol",
+                "field": "population",
+                "categories": [{"value": 10**400, "label": "Huge", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert fake_qgis.built == []
     assert layer.renderer_sets == []
 
 
