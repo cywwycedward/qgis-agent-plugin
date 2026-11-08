@@ -5,6 +5,8 @@
 
 适用的工具：`hc`（herdr-core，跑终端/进程）+ `herdr-app`（把终端放进人的窗口）。
 
+**本文的「agent」= `hc` 起的终端里的交互式 pi 会话，不是 pi 的 `subagent` 工具。** `subagent` 没有终端 id（`hc send`/`wait`/`read`/`kill` 都寻址不到）、不进人的窗口、与主 agent 共用 cwd，而 §1 的派活、§4 的五步隔离（步骤 2/5 空上下文、1/3/4 同一会话续话）全都依赖这三件事；所以派活一律走 `hc run`，不调 `subagent`。
+
 ---
 
 ## 0. 三个地址概念
