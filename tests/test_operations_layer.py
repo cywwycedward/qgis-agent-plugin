@@ -22,6 +22,7 @@ from qgis_agent_plugin.core.config import Settings
 from qgis_agent_plugin.core.contracts import OperationContext
 from qgis_agent_plugin.core.models import (
     INTERNAL_ERROR,
+    INVALID_FIELD_TYPE,
     INVALID_INPUT,
     INVALID_LAYER,
     LAYER_NOT_FOUND,
@@ -89,6 +90,73 @@ class FakeRenderer:
         return self._renderer_type
 
 
+class FakeSymbol:
+    """What a ``createSimple`` call produced: the declared properties, nothing else."""
+
+    def __init__(self, kind: str, properties: dict[str, Any]) -> None:
+        self.kind = kind
+        self.properties = dict(properties)
+
+
+class FakeField:
+    """The one field property the setter reads: whether it is a number."""
+
+    def __init__(self, name: str, numeric: bool = True) -> None:
+        self.name = name
+        self.numeric = numeric
+
+    def isNumeric(self) -> bool:
+        return self.numeric
+
+
+class FakeFields:
+    def __init__(self, fields: list[Any]) -> None:
+        self.items = list(fields)
+
+    def indexFromName(self, name: str) -> int:
+        for index, field in enumerate(self.items):
+            if field.name == name:
+                return index
+        return -1
+
+    def at(self, index: int) -> Any:
+        return self.items[index]
+
+
+class FakeColor:
+    """``QColor`` for the raster setter: the string it was built from."""
+
+    def __init__(self, color: str) -> None:
+        self._color = color
+
+    def name(self) -> str:
+        return self._color.lower()
+
+
+class FakeRule:
+    """One ``QgsRuleBasedRenderer.Rule``: its own filter, symbol and children."""
+
+    def __init__(
+        self,
+        symbol: Any,
+        filterExp: str = "",
+        label: str = "",
+        elseRule: bool = False,
+    ) -> None:
+        self.symbol = symbol
+        self.filter = filterExp
+        self.label = label
+        self.else_rule = elseRule
+        self.active: bool | None = None
+        self.children: list[FakeRule] = []
+
+    def appendChild(self, child: FakeRule) -> None:
+        self.children.append(child)
+
+    def setActive(self, active: bool) -> None:
+        self.active = active
+
+
 class FakeDocument:
     """Stand-in for ``QDomDocument``: the fake layer decides what it holds."""
 
@@ -124,6 +192,13 @@ class FakeLayer:
         self.style_xml = "<qgis/>"
         self.style_error = ""
         self.style_exports: list[tuple[Any, Any]] = []
+        # The setter side: what was installed, what the layer holds, and the calls.
+        self.renderer_sets: list[Any] = []
+        self.repaints = 0
+        self.events: list[str] = []
+        self.band_count = 1
+        self.data_provider: Any = None
+        self.field_list: list[Any] = []
 
     def id(self) -> str:
         return self.layer_id
@@ -150,6 +225,24 @@ class FakeLayer:
         self.style_exports.append((context, categories))
         document.setContent(self.style_xml)
         return self.style_error
+
+    def bandCount(self) -> int:
+        return self.band_count
+
+    def dataProvider(self) -> Any:
+        return self.data_provider
+
+    def fields(self) -> FakeFields:
+        return FakeFields(self.field_list)
+
+    def setRenderer(self, renderer: Any) -> None:
+        self.renderer_sets.append(renderer)
+        self.renderer_value = renderer
+        self.events.append("setRenderer")
+
+    def triggerRepaint(self) -> None:
+        self.repaints += 1
+        self.events.append("repaint")
 
 
 class FakeGroup:
@@ -202,6 +295,7 @@ class FakeProject:
         self.layers: dict[str, Any] = {}
         self.root = FakeTreeRoot()
         self.added: list[tuple[Any, bool]] = []
+        self.dirty: list[bool] = []
 
     def mapLayers(self) -> dict[str, Any]:
         return dict(self.layers)
@@ -211,6 +305,9 @@ class FakeProject:
 
     def layerTreeRoot(self) -> FakeTreeRoot:
         return self.root
+
+    def setDirty(self, dirty: bool = True) -> None:
+        self.dirty.append(dirty)
 
     def addMapLayer(self, layer: Any, add_to_legend: bool = True) -> Any:
         # Matches QGIS: without a legend entry the layer gets no tree node.
@@ -236,6 +333,13 @@ class FakeQgis:
         self.raster_renderer_types: list[str] = []
         self.renderer_registry_layers: list[Any] = []
         self.raster_registries_built = 0
+
+        # The renderer setter: what was built, in what order, and what may fail.
+        self.events: list[str] = []
+        self.built: list[Any] = []
+        self.invalid_expressions: set[str] = set()
+        self.fail_build: str | None = None
+        self.raster_data_type = 1  # Qgis.DataType.Byte
 
         QgsMapLayer = type(
             "QgsMapLayer",
@@ -266,7 +370,18 @@ class FakeQgis:
             def renderersList(self) -> list[str]:
                 return list(holder.raster_renderer_types)
 
-        Qgis = types.SimpleNamespace(GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2))
+        Qgis = types.SimpleNamespace(
+            GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2),
+            DataType=types.SimpleNamespace(Byte=1, Float32=6),
+        )
+
+        class FakeRasterProvider:
+            def __init__(self) -> None:
+                self.data_type_bands: list[int] = []
+
+            def dataType(self, band: int) -> int:
+                self.data_type_bands.append(band)
+                return holder.raster_data_type
 
         class QgsVectorLayer(FakeLayer):
             def __init__(self, uri: str, name: str, provider: str, layer_id: str | None = None):
@@ -289,7 +404,184 @@ class FakeQgis:
                     valid=holder.valid,
                 )
                 self.source_uri = uri
+                self.data_provider = FakeRasterProvider()
                 holder.constructed.append(self)
+
+        # --- the renderer setter (PRD v2 5.4-7.5) ---------------------------
+
+        class FakeBuiltRenderer:
+            renderer_type = ""
+
+            def type(self) -> str:
+                return self.renderer_type
+
+        def record(kind: str, rendered: Any) -> None:
+            holder.built.append(rendered)
+            holder.events.append(f"construct:{kind}")
+            if holder.fail_build == kind:
+                raise RuntimeError("the native constructor refused")
+
+        class QgsMarkerSymbol:
+            @staticmethod
+            def createSimple(properties: dict[str, Any]) -> FakeSymbol:
+                return FakeSymbol("marker", properties)
+
+        class QgsLineSymbol:
+            @staticmethod
+            def createSimple(properties: dict[str, Any]) -> FakeSymbol:
+                return FakeSymbol("line", properties)
+
+        class QgsFillSymbol:
+            @staticmethod
+            def createSimple(properties: dict[str, Any]) -> FakeSymbol:
+                return FakeSymbol("fill", properties)
+
+        class QgsNullSymbolRenderer(FakeBuiltRenderer):
+            renderer_type = "nullSymbol"
+
+            def __init__(self) -> None:
+                record("nullSymbol", self)
+
+        class QgsSingleSymbolRenderer(FakeBuiltRenderer):
+            renderer_type = "singleSymbol"
+
+            def __init__(self, symbol: FakeSymbol) -> None:
+                self.symbol = symbol
+                record("singleSymbol", self)
+
+        class QgsRendererCategory:
+            def __init__(self, value: Any, symbol: FakeSymbol, label: str) -> None:
+                self.value = value
+                self.symbol = symbol
+                self.label = label
+
+        class QgsCategorizedSymbolRenderer(FakeBuiltRenderer):
+            renderer_type = "categorizedSymbol"
+
+            def __init__(self, field: str, categories: list[QgsRendererCategory]) -> None:
+                self.field = field
+                self.categories = list(categories)
+                record("categorizedSymbol", self)
+
+        class QgsRendererRange:
+            def __init__(self, lower: float, upper: float, symbol: FakeSymbol, label: str) -> None:
+                self.lower = lower
+                self.upper = upper
+                self.symbol = symbol
+                self.label = label
+
+        class QgsGraduatedSymbolRenderer(FakeBuiltRenderer):
+            renderer_type = "graduatedSymbol"
+
+            def __init__(self, field: str, ranges: list[QgsRendererRange]) -> None:
+                self.field = field
+                self.ranges = list(ranges)
+                record("graduatedSymbol", self)
+
+        class QgsRuleBasedRenderer(FakeBuiltRenderer):
+            renderer_type = "RuleRenderer"
+            Rule = FakeRule
+
+            def __init__(self, root: FakeRule) -> None:
+                self.root = root
+                record("RuleRenderer", self)
+
+        class QgsExpression:
+            def __init__(self, text: str) -> None:
+                self.text = text
+
+            def hasParserError(self) -> bool:
+                return self.text in holder.invalid_expressions
+
+        class QgsContrastEnhancement:
+            StretchToMinimumMaximum = 1
+
+            def __init__(self, data_type: int) -> None:
+                self.data_type = data_type
+                self.minimum: float | None = None
+                self.maximum: float | None = None
+                self.algorithm: int | None = None
+
+            def setMinimumValue(self, value: float) -> None:
+                self.minimum = value
+                holder.events.append("minimum")
+
+            def setMaximumValue(self, value: float) -> None:
+                self.maximum = value
+                holder.events.append("maximum")
+
+            def setContrastEnhancementAlgorithm(self, algorithm: int) -> None:
+                self.algorithm = algorithm
+                holder.events.append("algorithm")
+
+        class QgsSingleBandGrayRenderer(FakeBuiltRenderer):
+            renderer_type = "singlebandgray"
+
+            def __init__(self, provider: Any, band: int) -> None:
+                self.provider = provider
+                self.band = band
+                self.enhancement: QgsContrastEnhancement | None = None
+                record("singlebandgray", self)
+
+            def setContrastEnhancement(self, enhancement: QgsContrastEnhancement) -> None:
+                self.enhancement = enhancement
+                holder.events.append("contrast")
+
+        class QgsMultiBandColorRenderer(FakeBuiltRenderer):
+            renderer_type = "multibandcolor"
+
+            def __init__(self, provider: Any, red: int, green: int, blue: int) -> None:
+                self.provider = provider
+                self.red = red
+                self.green = green
+                self.blue = blue
+                record("multibandcolor", self)
+
+        class QgsColorRampShader:
+            Interpolated = 0
+            Discrete = 1
+            Exact = 2
+
+            class ColorRampItem:
+                def __init__(self, value: float, color: FakeColor, label: str = "") -> None:
+                    self.value = value
+                    self.color = color
+                    self.label = label
+
+            def __init__(self) -> None:
+                self.ramp_type: int | None = None
+                self.items: list[QgsColorRampShader.ColorRampItem] = []
+
+            def setColorRampType(self, ramp_type: int) -> None:
+                self.ramp_type = ramp_type
+
+            def setColorRampItemList(self, items: list[QgsColorRampShader.ColorRampItem]) -> None:
+                self.items = list(items)
+
+        class QgsRasterShader:
+            def __init__(self) -> None:
+                self.function: Any = None
+
+            def setRasterShaderFunction(self, function: Any) -> None:
+                self.function = function
+
+        class QgsSingleBandPseudoColorRenderer(FakeBuiltRenderer):
+            renderer_type = "singlebandpseudocolor"
+
+            def __init__(self, provider: Any, band: int, shader: QgsRasterShader) -> None:
+                self.provider = provider
+                self.band = band
+                self.shader = shader
+                record("singlebandpseudocolor", self)
+
+        class QgsRasterSingleColorRenderer(FakeBuiltRenderer):
+            renderer_type = "singlecolor"
+
+            def __init__(self, provider: Any, band: int, color: FakeColor) -> None:
+                self.provider = provider
+                self.band = band
+                self.color = color
+                record("singlecolor", self)
 
         class OgrMetadata:
             def encodeUri(self, parts: dict[str, str]) -> str:
@@ -310,6 +602,25 @@ class FakeQgis:
         self.QgsApplication = QgsApplication
         self.QgsRasterRendererRegistry = QgsRasterRendererRegistry
         self.Qgis = Qgis
+        # The renderer setter's native classes, for the tests' isinstance assertions.
+        self.QgsMarkerSymbol: Any = QgsMarkerSymbol
+        self.QgsLineSymbol: Any = QgsLineSymbol
+        self.QgsFillSymbol: Any = QgsFillSymbol
+        self.QgsNullSymbolRenderer: Any = QgsNullSymbolRenderer
+        self.QgsSingleSymbolRenderer: Any = QgsSingleSymbolRenderer
+        self.QgsRendererCategory: Any = QgsRendererCategory
+        self.QgsCategorizedSymbolRenderer: Any = QgsCategorizedSymbolRenderer
+        self.QgsRendererRange: Any = QgsRendererRange
+        self.QgsGraduatedSymbolRenderer: Any = QgsGraduatedSymbolRenderer
+        self.QgsRuleBasedRenderer: Any = QgsRuleBasedRenderer
+        self.QgsExpression: Any = QgsExpression
+        self.QgsContrastEnhancement: Any = QgsContrastEnhancement
+        self.QgsSingleBandGrayRenderer: Any = QgsSingleBandGrayRenderer
+        self.QgsMultiBandColorRenderer: Any = QgsMultiBandColorRenderer
+        self.QgsColorRampShader: Any = QgsColorRampShader
+        self.QgsRasterShader: Any = QgsRasterShader
+        self.QgsSingleBandPseudoColorRenderer: Any = QgsSingleBandPseudoColorRenderer
+        self.QgsRasterSingleColorRenderer: Any = QgsRasterSingleColorRenderer
 
     def providerMetadata(self, name: str) -> Any:
         self.provider_names.append(name)
@@ -329,14 +640,34 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
         QgsApplication=fake.QgsApplication,
         QgsRasterRendererRegistry=fake.QgsRasterRendererRegistry,
         Qgis=fake.Qgis,
+        QgsMarkerSymbol=fake.QgsMarkerSymbol,
+        QgsLineSymbol=fake.QgsLineSymbol,
+        QgsFillSymbol=fake.QgsFillSymbol,
+        QgsNullSymbolRenderer=fake.QgsNullSymbolRenderer,
+        QgsSingleSymbolRenderer=fake.QgsSingleSymbolRenderer,
+        QgsRendererCategory=fake.QgsRendererCategory,
+        QgsCategorizedSymbolRenderer=fake.QgsCategorizedSymbolRenderer,
+        QgsRendererRange=fake.QgsRendererRange,
+        QgsGraduatedSymbolRenderer=fake.QgsGraduatedSymbolRenderer,
+        QgsRuleBasedRenderer=fake.QgsRuleBasedRenderer,
+        QgsExpression=fake.QgsExpression,
+        QgsContrastEnhancement=fake.QgsContrastEnhancement,
+        QgsSingleBandGrayRenderer=fake.QgsSingleBandGrayRenderer,
+        QgsMultiBandColorRenderer=fake.QgsMultiBandColorRenderer,
+        QgsColorRampShader=fake.QgsColorRampShader,
+        QgsRasterShader=fake.QgsRasterShader,
+        QgsSingleBandPseudoColorRenderer=fake.QgsSingleBandPseudoColorRenderer,
+        QgsRasterSingleColorRenderer=fake.QgsRasterSingleColorRenderer,
     )
     qtxml = fake_module("qgis.PyQt.QtXml", QDomDocument=FakeDocument)
-    pyqt = fake_module("qgis.PyQt", QtXml=qtxml)
+    qtgui = fake_module("qgis.PyQt.QtGui", QColor=FakeColor)
+    pyqt = fake_module("qgis.PyQt", QtXml=qtxml, QtGui=qtgui)
     qgis_module = fake_module("qgis", core=core, PyQt=pyqt)
     monkeypatch.setitem(sys.modules, "qgis", qgis_module)
     monkeypatch.setitem(sys.modules, "qgis.core", core)
     monkeypatch.setitem(sys.modules, "qgis.PyQt", pyqt)
     monkeypatch.setitem(sys.modules, "qgis.PyQt.QtXml", qtxml)
+    monkeypatch.setitem(sys.modules, "qgis.PyQt.QtGui", qtgui)
     return fake
 
 
@@ -380,7 +711,10 @@ def make_layer(
     provider: str = "ogr",
 ) -> Any:
     layer_class = fake.QgsVectorLayer if kind == "vector" else fake.QgsRasterLayer
-    return layer_class(f"source-{layer_id}", name, provider, layer_id=layer_id)
+    layer = layer_class(f"source-{layer_id}", name, provider, layer_id=layer_id)
+    # The setter tests assert the order of construction, install and repaint.
+    layer.events = fake.events
+    return layer
 
 
 def add_params(**overrides: Any) -> dict[str, Any]:
@@ -1164,3 +1498,877 @@ def test_the_style_reads_register_as_main_thread_queries() -> None:
         ("layer.list_available_renderers", "query", "main_thread", False),
         ("layer.list_style_categories", "query", "main_thread", False),
     ]
+
+
+# --- the renderer setter (PRD v2 5.4-7.5) ------------------------------------
+
+POINT = 0
+LINE = 1
+POLYGON = 2
+NULL_GEOMETRY = 4
+
+FILL = {"type": "fill", "color": "#398F59"}
+LINE_SYMBOL = {"type": "line", "color": "#D95843", "width_mm": 0.8}
+MARKER = {"type": "marker", "color": "#FF0000"}
+
+# The seven vector and four raster types this version recognises but does not set.
+UNSUPPORTED_RENDERER_TYPES = (
+    "pointDisplacement",
+    "pointCluster",
+    "heatmapRenderer",
+    "mergedFeatureRenderer",
+    "invertedPolygonRenderer",
+    "25dRenderer",
+    "embeddedSymbol",
+    "paletted",
+    "singlebandcolordata",
+    "hillshade",
+    "contour",
+)
+
+
+def setter_layer(
+    fake: FakeQgis,
+    project: FakeProject,
+    layer_id: str,
+    kind: str = "vector",
+    geometry: int | None = None,
+    bands: int = 1,
+) -> Any:
+    layer = style_layer(fake, project, layer_id, kind=kind)
+    if geometry is not None:
+        layer.geometry = geometry
+    layer.band_count = bands
+    return layer
+
+
+def setter_payload(layer_id: str, renderer: dict[str, Any]) -> dict[str, Any]:
+    return {"layer_id": layer_id, "renderer": renderer}
+
+
+def set_renderer(ctx: OperationContext, payload: dict[str, Any]) -> Any:
+    return ops.LayerSetRenderer().execute_main(
+        ctx, ops.LayerSetRendererParams.model_validate(payload)
+    )
+
+
+def refuse_renderer(ctx: OperationContext, payload: dict[str, Any]) -> str:
+    return refuse(
+        ops.LayerSetRenderer(),
+        ctx,
+        ops.LayerSetRendererParams.model_validate(payload),
+    )
+
+
+def test_a_null_symbol_renderer_is_installed_in_one_call(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
+    layer.renderer_value = FakeRenderer("singleSymbol")
+
+    result = set_renderer(
+        make_context(project, data_root), setter_payload("parcels", {"type": "nullSymbol"})
+    )
+
+    assert result.layer_id == "parcels"
+    assert result.renderer_type == "nullSymbol"
+    assert set(result.model_dump()) == {"layer_id", "renderer_type"}
+    # The renderer was complete before the layer saw it, and it was installed once.
+    assert layer.renderer_sets == [fake_qgis.built[0]]
+    assert layer.renderer_value is layer.renderer_sets[0]
+    assert layer.events == ["construct:nullSymbol", "setRenderer", "repaint"]
+    assert project.dirty == [True]
+
+
+def test_a_single_symbol_renderer_takes_the_declared_properties(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "parcels",
+            {
+                "type": "singleSymbol",
+                "symbol": {
+                    "type": "fill",
+                    "color": "#6CAC83",
+                    "outline_color": "#275E40",
+                    "outline_width_mm": 0.5,
+                },
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsSingleSymbolRenderer)
+    assert renderer.symbol.kind == "fill"
+    assert renderer.symbol.properties == {
+        "color": "#6CAC83",
+        "outline_color": "#275E40",
+        "outline_width": 0.5,
+    }
+    assert result.renderer_type == "singleSymbol"
+    assert layer.events == ["construct:singleSymbol", "setRenderer", "repaint"]
+
+
+@pytest.mark.parametrize(
+    ("geometry", "symbol", "kind"),
+    [(POINT, MARKER, "marker"), (LINE, LINE_SYMBOL, "line"), (POLYGON, FILL, "fill")],
+)
+def test_each_geometry_takes_only_its_own_symbol_type(
+    fake_qgis: FakeQgis, data_root: Path, geometry: int, symbol: dict[str, Any], kind: str
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "features", geometry=geometry)
+
+    set_renderer(
+        make_context(project, data_root),
+        setter_payload("features", {"type": "singleSymbol", "symbol": symbol}),
+    )
+
+    built = layer.renderer_sets[0].symbol
+    assert built.kind == kind
+    assert built.properties["color"] == symbol["color"]
+
+
+def test_categories_keep_the_declared_order_and_values(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
+    layer.field_list = [FakeField("landuse", numeric=False)]
+    ctx = make_context(project, data_root)
+
+    result = set_renderer(
+        ctx,
+        setter_payload(
+            "landuse",
+            {
+                "type": "categorizedSymbol",
+                "field": "landuse",
+                "categories": [
+                    {"value": "forest", "label": "Forest", "symbol": FILL},
+                    {"value": "water", "label": "Water", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsCategorizedSymbolRenderer)
+    assert renderer.field == "landuse"
+    assert [(category.value, category.label) for category in renderer.categories] == [
+        ("forest", "Forest"),
+        ("water", "Water"),
+    ]
+    assert [category.symbol.kind for category in renderer.categories] == ["fill", "fill"]
+    assert result.renderer_type == "categorizedSymbol"
+    # The read side agrees with the object that was installed.
+    read_back = ops.LayerGetRenderer().execute_main(
+        ctx, ops.LayerGetRendererParams(layer_id="landuse")
+    )
+    assert read_back.renderer_type == result.renderer_type
+
+
+def test_ranges_keep_the_declared_order_and_limits(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
+    layer.field_list = [FakeField("population", numeric=True)]
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "pop",
+            {
+                "type": "graduatedSymbol",
+                "field": "population",
+                "ranges": [
+                    {"lower": 0, "upper": 1000, "label": "Low", "symbol": FILL},
+                    {"lower": 1000, "upper": 5000, "label": "High", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsGraduatedSymbolRenderer)
+    assert renderer.field == "population"
+    assert [(item.lower, item.upper, item.label) for item in renderer.ranges] == [
+        (0.0, 1000.0, "Low"),
+        (1000.0, 5000.0, "High"),
+    ]
+    assert result.renderer_type == "graduatedSymbol"
+
+
+def test_a_flat_rule_renderer_builds_its_rules_in_order(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "roads", geometry=LINE)
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "roads",
+            {
+                "type": "RuleRenderer",
+                "rules": [
+                    {"label": "Main", "filter": "\"class\" = 'primary'", "symbol": LINE_SYMBOL},
+                    {
+                        "label": "Other",
+                        "filter": "\"class\" = 'secondary'",
+                        "symbol": LINE_SYMBOL,
+                    },
+                    {"label": "Else", "else_rule": True, "symbol": LINE_SYMBOL},
+                ],
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsRuleBasedRenderer)
+    children = renderer.root.children
+    # A root built from Rule(None) starts empty: no implicit catch-all rule exists.
+    assert [child.label for child in children] == ["Main", "Other", "Else"]
+    assert [child.filter for child in children] == [
+        "\"class\" = 'primary'",
+        "\"class\" = 'secondary'",
+        "",
+    ]
+    assert [child.else_rule for child in children] == [False, False, True]
+    assert all(child.active is True for child in children)
+    assert [child.symbol.kind for child in children] == ["line", "line", "line"]
+    assert result.renderer_type == "RuleRenderer"
+    assert layer.events == ["construct:RuleRenderer", "setRenderer", "repaint"]
+
+
+def test_a_single_band_gray_renderer_carries_its_stretch(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=4)
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload("dem", {"type": "singlebandgray", "band": 2, "min": 0, "max": 2500}),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsSingleBandGrayRenderer)
+    assert renderer.band == 2
+    assert renderer.provider is layer.data_provider
+    enhancement = renderer.enhancement
+    assert enhancement is not None
+    # The enhancement uses the band's own data type and the declared stretch.
+    assert enhancement.data_type == fake_qgis.raster_data_type
+    assert (enhancement.minimum, enhancement.maximum) == (0.0, 2500.0)
+    assert enhancement.algorithm == fake_qgis.QgsContrastEnhancement.StretchToMinimumMaximum
+    assert layer.events == [
+        "construct:singlebandgray",
+        "minimum",
+        "maximum",
+        "algorithm",
+        "contrast",
+        "setRenderer",
+        "repaint",
+    ]
+    assert result.renderer_type == "singlebandgray"
+
+
+def test_a_multiband_renderer_may_repeat_a_band(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "satellite", kind="raster", bands=4)
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "satellite", {"type": "multibandcolor", "red_band": 4, "green_band": 4, "blue_band": 2}
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsMultiBandColorRenderer)
+    assert (renderer.red, renderer.green, renderer.blue) == (4, 4, 2)
+    assert renderer.provider is layer.data_provider
+    assert result.renderer_type == "multibandcolor"
+
+
+def test_a_pseudocolor_renderer_carries_its_stops(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=1)
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "dem",
+            {
+                "type": "singlebandpseudocolor",
+                "band": 1,
+                "interpolation": "discrete",
+                "stops": [
+                    {"value": 0, "color": "#2665B8"},
+                    {"value": 1000, "color": "#F2E9A4"},
+                    {"value": 2500, "color": "#B44A39"},
+                ],
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsSingleBandPseudoColorRenderer)
+    assert renderer.band == 1
+    ramp = renderer.shader.function
+    assert isinstance(ramp, fake_qgis.QgsColorRampShader)
+    assert ramp.ramp_type == fake_qgis.QgsColorRampShader.Discrete
+    assert [(item.value, item.color.name()) for item in ramp.items] == [
+        (0.0, "#2665b8"),
+        (1000.0, "#f2e9a4"),
+        (2500.0, "#b44a39"),
+    ]
+    assert result.renderer_type == "singlebandpseudocolor"
+
+
+def test_a_single_color_renderer_carries_its_colour(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "mask", kind="raster", bands=1)
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload("mask", {"type": "singlecolor", "band": 1, "color": "#CC6633"}),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert isinstance(renderer, fake_qgis.QgsRasterSingleColorRenderer)
+    assert (renderer.band, renderer.color.name()) == (1, "#cc6633")
+    assert result.renderer_type == "singlecolor"
+
+
+def test_a_native_constructor_that_raises_leaves_the_old_renderer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
+    layer.field_list = [FakeField("landuse", numeric=False)]
+    old = FakeRenderer("singleSymbol")
+    layer.renderer_value = old
+    fake_qgis.fail_build = "categorizedSymbol"
+
+    with pytest.raises(FrameworkError) as caught:
+        set_renderer(
+            make_context(project, data_root),
+            setter_payload(
+                "landuse",
+                {
+                    "type": "categorizedSymbol",
+                    "field": "landuse",
+                    "categories": [{"value": "forest", "label": "Forest", "symbol": FILL}],
+                },
+            ),
+        )
+
+    assert caught.value.code == INTERNAL_ERROR
+    assert "setRenderer" not in fake_qgis.events
+    assert layer.renderer_sets == []
+    assert layer.renderer_value is old
+    assert project.dirty == []
+
+
+@pytest.mark.parametrize("renderer_type", UNSUPPORTED_RENDERER_TYPES)
+def test_an_unimplemented_renderer_type_never_touches_the_layer(
+    fake_qgis: FakeQgis, data_root: Path, renderer_type: str
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
+    old = FakeRenderer("singleSymbol")
+    layer.renderer_value = old
+
+    # The union refuses the type, which the Engine reports as INVALID_INPUT
+    # (test_engine pins that mapping); no layer is reached, so nothing changed.
+    with pytest.raises(ValidationError):
+        ops.LayerSetRendererParams.model_validate(
+            setter_payload("parcels", {"type": renderer_type})
+        )
+    assert layer.renderer_sets == []
+    assert layer.renderer_value is old
+
+
+@pytest.mark.parametrize(
+    ("geometry", "symbol"),
+    [(POINT, FILL), (LINE, MARKER), (POLYGON, LINE_SYMBOL)],
+)
+def test_a_symbol_for_another_geometry_is_refused(
+    fake_qgis: FakeQgis, data_root: Path, geometry: int, symbol: dict[str, Any]
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "features", geometry=geometry)
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload("features", {"type": "singleSymbol", "symbol": symbol}),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+@pytest.mark.parametrize("color", ["red", "#ff000", "#ff0000ff", "#gggggg", ""])
+def test_a_colour_must_be_six_rgb_hex_digits(data_root: Path, color: str) -> None:
+    with pytest.raises(ValidationError):
+        ops.LayerSetRendererParams.model_validate(
+            setter_payload(
+                "parcels", {"type": "singleSymbol", "symbol": {"type": "fill", "color": color}}
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("symbol", "field_name"),
+    [
+        ({"type": "marker", "color": "#FF0000"}, "size_mm"),
+        ({"type": "line", "color": "#FF0000"}, "width_mm"),
+        ({"type": "fill", "color": "#FF0000"}, "outline_width_mm"),
+    ],
+)
+@pytest.mark.parametrize("value", [0, -0.5, float("nan"), float("inf")])
+def test_a_symbol_length_must_be_positive_and_finite(
+    data_root: Path, symbol: dict[str, Any], field_name: str, value: float
+) -> None:
+    with pytest.raises(ValidationError):
+        ops.LayerSetRendererParams.model_validate(
+            setter_payload(
+                "features",
+                {"type": "singleSymbol", "symbol": {**symbol, field_name: value}},
+            )
+        )
+
+
+def test_a_missing_category_field_is_invalid_field_type(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "landuse",
+            {
+                "type": "categorizedSymbol",
+                "field": "missing",
+                "categories": [{"value": "forest", "label": "Forest", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_FIELD_TYPE
+    assert layer.renderer_sets == []
+
+
+def test_a_repeating_category_value_is_refused(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
+    layer.field_list = [FakeField("landuse", numeric=False)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "landuse",
+            {
+                "type": "categorizedSymbol",
+                "field": "landuse",
+                "categories": [
+                    {"value": "forest", "label": "Forest", "symbol": FILL},
+                    {"value": "forest", "label": "Forest again", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_two_null_categories_are_refused(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
+    layer.field_list = [FakeField("landuse", numeric=False)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "landuse",
+            {
+                "type": "categorizedSymbol",
+                "field": "landuse",
+                "categories": [
+                    {"value": None, "label": "Unset", "symbol": FILL},
+                    {"value": None, "label": "Also unset", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_a_numeric_field_normalises_one_and_one_point_zero(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
+    layer.field_list = [FakeField("population", numeric=True)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "pop",
+            {
+                "type": "categorizedSymbol",
+                "field": "population",
+                "categories": [
+                    {"value": 1, "label": "One", "symbol": FILL},
+                    {"value": 1.0, "label": "One again", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_a_category_value_the_field_cannot_hold_is_refused(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
+    layer.field_list = [FakeField("population", numeric=True)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "pop",
+            {
+                "type": "categorizedSymbol",
+                "field": "population",
+                "categories": [{"value": "one", "label": "One", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_a_missing_graduated_field_is_invalid_field_type(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "pop",
+            {
+                "type": "graduatedSymbol",
+                "field": "missing",
+                "ranges": [{"lower": 0, "upper": 1, "label": "Low", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_FIELD_TYPE
+    assert layer.renderer_sets == []
+
+
+def test_a_non_numeric_graduated_field_is_invalid_field_type(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
+    layer.field_list = [FakeField("landuse", numeric=False)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "landuse",
+            {
+                "type": "graduatedSymbol",
+                "field": "landuse",
+                "ranges": [{"lower": 0, "upper": 1, "label": "Low", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_FIELD_TYPE
+    assert layer.renderer_sets == []
+
+
+@pytest.mark.parametrize(
+    "ranges",
+    [
+        [
+            {"lower": 0, "upper": 10, "label": "A", "symbol": FILL},
+            {"lower": 5, "upper": 15, "label": "B", "symbol": FILL},
+        ],
+        [
+            {"lower": 10, "upper": 20, "label": "A", "symbol": FILL},
+            {"lower": 0, "upper": 5, "label": "B", "symbol": FILL},
+        ],
+    ],
+)
+def test_overlapping_or_unordered_ranges_are_refused(ranges: list[dict[str, Any]]) -> None:
+    with pytest.raises(ValidationError):
+        ops.GraduatedRendererConfig.model_validate(
+            {"type": "graduatedSymbol", "field": "pop", "ranges": ranges}
+        )
+
+
+def test_ranges_may_share_an_endpoint() -> None:
+    config = ops.GraduatedRendererConfig.model_validate(
+        {
+            "type": "graduatedSymbol",
+            "field": "pop",
+            "ranges": [
+                {"lower": 0, "upper": 10, "label": "A", "symbol": FILL},
+                {"lower": 10, "upper": 20, "label": "B", "symbol": FILL},
+            ],
+        }
+    )
+    assert len(config.ranges) == 2
+
+
+def test_a_range_needs_lower_below_upper() -> None:
+    with pytest.raises(ValidationError):
+        ops.RangeConfig.model_validate({"lower": 5, "upper": 5, "label": "A", "symbol": FILL})
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        # An ELSE in the middle.
+        [
+            {"label": "Else", "else_rule": True, "symbol": FILL},
+            {"label": "A", "filter": '"a" = 1', "symbol": FILL},
+        ],
+        # Two ELSE rules: only the last may be one.
+        [
+            {"label": "Else", "else_rule": True, "symbol": FILL},
+            {"label": "Else again", "else_rule": True, "symbol": FILL},
+        ],
+        # An ELSE that also carries a filter.
+        [{"label": "Else", "filter": '"a" = 1', "else_rule": True, "symbol": FILL}],
+    ],
+)
+def test_an_else_rule_must_be_last_and_alone(rules: list[dict[str, Any]]) -> None:
+    with pytest.raises(ValidationError):
+        ops.RuleRendererConfig.model_validate({"type": "RuleRenderer", "rules": rules})
+
+
+def test_a_rule_needs_a_filter_expression() -> None:
+    with pytest.raises(ValidationError):
+        ops.RuleRendererConfig.model_validate(
+            {"type": "RuleRenderer", "rules": [{"label": "All", "symbol": FILL}]}
+        )
+
+
+def test_an_invalid_expression_is_refused_before_the_layer_is_touched(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "roads", geometry=LINE)
+    fake_qgis.invalid_expressions.add('"class" =')
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "roads",
+            {
+                "type": "RuleRenderer",
+                "rules": [{"label": "Main", "filter": '"class" =', "symbol": LINE_SYMBOL}],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert fake_qgis.built == []
+    assert layer.renderer_sets == []
+
+
+@pytest.mark.parametrize(
+    "renderer",
+    [
+        {"type": "singlebandgray", "band": 3, "min": 0, "max": 1},
+        {"type": "multibandcolor", "red_band": 3, "green_band": 1, "blue_band": 1},
+        {
+            "type": "singlebandpseudocolor",
+            "band": 3,
+            "stops": [{"value": 0, "color": "#000000"}, {"value": 1, "color": "#FFFFFF"}],
+        },
+        {"type": "singlecolor", "band": 3, "color": "#CC6633"},
+    ],
+)
+def test_a_band_outside_the_raster_is_refused(
+    fake_qgis: FakeQgis, data_root: Path, renderer: dict[str, Any]
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=2)
+
+    code = refuse_renderer(make_context(project, data_root), setter_payload("dem", renderer))
+    assert code == INVALID_INPUT
+    assert fake_qgis.built == []
+    assert layer.renderer_sets == []
+
+
+def test_band_zero_is_refused_by_the_model() -> None:
+    with pytest.raises(ValidationError):
+        ops.SingleBandGrayConfig.model_validate(
+            {"type": "singlebandgray", "band": 0, "min": 0, "max": 1}
+        )
+
+
+def test_gray_min_must_be_below_max() -> None:
+    with pytest.raises(ValidationError):
+        ops.SingleBandGrayConfig.model_validate(
+            {"type": "singlebandgray", "band": 1, "min": 5, "max": 5}
+        )
+
+
+@pytest.mark.parametrize(
+    "stops",
+    [
+        [{"value": 0, "color": "#000000"}],
+        [{"value": 0, "color": "#000000"}, {"value": 0, "color": "#FFFFFF"}],
+        [{"value": 10, "color": "#000000"}, {"value": 5, "color": "#FFFFFF"}],
+        [{"value": 0, "color": "#000000"}, {"value": float("nan"), "color": "#FFFFFF"}],
+    ],
+)
+def test_pseudocolor_stops_must_strictly_increase(stops: list[dict[str, Any]]) -> None:
+    with pytest.raises(ValidationError):
+        ops.PseudoColorConfig.model_validate(
+            {"type": "singlebandpseudocolor", "band": 1, "stops": stops}
+        )
+
+
+def test_the_setter_refuses_a_layer_that_does_not_exist(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    code = refuse_renderer(
+        make_context(FakeProject(), data_root),
+        setter_payload("missing", {"type": "nullSymbol"}),
+    )
+    assert code == LAYER_NOT_FOUND
+
+
+def test_the_setter_refuses_an_invalid_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "broken", geometry=POLYGON)
+    layer.valid = False
+
+    code = refuse_renderer(
+        make_context(project, data_root), setter_payload("broken", {"type": "nullSymbol"})
+    )
+    assert code == INVALID_LAYER
+    assert layer.renderer_sets == []
+
+
+def test_the_setter_refuses_a_layer_without_a_geometry(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "table", geometry=NULL_GEOMETRY)
+
+    code = refuse_renderer(
+        make_context(project, data_root), setter_payload("table", {"type": "nullSymbol"})
+    )
+    assert code == INVALID_LAYER
+    assert layer.renderer_sets == []
+
+
+def test_a_raster_renderer_does_not_apply_to_a_vector_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload("parcels", {"type": "singlecolor", "band": 1, "color": "#CC6633"}),
+    )
+    assert code == INVALID_LAYER
+    assert layer.renderer_sets == []
+
+
+def test_a_vector_renderer_does_not_apply_to_a_raster_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "dem", kind="raster")
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload("dem", {"type": "singleSymbol", "symbol": FILL}),
+    )
+    assert code == INVALID_LAYER
+    assert layer.renderer_sets == []
+
+
+SETTER_MODELS = [
+    (ops.MarkerSymbolConfig, MARKER),
+    (ops.LineSymbolConfig, LINE_SYMBOL),
+    (ops.FillSymbolConfig, FILL),
+    (ops.NullSymbolRendererConfig, {"type": "nullSymbol"}),
+    (ops.SingleSymbolRendererConfig, {"type": "singleSymbol", "symbol": FILL}),
+    (
+        ops.CategorizedRendererConfig,
+        {
+            "type": "categorizedSymbol",
+            "field": "landuse",
+            "categories": [{"value": "forest", "label": "Forest", "symbol": FILL}],
+        },
+    ),
+    (
+        ops.GraduatedRendererConfig,
+        {
+            "type": "graduatedSymbol",
+            "field": "pop",
+            "ranges": [{"lower": 0, "upper": 1, "label": "Low", "symbol": FILL}],
+        },
+    ),
+    (
+        ops.RuleRendererConfig,
+        {"type": "RuleRenderer", "rules": [{"label": "All", "filter": "1 = 1", "symbol": FILL}]},
+    ),
+    (ops.SingleBandGrayConfig, {"type": "singlebandgray", "band": 1, "min": 0, "max": 1}),
+    (
+        ops.MultiBandColorConfig,
+        {"type": "multibandcolor", "red_band": 1, "green_band": 1, "blue_band": 1},
+    ),
+    (
+        ops.PseudoColorConfig,
+        {
+            "type": "singlebandpseudocolor",
+            "band": 1,
+            "stops": [{"value": 0, "color": "#000000"}, {"value": 1, "color": "#FFFFFF"}],
+        },
+    ),
+    (ops.SingleColorRasterConfig, {"type": "singlecolor", "band": 1, "color": "#CC6633"}),
+    (ops.CategoryConfig, {"value": "forest", "label": "Forest", "symbol": FILL}),
+    (ops.RangeConfig, {"lower": 0, "upper": 1, "label": "Low", "symbol": FILL}),
+    (ops.RuleConfig, {"label": "All", "filter": "1 = 1", "symbol": FILL}),
+    (ops.ColorStop, {"value": 0, "color": "#FFFFFF"}),
+    (ops.LayerSetRendererParams, setter_payload("roads", {"type": "nullSymbol"})),
+    (ops.LayerSetRendererResult, {"layer_id": "roads", "renderer_type": "nullSymbol"}),
+]
+
+
+@pytest.mark.parametrize(("model", "payload"), SETTER_MODELS)
+def test_every_setter_model_forbids_an_extra_field(model: Any, payload: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({**payload, "surprise": 1})
+
+
+def test_the_renderer_setter_registers_as_a_destructive_command() -> None:
+    registry = OperationRegistry()
+    registry.register(ops.LayerSetRenderer())
+
+    assert [
+        (spec.name, spec.kind, spec.strategy, spec.destructive) for spec in registry.list_specs()
+    ] == [("layer.set_renderer", "command", "main_thread", True)]
