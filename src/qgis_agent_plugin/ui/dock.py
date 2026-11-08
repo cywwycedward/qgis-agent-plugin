@@ -133,7 +133,7 @@ _FIELD_LABELS = {
 # The engine's own message is kept as the label's tooltip -- it is written for a
 # caller, not for the operator, and half of it is English.
 _ERRORS = {
-    "OPERATION_NOT_FOUND": ("注册表里没有这个操作。", "重新启用插件，让九个操作重新注册。"),
+    "OPERATION_NOT_FOUND": ("注册表里没有这个操作。", "重新启用插件，让全部操作重新注册。"),
     "INVALID_OPERATION_DEFINITION": ("操作声明不合法，注册被拒。", "这是插件缺陷，看 QGIS 日志。"),
     "DUPLICATE_OPERATION": ("同一个操作被注册了两次。", "这是插件缺陷，看 QGIS 日志。"),
     "WRONG_THREAD": ("这个操作必须在主线程运行。", "重新启用插件后再试；持续出现就是缺陷。"),
@@ -1051,6 +1051,8 @@ def _field_tooltip(title: str, name: str, schema: dict[str, Any]) -> str:
     return tooltip
 
 
+# shortcut: no cycle check -- a self-referencing ``$defs`` recurses into RecursionError
+# instead of a form; add a seen-set when a recursive model arrives (PRD v2 §11.3).
 def _branches(schema: dict[str, Any], defs: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """A property schema, then every branch its ``$ref`` and unions reach into.
 

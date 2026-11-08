@@ -2,7 +2,7 @@
 
 ``initGui`` assembles a session -- the PRD 10.1 settings, the project generation,
 this plugin's own ``QgsTaskManager``, the adapter over it, the registry filled with
-the nine PRD 7.1 operations, and the engine -- puts the operation dock on the main
+the operations PRD v2 §2 lists, and the engine -- puts the operation dock on the main
 window, and publishes the engine and the registry on ``iface``, which is where the
 Python Console finds them (PRD 1.3).
 

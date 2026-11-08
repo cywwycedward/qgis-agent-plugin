@@ -354,7 +354,7 @@ def test_the_summary_shows_the_description_of_the_selection(qapp: Any) -> None:
 
 
 def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -> None:
-    """The nine PRD operations, whose schemas carry enums, bools and nullable unions."""
+    """The schemas actually registered: enums, bools and nullable unions among them."""
 
     registry = OperationRegistry()
     register_all(registry)
