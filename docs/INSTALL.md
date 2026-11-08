@@ -188,12 +188,12 @@ F8 不做；F7 的 GUI 验收清单里有这一条）。
 
 全量用例**必须在 QGIS 解释器下跑**：需要真 `QgsApplication` 的用例不止一条（真信号、真
 `QgsTaskManager`、真 provider 都在里面），跳过它们得到的绿色不算验收。裸解释器跑同一套会
-**多两条 skip**（`tests/qgis_integration/test_claim_root.py` 整模块 `importorskip`、
-`tests/test_engine.py` 里那条真信号的用例），其余用例在裸解释器里也能跑（`qgis`/`PyQt5` 的
+**多三条 skip**（`tests/qgis_integration/test_claim_root.py` 整模块 `importorskip`、
+`tests/test_engine.py` 里那条真信号的用例，以及 `tests/test_ui_dock.py` 整个模块——它要 offscreen 的 Qt），其余用例在裸解释器里也能跑（`qgis`/`PyQt5` 的
 import 都在函数体内，`tests/test_package.py` 在子进程里强制这条规则）。所以别按条数判断“跑过了”，
 按解释器判断。
 
-实测一次（`fix/audit-a1`，两个解释器各跑一遍）：
+实测一次（`fix/audit-a1` 时期，两个解释器各跑一遍；条数已过期，只看 pass/skip 的构成）：
 
 ```text
 $ npm run test                                                       # QGIS 解释器
