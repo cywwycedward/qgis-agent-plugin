@@ -15,6 +15,7 @@ drops ``symbology-style.db`` into whatever directory it starts in.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,10 +54,15 @@ __all__ = [
     "pump_until",
     "qt_deleted",
     "require",
+    "require_processing",
     "start_application",
 ]
 
 SETTINGS_GROUP = "qgis_agent_plugin"
+
+# Why QGIS's processing framework is not registered, when it could not be; the
+# ``processing.*`` cases skip on it instead of measuring an empty registry.
+PROCESSING_ERROR: str | None = None
 
 
 class Skip(Exception):
@@ -87,7 +93,45 @@ def start_application(runtime: Path, profile: Path) -> Any:
 
     application = QgsApplication([], False)
     application.initQgis()
+    start_processing()
     return application
+
+
+def start_processing() -> None:
+    """Register QGIS's own processing providers, which a bare ``initQgis`` does not.
+
+    QGIS Desktop registers them when its processing plugin loads, and the launcher
+    puts neither ``python/plugins`` on ``sys.path`` nor the providers in the
+    registry; without this the P cases would measure an empty registry (PRD v2 3.1).
+    The plugin directory is derived from the ``qgis`` package itself, so nothing here
+    depends on where QGIS was installed.
+    """
+
+    global PROCESSING_ERROR
+    import qgis
+
+    source = getattr(qgis, "__file__", None)
+    if source:
+        plugins = Path(source).resolve().parents[1] / "plugins"
+        if str(plugins) not in sys.path:
+            sys.path.insert(0, str(plugins))
+    try:
+        from processing.core.Processing import Processing
+
+        Processing.initialize()
+    except Exception as error:  # noqa: BLE001 - a missing framework is a skip, not a failure
+        PROCESSING_ERROR = f"{type(error).__name__}: {error}"
+
+
+def require_processing() -> None:
+    """Refuse to measure processing when QGIS's framework is not registered here."""
+
+    from qgis.core import QgsApplication
+
+    if PROCESSING_ERROR is not None:
+        raise Skip(f"QGIS Processing is not available here ({PROCESSING_ERROR})")
+    if not QgsApplication.processingRegistry().algorithms():
+        raise Skip("QGIS Processing registered no algorithm, so nothing can be measured")
 
 
 def configure_settings(data_root: Path, project_root: Path) -> None:
@@ -145,7 +189,7 @@ def qt_deleted(obj: Any) -> bool:
 
 
 class FakeIface:
-    """The one interface call the nine operations make: ``newProject``.
+    """The one interface call the operations make: ``newProject``.
 
     QGIS Desktop's own implementation clears the current project and reports
     whether it did; headless, that is the whole of it (PRD 7.2 is the operation

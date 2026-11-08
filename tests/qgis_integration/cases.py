@@ -17,6 +17,7 @@ import socket
 import threading
 import time
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import fixtures
@@ -34,6 +35,7 @@ from harness import (
     pump_until,
     qt_deleted,
     require,
+    require_processing,
 )
 from pydantic import ValidationError
 
@@ -49,6 +51,7 @@ from qgis_agent_plugin.core.models import (
     INVALID_FIELD_TYPE,
     INVALID_INPUT,
     INVALID_LAYER,
+    LAYER_NOT_FOUND,
     OUTPUT_VALIDATION_FAILED,
     PATH_NOT_ALLOWED,
     PROJECT_OPEN_FAILED,
@@ -148,13 +151,126 @@ def manager_task_count(ctx: Context) -> int:
     return 0 if manager is None else len(manager.tasks())
 
 
+def processing_algorithms() -> list[Any]:
+    """Every algorithm the live QGIS Processing registry holds, in its own order."""
+
+    from qgis.core import QgsApplication
+
+    return list(QgsApplication.processingRegistry().algorithms())
+
+
+def algorithm_info(ctx: Context, algorithm_id: str) -> dict[str, Any]:
+    record = ctx.run("processing.get_algorithm_info", {"algorithm_id": algorithm_id})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"get_algorithm_info({algorithm_id})")
+    return result_of(record)
+
+
+def parameters_by_name(info: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {parameter["name"]: parameter for parameter in info["parameters"]}
+
+
+def run_algorithm(ctx: Context, algorithm_id: str, parameters: dict[str, Any]) -> ExecutionRecord:
+    """One ``processing.run_algorithm`` call, as its record."""
+
+    return ctx.run(
+        "processing.run_algorithm", {"algorithm_id": algorithm_id, "parameters": parameters}
+    )
+
+
+def outputs_of(record: ExecutionRecord) -> dict[str, Any]:
+    return result_of(record)["outputs"]
+
+
+def output_layer(ctx: Context, record: ExecutionRecord, key: str) -> Any:
+    """The project layer one output key names; a stale id is a failure (charter 7/E4)."""
+
+    layer_id = outputs_of(record)[key]
+    require(isinstance(layer_id, str), f"{key} names {layer_id!r}, which is not a layer id")
+    layer = project_layers().get(layer_id)
+    require(layer is not None, f"{key} names {layer_id!r}, which is not a project layer")
+    return layer
+
+
+def sub_layer(ctx: Context, name: str, layer_name: str) -> str:
+    """A layer of the GeoPackage fixture, added through the plugin's own ``layer.add``."""
+
+    return ctx.add_layer(ctx.fixtures.cities, name, sub_layer=layer_name)
+
+
+def raster_layer(ctx: Context, name: str, source: Path | None = None) -> str:
+    """A raster layer added through the plugin's own ``layer.add``."""
+
+    record = ctx.run(
+        "layer.add",
+        {
+            "kind": "raster",
+            "source_path": str(ctx.fixtures.raster if source is None else source),
+            "name": name,
+        },
+    )
+    require(record.status is ExecutionStatus.SUCCEEDED, f"layer.add({name}) failed: {record.error}")
+    return str((record.result or {})["layer_id"])
+
+
+def project_layer(layer_id: str) -> Any:
+    layer = project_layers().get(layer_id)
+    require(layer is not None, f"no project layer {layer_id!r}")
+    return layer
+
+
+def installed_renderer(ctx: Context, layer_id: str) -> str:
+    """What ``layer.get_renderer`` reports for a layer, through the engine."""
+
+    record = ctx.run("layer.get_renderer", {"layer_id": layer_id})
+    require(record.status is ExecutionStatus.SUCCEEDED, f"layer.get_renderer: {record.error}")
+    return str(result_of(record)["renderer_type"])
+
+
+def set_renderer(ctx: Context, layer_id: str, config: dict[str, Any]) -> ExecutionRecord:
+    return ctx.run("layer.set_renderer", {"layer_id": layer_id, "renderer": config})
+
+
+def qml_of(ctx: Context, layer_id: str, categories: list[str] | None = None) -> str:
+    arguments: dict[str, Any] = {"layer_id": layer_id}
+    if categories is not None:
+        arguments["categories"] = categories
+    record = ctx.run("layer.get_qml", arguments)
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.get_qml: {record.error}")
+    return str(result_of(record)["qml"])
+
+
+def xml_root(qml: str) -> Any:
+    """The root element of an exported QML string; invalid XML is a failed case."""
+
+    import xml.etree.ElementTree as ElementTree
+
+    try:
+        return ElementTree.fromstring(qml)
+    except ElementTree.ParseError as error:
+        raise AssertionError(f"the QML export is not valid XML: {error}") from None
+
+
+def style_categories_attribute(qml: str) -> set[str]:
+    return set((xml_root(qml).get("styleCategories") or "").split("|"))
+
+
+def qml_files() -> list[str]:
+    """Every ``.qml`` file under the run's own working directory (a run writes none)."""
+
+    return sorted(str(path) for path in Path.cwd().rglob("*.qml"))
+
+
+def message_of(record: ExecutionRecord) -> str:
+    return "" if record.error is None else record.error.message
+
+
 # ------------------------------------------------------------------------- the cases
 
 
 def at_01_duplicate_registration(ctx: Context) -> str:
     registry = ctx.registry
     names_before = sorted(spec.name for spec in registry.list_specs())
-    equal(len(names_before), 9, "operations registered at start-up")
+    equal(len(names_before), 17, "operations registered at start-up")
     original = registry.get("project.get_info")
 
     code = refused(lambda: registry.register(DuplicateProjectInfo()))
@@ -164,7 +280,10 @@ def at_01_duplicate_registration(ctx: Context) -> str:
     equal(
         sorted(spec.name for spec in registry.list_specs()), names_before, "names after the refusal"
     )
-    return f"{code}; project.get_info still {type(original).__name__}; the nine specs are unchanged"
+    return (
+        f"{code}; project.get_info still {type(original).__name__}; the seventeen specs are "
+        "unchanged"
+    )
 
 
 def at_02_invalid_input(ctx: Context) -> str:
@@ -1018,7 +1137,7 @@ def at_25_three_sessions(ctx: Context) -> str:
         lifecycles.append(plugin.lifecycle)
         registries.append(plugin.registry)
         engines.append(plugin.engine)
-        equal(len(plugin.registry.list_specs()), 9, f"round {number}: the nine operations")
+        equal(len(plugin.registry.list_specs()), 17, f"round {number}: the seventeen operations")
         require(hasattr(ctx.iface, "agent_engine"), f"round {number}: no console handle")
         from qgis.core import QgsProject
 
@@ -1047,10 +1166,10 @@ def at_25_three_sessions(ctx: Context) -> str:
         code = refused(partial(engine.run_sync, "project.get_info", {}))
         equal(code, ENGINE_CLOSING, "the code for work offered to an unloaded engine")
     return (
-        "three loads and unloads: nine operations per round, exactly one epoch bump per project "
-        "clear, no console handle left, a fresh engine and registry per round, and a clear after "
-        "every session is gone left all three epochs at 1 (no repeated signal connection); each "
-        "unloaded engine refuses new work"
+        "three loads and unloads: seventeen operations per round, exactly one epoch bump per "
+        "project clear, no console handle left, a fresh engine and registry per round, and a "
+        "clear after every session is gone left all three epochs at 1 (no repeated signal "
+        "connection); each unloaded engine refuses new work"
     )
 
 
@@ -1095,7 +1214,7 @@ def at_26_wrong_thread(ctx: Context) -> str:
 
 def at_27_pydantic_v2(ctx: Context) -> str:
     specs = ctx.registry.list_specs()
-    equal(len(specs), 9, "the nine specs")
+    equal(len(specs), 17, "the seventeen specs")
     for spec in specs:
         equal(spec.pydantic_major, 2, f"{spec.name}: pydantic_major")
         exported = spec.model_dump_json()
@@ -1120,7 +1239,7 @@ def at_27_pydantic_v2(ctx: Context) -> str:
     require(json.loads(exported) is not None, "the record did not export JSON")
     equal(ExecutionRecord.model_validate_json(exported), record, "the record round trip")
     return (
-        f"pydantic {pydantic.VERSION}: the nine specs export and round-trip JSON with "
+        f"pydantic {pydantic.VERSION}: the seventeen specs export and round-trip JSON with "
         "pydantic_major=2, StrictBool refuses the string 'true', and the terminal record with its "
         "result round-trips. The v1 half of AT-27 is a separate, skipped row"
     )
@@ -2052,6 +2171,1516 @@ def at_51_open_reads_a_project_whose_layer_is_a_local_subdataset(ctx: Context) -
     )
 
 
+# ------------------------------- Processing, QML categories and renderers (PRD v2 10)
+
+# PRD v2 4.1, 4.2 and 5.1 written out here on purpose: the acceptance compares the
+# plugin with the PRD, not with the plugin's own tuples.
+VECTOR_CATEGORY_NAMES = [
+    "LayerConfiguration",
+    "Symbology",
+    "Symbology3D",
+    "Labeling",
+    "Fields",
+    "Forms",
+    "Actions",
+    "MapTips",
+    "Diagrams",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "GeometryOptions",
+    "Relations",
+    "Temporal",
+    "Legend",
+    "Elevation",
+    "Notes",
+]
+
+RASTER_CATEGORY_NAMES = [
+    "LayerConfiguration",
+    "Symbology",
+    "Labeling",
+    "MapTips",
+    "AttributeTable",
+    "Rendering",
+    "CustomProperties",
+    "Temporal",
+    "Elevation",
+    "Notes",
+]
+
+RASTER_RENDERER_TYPES = [
+    "contour",
+    "hillshade",
+    "multibandcolor",
+    "paletted",
+    "singlebandcolordata",
+    "singlebandgray",
+    "singlebandpseudocolor",
+    "singlecolor",
+]
+
+
+def p01_list_algorithms(ctx: Context) -> str:
+    require_processing()
+    native = {algorithm.id(): algorithm for algorithm in processing_algorithms()}
+
+    record = ctx.run("processing.list_algorithms", {})
+    equal(record.status, ExecutionStatus.SUCCEEDED, "processing.list_algorithms status")
+    summaries = result_of(record)["algorithms"]
+    ids = [summary["id"] for summary in summaries]
+
+    equal(ids, sorted(native), "the ids against processingRegistry().algorithms()")
+    equal(len(ids), len(set(ids)), "duplicate ids")
+    for summary in summaries:
+        equal(sorted(summary), ["group", "id", "name"], "the fields of one summary")
+    sample = summaries[0]
+    equal(sample["name"], native[sample["id"]].displayName(), "a display name from the registry")
+    equal(sample["group"], native[sample["id"]].group(), "a group from the registry")
+    prefixes = {algorithm_id.split(":")[0] for algorithm_id in ids}
+    require(len(prefixes) > 1, f"only one provider prefix in the list: {sorted(prefixes)}")
+    return (
+        f"{len(ids)} algorithms in id order, exactly the live registry's, over {len(prefixes)} "
+        f"provider prefixes ({', '.join(sorted(prefixes))}), three fields each"
+    )
+
+
+def p02_no_algorithm_allow_list(ctx: Context) -> str:
+    require_processing()
+    algorithms = processing_algorithms()
+
+    refused = []
+    for algorithm in algorithms:
+        record = ctx.run("processing.get_algorithm_info", {"algorithm_id": algorithm.id()})
+        if record.status is not ExecutionStatus.SUCCEEDED:
+            code = record.error.code if record.error is not None else str(record.status)
+            refused.append(f"{algorithm.id()}: {code}")
+    require(not refused, f"the definition of {len(refused)} algorithms was refused: {refused[:3]}")
+
+    other = next((item for item in algorithms if item.id() == "3d:tessellate"), None)
+    if other is None:
+        raise Skip(
+            "no algorithm of a provider other than 'native' can be run from a project layer on "
+            "this machine (3d:tessellate is absent), so the runnable half of P02 has no example "
+            f"here; the discovery half was covered for all {len(algorithms)} algorithms"
+        )
+    layer_id = cities_layer(ctx, "p02 cities")
+    record = run_algorithm(ctx, other.id(), {"INPUT": layer_id, "OUTPUT": "memory:"})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"{other.id()} failed: {record.error}")
+    equal(other.provider().id(), "3d", "the provider of the algorithm that ran")
+    layer = output_layer(ctx, record, "OUTPUT")
+    require(layer.isValid(), "the result of a non-native provider is not a valid layer")
+    return (
+        f"all {len(algorithms)} registered algorithms answered get_algorithm_info, so discovery "
+        f"filters nothing; provider '3d' really ran {other.id()} from a project layer into memory "
+        f"({layer.featureCount()} features in the project)"
+    )
+
+
+def p03_algorithm_info_fields(ctx: Context) -> str:
+    require_processing()
+    from qgis.core import QgsApplication, QgsProcessingParameterDefinition
+
+    registry = QgsApplication.processingRegistry()
+    nine_fields = [
+        "default",
+        "depends_on",
+        "description",
+        "help",
+        "is_destination",
+        "name",
+        "optional",
+        "options",
+        "type",
+    ]
+    parameters_seen = 0
+    outputs_seen = 0
+    for algorithm_id in (
+        "native:buffer",
+        "native:zonalstatisticsfb",
+        "native:basicstatisticsforfields",
+    ):
+        algorithm = registry.algorithmById(algorithm_id)
+        definitions = algorithm.parameterDefinitions()
+        info = algorithm_info(ctx, algorithm_id)
+        equal(
+            sorted(info),
+            ["algorithm", "description", "outputs", "parameters"],
+            f"{algorithm_id}: the result fields",
+        )
+        equal(
+            info["description"],
+            algorithm.shortHelpString() or "",
+            f"{algorithm_id}: description",
+        )
+        equal(
+            [parameter["name"] for parameter in info["parameters"]],
+            [definition.name() for definition in definitions],
+            f"{algorithm_id}: the native parameter order",
+        )
+        for parameter, definition in zip(info["parameters"], definitions, strict=True):
+            name = f"{algorithm_id}.{definition.name()}"
+            equal(sorted(parameter), nine_fields, f"{name}: the nine fields")
+            equal(parameter["type"], definition.type(), f"{name}: type")
+            equal(parameter["description"], definition.description() or "", f"{name}: description")
+            equal(parameter["help"], definition.help() or "", f"{name}: help")
+            equal(
+                parameter["optional"],
+                bool(definition.flags() & QgsProcessingParameterDefinition.FlagOptional),
+                f"{name}: the optional flag",
+            )
+            equal(parameter["is_destination"], bool(definition.isDestination()), f"{name}: dest")
+            equal(
+                parameter["depends_on"],
+                list(definition.dependsOnOtherParameters()),
+                f"{name}: depends_on",
+            )
+            if hasattr(definition, "options"):
+                equal(parameter["options"], list(definition.options()), f"{name}: option order")
+            else:
+                equal(parameter["options"], None, f"{name}: options on a non-enum parameter")
+            parameters_seen += 1
+        equal(
+            [(output["name"], output["type"]) for output in info["outputs"]],
+            [(output.name(), output.type()) for output in algorithm.outputDefinitions()],
+            f"{algorithm_id}: the native output order",
+        )
+        outputs_seen += len(info["outputs"])
+
+    buffer = parameters_by_name(algorithm_info(ctx, "native:buffer"))
+    equal(buffer["SEGMENTS"]["default"], 5, "a native numeric default")
+    equal(buffer["DISSOLVE"]["default"], False, "a native boolean default")
+    equal(buffer["OUTPUT"]["default"], None, "an unset destination default")
+    equal(buffer["OUTPUT"]["is_destination"], True, "OUTPUT is a destination")
+    equal(buffer["OUTPUT"]["optional"], False, "a required destination is not optional")
+    equal(buffer["INPUT"]["help"], "", "an empty native help stays an empty string")
+
+    zonal = parameters_by_name(algorithm_info(ctx, "native:zonalstatisticsfb"))
+    equal(
+        zonal["STATISTICS"]["options"],
+        [
+            "Count",
+            "Sum",
+            "Mean",
+            "Median",
+            "St dev",
+            "Minimum",
+            "Maximum",
+            "Range",
+            "Minority",
+            "Majority",
+            "Variety",
+            "Variance",
+        ],
+        "an enum's options in native order",
+    )
+    equal(zonal["COLUMN_PREFIX"]["options"], None, "options are null for a string parameter")
+
+    basic = parameters_by_name(algorithm_info(ctx, "native:basicstatisticsforfields"))
+    equal(basic["FIELD_NAME"]["depends_on"], ["INPUT_LAYER"], "a dependent parameter")
+    equal(basic["OUTPUT_HTML_FILE"]["optional"], True, "an optional destination")
+
+    gdal = algorithm_info(ctx, "gdal:aspect")
+    equal(gdal["description"], "", "an algorithm with no help reports an empty description")
+    return (
+        f"{parameters_seen} parameters and {outputs_seen} outputs of three algorithms read back "
+        "field by field: the nine fields, native order, FlagOptional, isDestination, "
+        "dependsOnOtherParameters, an enum's option order, an empty help as '', an unset "
+        "default as null and a no-help algorithm as an empty description"
+    )
+
+
+def p04_unknown_algorithm(ctx: Context) -> str:
+    require_processing()
+    missing = "native:p5-acceptance-not-an-algorithm"
+
+    info = ctx.run("processing.get_algorithm_info", {"algorithm_id": missing})
+    equal(info.status, ExecutionStatus.FAILED, "get_algorithm_info on an unknown id")
+    equal(error_code(info), INVALID_INPUT, "the code for an unknown algorithm")
+    run = run_algorithm(ctx, missing, {})
+    equal(run.status, ExecutionStatus.FAILED, "run_algorithm on an unknown id")
+    equal(error_code(run), INVALID_INPUT, "the run code for an unknown algorithm")
+    for record in (info, run):
+        require(record.result is None, "a refused call carries a result")
+    return (
+        "an unknown algorithm id is FAILED(INVALID_INPUT) for both operations with no result, not "
+        "OPERATION_NOT_FOUND, and nothing was executed"
+    )
+
+
+def p05_unknown_key(ctx: Context) -> str:
+    require_processing()
+    from qgis.core import QgsApplication, QgsProcessingContext, QgsProject
+
+    layer_id = cities_layer(ctx, "p05 cities")
+    before = project_layer_ids()
+    parameters = {
+        "INPUT": layer_id,
+        "DISTANCE": 1.0,
+        "SEGMENTS": 8,
+        "DISSOLVE": False,
+        "OUTPUT": "memory:",
+        "P5_NOT_A_PARAMETER": 1,
+    }
+    # The premise of the PRD's rule: QGIS itself accepts an undeclared key.
+    algorithm = QgsApplication.processingRegistry().createAlgorithmById("native:buffer")
+    context = QgsProcessingContext()
+    context.setProject(QgsProject.instance())
+    accepted, message = algorithm.checkParameterValues(parameters, context)
+    require(
+        accepted,
+        f"QGIS refused the undeclared key itself ({message!r}); the case needs a new premise",
+    )
+
+    record = run_algorithm(ctx, "native:buffer", parameters)
+    equal(record.status, ExecutionStatus.FAILED, "a run with an undeclared parameter")
+    equal(error_code(record), INVALID_INPUT, "the code for an undeclared parameter")
+    equal(project_layer_ids(), before, "the layers after the refused call")
+    return (
+        "QGIS's own checkParameterValues accepted P5_NOT_A_PARAMETER; the plugin refused the same "
+        "parameters as FAILED(INVALID_INPUT) before running anything and added no layer"
+    )
+
+
+def p06_buffer_memory_output(ctx: Context) -> str:
+    require_processing()
+    from qgis.core import Qgis
+
+    layer_id = cities_layer(ctx, "p06 cities")
+    before = project_layer_ids()
+    record = run_algorithm(
+        ctx,
+        "native:buffer",
+        {
+            "INPUT": layer_id,
+            "DISTANCE": 1.0,
+            "SEGMENTS": 8,
+            "DISSOLVE": False,
+            "OUTPUT": "memory:",
+        },
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"native:buffer failed: {record.error}")
+    equal(sorted(outputs_of(record)), ["OUTPUT"], "the native output keys")
+    layer = output_layer(ctx, record, "OUTPUT")
+    require(layer.isValid(), "the buffer result is not a valid layer")
+    equal(layer.geometryType(), Qgis.GeometryType.Polygon, "the geometry of the result")
+    equal(layer.featureCount(), 5, "one buffer per input point")
+    equal(sorted(project_layer_ids()), sorted([*before, layer.id()]), "the project's layers")
+    pump(ctx.app, 0.05)
+    require(
+        project_layers().get(layer.id()) is layer, "the result layer went away with its context"
+    )
+    return (
+        'OUTPUT="memory:" SUCCEEDED, its result layer was taken out of the temporary store and '
+        f"registered in the project as {layer.id()[:8]}…, a valid polygon layer with "
+        f"{layer.featureCount()} features that is still there after the event loop turned"
+    )
+
+
+def p07_array_input(ctx: Context) -> str:
+    require_processing()
+    first = cities_layer(ctx, "p07 first")
+    second = cities_layer(ctx, "p07 second")
+    require(first != second, "the two layer.add calls returned the same id")
+
+    record = run_algorithm(
+        ctx, "native:mergevectorlayers", {"LAYERS": [first, second], "OUTPUT": "memory:"}
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"mergevectorlayers failed: {record.error}")
+    layer = output_layer(ctx, record, "OUTPUT")
+    equal(layer.featureCount(), 10, "the features of two five-feature layers merged from a list")
+    return (
+        "native:mergevectorlayers accepted a two-element JSON array of project layer ids "
+        f"(LAYERS) and returned {layer.featureCount()} features, so a list parameter is passed "
+        "through as the native structure"
+    )
+
+
+def p08_scalar_output(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p08 cities")
+
+    record = run_algorithm(
+        ctx, "native:basicstatisticsforfields", {"INPUT_LAYER": layer_id, "FIELD_NAME": "pop"}
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"basicstatistics failed: {record.error}")
+    outputs = outputs_of(record)
+    equal(outputs["COUNT"], 3, "the non-null values of pop")
+    equal(outputs["SUM"], fixtures.POP_TOTAL, "the sum of pop")
+    require(
+        abs(outputs["MEAN"] - fixtures.POP_TOTAL / 3) < 1e-9,
+        f"the mean of pop: {outputs['MEAN']!r}",
+    )
+    for key in ("COUNT", "SUM", "MEAN", "MIN", "MAX"):
+        require(
+            type(outputs[key]) in (int, float),
+            f"{key} is not a JSON number: {outputs[key]!r}",
+        )
+    require(
+        "OUTPUT" not in outputs and "OUTPUT_HTML_FILE" not in outputs,
+        f"a destination nobody asked for appeared: {sorted(outputs)}",
+    )
+    return (
+        f"a scalar-only run returned {len(outputs)} finite JSON numbers (COUNT=3, SUM=200.0, "
+        f"MEAN={outputs['MEAN']:.3f}) with no layer and no destination key, so no single-layer "
+        "output shape is assumed"
+    )
+
+
+def p09_multiple_outputs(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p09 cities")
+
+    record = run_algorithm(
+        ctx,
+        "native:adduniquevalueindexfield",
+        {
+            "INPUT": layer_id,
+            "FIELD": "name",
+            "FIELD_NAME": "idx",
+            "OUTPUT": "memory:",
+            "SUMMARY_OUTPUT": "memory:",
+        },
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"adduniquevalueindexfield: {record.error}")
+    equal(sorted(outputs_of(record)), ["OUTPUT", "SUMMARY_OUTPUT"], "the native output keys")
+    first = output_layer(ctx, record, "OUTPUT")
+    second = output_layer(ctx, record, "SUMMARY_OUTPUT")
+    require(first.id() != second.id(), "both output keys name the same layer")
+    require(first.isValid() and second.isValid(), "an output layer is not valid")
+    require(
+        "idx" in [field.name() for field in first.fields()],
+        f"the new field is missing: {[field.name() for field in first.fields()]}",
+    )
+    equal(second.featureCount(), 5, "the summary has one feature per input feature")
+    return (
+        "both native output keys survived (OUTPUT and SUMMARY_OUTPUT) as two distinct, valid "
+        f"project layers ({first.featureCount()} and {second.featureCount()} features), so no "
+        "fixed OUTPUT-only mapping is assumed"
+    )
+
+
+def p10_json_values(ctx: Context) -> str:
+    require_processing()
+    from qgis.core import Qgis, QgsProject
+
+    from qgis_agent_plugin.operations.processing import ProcessingRunAlgorithmParams
+
+    accepted = ProcessingRunAlgorithmParams.model_validate(
+        {
+            "algorithm_id": "native:mergevectorlayers",
+            "parameters": {"LAYERS": ["a", "b"], "DEEP": {"values": [1, {"flag": True}]}},
+        }
+    )
+    equal(
+        accepted.parameters["DEEP"],
+        {"values": [1, {"flag": True}]},
+        "a nested JSON object survived the input boundary",
+    )
+
+    refused = {
+        "NaN": float("nan"),
+        "infinity": float("inf"),
+        "a Qt enum": Qgis.GeometryType.Point,
+        "a QObject": QgsProject.instance(),
+        "bytes": b"\x00",
+        "an integer key": {1: "x"},
+        "a nested NaN": ["a", [float("-inf")]],
+    }
+    for label, value in refused.items():
+        try:
+            ProcessingRunAlgorithmParams.model_validate(
+                {"algorithm_id": "native:buffer", "parameters": {"DISTANCE": value}}
+            )
+        except ValidationError:
+            continue
+        raise AssertionError(f"the input boundary accepted {label}")
+
+    layer_id = cities_layer(ctx, "p10 cities")
+    before = project_layer_ids()
+    record = run_algorithm(
+        ctx,
+        "native:buffer",
+        {"INPUT": layer_id, "DISTANCE": float("nan"), "OUTPUT": "memory:"},
+    )
+    equal(record.status, ExecutionStatus.FAILED, "a run whose distance is NaN")
+    equal(error_code(record), INVALID_INPUT, "the code for a NaN parameter")
+    equal(project_layer_ids(), before, "the layers after the NaN refusal")
+    return (
+        "a nested JSON object and array are accepted and unchanged, while NaN, infinity, a Qt "
+        "enum, a QObject, bytes, an integer dict key and a nested -inf are all refused with "
+        "INVALID_INPUT before anything runs"
+    )
+
+
+def p11_cannot_execute(ctx: Context) -> str:
+    require_processing()
+    algorithms = processing_algorithms()
+    refusing = []
+    for algorithm in algorithms:
+        outcome = algorithm.canExecute()
+        executable = bool(outcome[0]) if isinstance(outcome, tuple) else bool(outcome)
+        if not executable:
+            refusing.append(algorithm.id())
+    if refusing:
+        record = run_algorithm(ctx, refusing[0], {})
+        equal(record.status, ExecutionStatus.FAILED, f"{refusing[0]} cannot execute")
+        equal(error_code(record), INVALID_INPUT, "the code for an algorithm that cannot execute")
+        return (
+            f"{len(refusing)} of {len(algorithms)} algorithms report canExecute() False; "
+            f"{refusing[0]} was refused as FAILED(INVALID_INPUT)"
+        )
+    raise Skip(
+        f"none of the {len(algorithms)} registered algorithms reports canExecute() False on this "
+        "machine, so no real algorithm can reach the FAILED(INVALID_INPUT) branch of P11: "
+        "未验收/依据缺失 (charter 7/E1 measured the (bool, message) binding here); the branch is "
+        "covered only by the fake in tests/test_operations_processing.py"
+    )
+
+
+def p12_input_path_policy(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p12 cities")
+    before = project_layer_ids()
+    outside = ctx.fixtures.outside / "secret.gpkg"
+    require(outside.is_file(), "the outside fixture is missing")
+
+    outside_record = run_algorithm(
+        ctx, "native:mergevectorlayers", {"LAYERS": [layer_id, str(outside)], "OUTPUT": "memory:"}
+    )
+    equal(outside_record.status, ExecutionStatus.FAILED, "a layer outside the allowed roots")
+    equal(error_code(outside_record), PATH_NOT_ALLOWED, "the code for an outside layer path")
+    require(
+        str(outside) not in message_of(outside_record),
+        f"the failure message repeats the path: {message_of(outside_record)!r}",
+    )
+
+    remote_record = run_algorithm(
+        ctx,
+        "native:mergevectorlayers",
+        {"LAYERS": [layer_id, fixtures.REMOTE_VSICURL], "OUTPUT": "memory:"},
+    )
+    equal(remote_record.status, ExecutionStatus.FAILED, "a remote source in a layer list")
+    equal(error_code(remote_record), PATH_NOT_ALLOWED, "the code for a remote source")
+    for fragment in ("vsicurl", "127.0.0.1", "never.tif"):
+        require(
+            fragment not in message_of(remote_record),
+            f"the failure message repeats {fragment!r}: {message_of(remote_record)!r}",
+        )
+    equal(project_layer_ids(), before, "the layers after the two refusals")
+    return (
+        "a file outside allowed_data_roots and a /vsicurl URI given as a layer input were both "
+        "refused as FAILED(PATH_NOT_ALLOWED) before the algorithm ran, no layer was added, and "
+        "neither error message repeats the path or the URI"
+    )
+
+
+def p13_destination_refused(ctx: Context) -> str:
+    require_processing()
+    from qgis.core import QgsProcessing
+
+    layer_id = cities_layer(ctx, "p13 cities")
+    before = project_layer_ids()
+    target = ctx.fixtures.root / "p13 output.gpkg"
+    destinations = {
+        "TEMPORARY_OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
+        "a path inside the data root": str(target),
+        "an empty destination": "",
+    }
+    for label, destination in destinations.items():
+        record = run_algorithm(
+            ctx,
+            "native:buffer",
+            {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": destination},
+        )
+        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
+        equal(error_code(record), PATH_NOT_ALLOWED, f"{label}: code")
+        require(
+            str(target) not in message_of(record),
+            f"{label}: the message repeats the path: {message_of(record)!r}",
+        )
+    require(not target.exists(), f"the refused run wrote {target.name}")
+    equal(project_layer_ids(), before, "the layers after the three refusals")
+    return (
+        "TEMPORARY_OUTPUT, a path inside allowed_data_roots and an empty destination are all "
+        "FAILED(PATH_NOT_ALLOWED) before the algorithm runs: this build grants no data-file write "
+        "authorisation, and TEMPORARY_OUTPUT is not a way around it (no file was created)"
+    )
+
+
+def p14_output_ownership(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p14 cities")
+    record = run_algorithm(
+        ctx,
+        "native:buffer",
+        {"INPUT": layer_id, "DISTANCE": 0.5, "SEGMENTS": 8, "DISSOLVE": False, "OUTPUT": "memory:"},
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"native:buffer failed: {record.error}")
+    transfered = outputs_of(record)["OUTPUT"]
+    layer = project_layer(transfered)
+    equal(layer.id(), transfered, "the id the record reported is the project's own id")
+
+    # The QgsProcessingContext of the run is gone by now; the layer has to outlive it.
+    pump(ctx.app, 0.1)
+    equal(project_layer(transfered).featureCount(), 5, "the features after the context was gone")
+    info = ctx.run("layer.get_info", {"layer_id": transfered})
+    equal(info.status, ExecutionStatus.SUCCEEDED, f"layer.get_info on the result: {info.error}")
+    equal(result_of(info)["layer_id"], transfered, "the layer the project resolves the id to")
+    return (
+        f"the result layer {transfered[:8]}… belongs to the project, still resolves by the id the "
+        "record reported after the processing context was destroyed, and layer.get_info reads it"
+    )
+
+
+def p15_non_json_output(ctx: Context) -> str:
+    require_processing()
+    algorithms = processing_algorithms()
+    raise Skip(
+        f"no algorithm among the {len(algorithms)} registered here returns a value with no "
+        "lossless JSON image: every native output is a string, a number or a result layer the run "
+        "hands over by id (P06/P09/P14), so the INTERNAL_ERROR branch of the result normaliser "
+        "cannot be reached without a third-party provider returning QGIS objects, and none is "
+        "installed: 未验收/依据缺失, covered only by the fake in "
+        "tests/test_operations_processing.py"
+    )
+
+
+def p16_submit_cancel_queued(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p16 cities")
+    before = project_layer_ids()
+
+    submitted = ctx.submit(
+        "processing.run_algorithm",
+        {
+            "algorithm_id": "native:buffer",
+            "parameters": {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": "memory:"},
+        },
+    )
+    equal(submitted.status, ExecutionStatus.QUEUED, "the status right after submit")
+    receipt = ctx.engine.cancel(submitted.execution_id)
+    require(receipt.accepted, "the cancel of a queued run was refused")
+    equal(receipt.status, ExecutionStatus.CANCELLED, "the status the cancel reported")
+
+    pump(ctx.app, 0.2)
+    record = ctx.record(submitted.execution_id)
+    equal(record.status, ExecutionStatus.CANCELLED, "the status after the event loop turned")
+    require(record.result is None, "a cancelled run carries a result")
+    equal(project_layer_ids(), before, "the layers after the cancelled run")
+    return (
+        "a submitted processing run was QUEUED, cancelled before the event loop reached it, and "
+        "stayed CANCELLED with no result and no layer; nothing was executed"
+    )
+
+
+def p17_no_injected_destination(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p17 cities")
+    before = project_layer_ids()
+    parameters = {"INPUT": layer_id, "DISTANCE": 1.0, "SEGMENTS": 8, "DISSOLVE": False}
+
+    record = run_algorithm(ctx, "native:buffer", parameters)
+    equal(record.status, ExecutionStatus.FAILED, "a run without the required destination")
+    equal(error_code(record), INVALID_INPUT, "the code for a missing destination")
+    equal(project_layer_ids(), before, "the layers after the refusal")
+
+    # The plugin never fills the key in: had it injected ``memory:`` this very call would
+    # have succeeded, because the same parameters plus OUTPUT do.
+    with_destination = run_algorithm(ctx, "native:buffer", {**parameters, "OUTPUT": "memory:"})
+    equal(
+        with_destination.status,
+        ExecutionStatus.SUCCEEDED,
+        f"the same parameters with OUTPUT: {with_destination.error}",
+    )
+    return (
+        "native:buffer without OUTPUT is FAILED(INVALID_INPUT) from the native check and adds no "
+        'layer, while the same parameters plus OUTPUT="memory:" succeed: the plugin injects no '
+        "destination (and an algorithm with no destination keeps its own result keys, P08/P09)"
+    )
+
+
+# --------------------------------------------------------------- QML (PRD v2 10.2)
+
+
+def s01_vector_categories(ctx: Context) -> str:
+    layers = {
+        "point": cities_layer(ctx, "s01 point"),
+        "line": sub_layer(ctx, "s01 line", fixtures.ROADS_LAYER),
+        "polygon": sub_layer(ctx, "s01 polygon", fixtures.PARCELS_LAYER),
+    }
+    for geometry, layer_id in layers.items():
+        record = ctx.run("layer.list_style_categories", {"layer_id": layer_id})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{geometry}: status")
+        result = result_of(record)
+        equal(sorted(result), ["categories", "layer_id"], f"{geometry}: the result fields")
+        equal(result["layer_id"], layer_id, f"{geometry}: the layer id")
+        equal(result["categories"], VECTOR_CATEGORY_NAMES, f"{geometry}: the 18 categories")
+    return (
+        "Point, Line and Polygon layers all report the same 18 base categories in the PRD's fixed "
+        "order, with only layer_id and categories in the result"
+    )
+
+
+def s02_raster_categories(ctx: Context) -> str:
+    sources = {
+        "s02 one-band": ctx.fixtures.raster,
+        "s02 three-band": ctx.fixtures.raster3,
+    }
+    for name, source in sources.items():
+        layer_id = raster_layer(ctx, name, source)
+        record = ctx.run("layer.list_style_categories", {"layer_id": layer_id})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{name}: status")
+        categories = result_of(record)["categories"]
+        equal(categories, RASTER_CATEGORY_NAMES, f"{name}: the ten categories")
+        for required in ("Labeling", "AttributeTable"):
+            require(required in categories, f"{name}: {required} is missing from {categories}")
+    return (
+        "a one-band and a three-band raster both report the same ten categories, including "
+        "Labeling and AttributeTable, in the PRD's fixed order"
+    )
+
+
+def s03_invalid_categories(ctx: Context) -> str:
+    vector_id = sub_layer(ctx, "s03 polygon", fixtures.PARCELS_LAYER)
+    raster_id = raster_layer(ctx, "s03 raster")
+    requests = {
+        "an empty list": (vector_id, []),
+        "a repeated category": (vector_id, ["Symbology", "Symbology"]),
+        "an unknown name": (vector_id, ["p5NotAStyleCategory"]),
+        "a vector-only category on a raster": (raster_id, ["Symbology3D"]),
+        "an empty list on a raster": (raster_id, []),
+    }
+    for label, (layer_id, categories) in requests.items():
+        record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": categories})
+        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
+        equal(error_code(record), INVALID_INPUT, f"{label}: code")
+        require(record.result is None, f"{label}: a half-finished export was returned")
+    return (
+        "an empty list, a repeated category, an unknown name and a vector-only category on a "
+        "raster are all FAILED(INVALID_INPUT) with no partial XML"
+    )
+
+
+def s04_symbology_only(ctx: Context) -> str:
+    layer_id = sub_layer(ctx, "s04 polygon", fixtures.PARCELS_LAYER)
+    files_before = qml_files()
+
+    record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": ["Symbology"]})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.get_qml failed: {record.error}")
+    result = result_of(record)
+    equal(sorted(result), ["layer_id", "qml"], "the result fields")
+    qml = result["qml"]
+    root = xml_root(qml)
+    equal(root.tag, "qgis", "the QML root element")
+    equal(root.get("styleCategories"), "Symbology", "the categories the root declares")
+    require("renderer-v2" in qml, "the exported XML carries no renderer")
+    equal(qml_files(), files_before, "the .qml files this export created")
+    return (
+        f"a Symbology-only export is valid XML ({len(qml)} bytes) whose qgis root declares "
+        'styleCategories="Symbology" and carries a renderer-v2 node, and the run created no '
+        ".qml file"
+    )
+
+
+def s05_multiple_and_raster_pipe(ctx: Context) -> str:
+    vector_id = sub_layer(ctx, "s05 polygon", fixtures.PARCELS_LAYER)
+    raster_id = raster_layer(ctx, "s05 raster", ctx.fixtures.raster3)
+
+    combined = qml_of(ctx, vector_id, ["Symbology", "Labeling"])
+    equal(style_categories_attribute(combined), {"Symbology", "Labeling"}, "the combined flags")
+
+    symbology = qml_of(ctx, raster_id, ["Symbology"])
+    rendering = qml_of(ctx, raster_id, ["Rendering"])
+    equal(style_categories_attribute(symbology), {"Symbology"}, "a raster Symbology export")
+    equal(style_categories_attribute(rendering), {"Rendering"}, "a raster Rendering export")
+    for label, qml in (("Symbology", symbology), ("Rendering", rendering)):
+        require("<pipe" in qml, f"the raster {label} export carries no Raster Pipe")
+        require("rasterrenderer" in qml, f"the raster {label} export carries no raster renderer")
+    require(
+        symbology.count("<pipe") == rendering.count("<pipe"),
+        "the two overlapping categories exported a different number of pipes",
+    )
+    return (
+        "the vector export bit-combines Symbology|Labeling in its root attribute, and a raster "
+        "exports its Raster Pipe for Symbology and for Rendering alike (QGIS 3.44's own coupling), "
+        "with the requested category in styleCategories"
+    )
+
+
+def s06_export_failure(ctx: Context) -> str:
+    raise Skip(
+        "no real layer can be made to fail exportNamedStyle here, so S06's sanitised "
+        "INTERNAL_ERROR cannot be observed: a valid vector layer (with and without a renderer) "
+        "and a valid raster all return an empty message (measured), a layer that cannot export is "
+        "refused earlier as INVALID_LAYER, and a renderer written in Python to make save() fail "
+        "ends the process (0xC0000409, sip ownership) — that branch must not be a case. The "
+        "unpacking half of S06 is proven by S04/S05 succeeding (the binding returns str, not "
+        "(message, ok): charter 7/E2); the failure branch stays covered by "
+        "tests/test_operations_layer.py's fake"
+    )
+
+
+# -------------------------------------------------- renderer candidates (10.3)
+
+
+def a01_vector_candidates(ctx: Context) -> str:
+    from qgis.core import QgsApplication
+
+    layers = {
+        "Point": cities_layer(ctx, "a01 point"),
+        "Line": sub_layer(ctx, "a01 line", fixtures.ROADS_LAYER),
+        "Polygon": sub_layer(ctx, "a01 polygon", fixtures.PARCELS_LAYER),
+    }
+    lists = {}
+    for geometry, layer_id in layers.items():
+        native = QgsApplication.rendererRegistry().renderersList(project_layer(layer_id))
+        record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{geometry}: status")
+        lists[geometry] = result_of(record)["renderer_types"]
+        equal(lists[geometry], sorted(set(native)), f"{geometry}: the live per-layer registry list")
+    require("heatmapRenderer" in lists["Point"], f"the Point list: {lists['Point']}")
+    require(
+        "heatmapRenderer" not in lists["Line"],
+        f"the Line list holds a Point-only renderer: {lists['Line']}",
+    )
+    require(lists["Point"] != lists["Polygon"], "every geometry got the same list")
+    return (
+        f"each geometry's list equals renderersList(layer) of the live registry "
+        f"(Point {len(lists['Point'])}, Line {len(lists['Line'])}, Polygon "
+        f"{len(lists['Polygon'])} types), so the registry's own geometry filter is what decides"
+    )
+
+
+def a02_raster_candidates(ctx: Context) -> str:
+    from qgis.core import QgsRasterRendererRegistry
+
+    native = QgsRasterRendererRegistry().renderersList()
+    equal(sorted(native), RASTER_RENDERER_TYPES, "the eight built-in raster renderers")
+    equal(sorted(set(native)), sorted(native), "the raster registry repeats itself")
+
+    layer_id = raster_layer(ctx, "a02 raster", ctx.fixtures.raster3)
+    record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
+    equal(
+        record.status,
+        ExecutionStatus.SUCCEEDED,
+        f"layer.list_available_renderers: {record.error}",
+    )
+    types = result_of(record)["renderer_types"]
+    equal(types, sorted(set(native)), "the raster list against QgsRasterRendererRegistry")
+    equal(len(types), 8, "the registered raster renderer count")
+    return (
+        "a raster layer reports the same eight types QgsRasterRendererRegistry().renderersList() "
+        "holds for the whole environment, not a per-layer selection "
+        f"({', '.join(types)})"
+    )
+
+
+# Registered through the application registry by A03, so the instance outlives the case:
+# the native registry takes ownership and Python must keep its wrapper alive.
+_REGISTERED_RENDERER_METADATA: list[Any] = []
+
+
+def a03_third_party_candidate(ctx: Context) -> str:
+    from qgis.core import (
+        QgsApplication,
+        QgsMarkerSymbol,
+        QgsRendererAbstractMetadata,
+        QgsSingleSymbolRenderer,
+    )
+
+    layer_id = cities_layer(ctx, "a03 point")
+    before = result_of(ctx.run("layer.list_available_renderers", {"layer_id": layer_id}))[
+        "renderer_types"
+    ]
+    # The setter implements five vector types; the registered ones it cannot set are
+    # candidates all the same, which is what "not filtered by the setter" means.
+    for name in ("heatmapRenderer", "pointCluster", "pointDisplacement"):
+        require(name in before, f"{name} is missing from the candidates: {before}")
+
+    class AcceptanceMetadata(QgsRendererAbstractMetadata):
+        def __init__(self) -> None:
+            super().__init__("p5AcceptanceRenderer", "P5 acceptance renderer")
+
+        def createRenderer(self, element):  # noqa: N802 - the native spelling
+            return QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({"color": "#8866cc"}))
+
+    metadata = AcceptanceMetadata()
+    require(
+        QgsApplication.rendererRegistry().addRenderer(metadata),
+        "the application renderer registry refused the new renderer",
+    )
+    _REGISTERED_RENDERER_METADATA.append(metadata)
+
+    after = result_of(ctx.run("layer.list_available_renderers", {"layer_id": layer_id}))[
+        "renderer_types"
+    ]
+    require(
+        "p5AcceptanceRenderer" in after,
+        f"a renderer registered in this session is not a candidate: {after}",
+    )
+    require(sorted(after) == after, f"the list is no longer sorted: {after}")
+    record = set_renderer(ctx, layer_id, {"type": "p5AcceptanceRenderer"})
+    equal(record.status, ExecutionStatus.FAILED, "the setter accepted a type it does not implement")
+    equal(error_code(record), INVALID_INPUT, "the code for a type the setter does not implement")
+    return (
+        "the candidates include the three registered Point types the setter does not implement, "
+        "and a renderer registered into the application registry during this run appears in the "
+        "next call even though layer.set_renderer refuses it with INVALID_INPUT"
+    )
+
+
+def a03b_raster_third_party(ctx: Context) -> str:
+    from qgis.core import QgsApplication
+
+    # The PRD's accessor is not bound in 3.44, and a registry object built here is not
+    # the C++ singleton a third-party provider would register into (charter 7/E3).
+    require(
+        not hasattr(QgsApplication, "rasterRendererRegistry"),
+        "QgsApplication now exposes rasterRendererRegistry(); the A03 raster half can be run",
+    )
+    raise Skip(
+        "QgsApplication.rasterRendererRegistry() is SIP_SKIP in this build, "
+        "QgsRasterRendererRegistry has no instance() and a freshly constructed one lists only the "
+        "eight built-ins, so a third-party raster renderer registered in the C++ singleton cannot "
+        "be observed from Python (charter 7/E3): the raster half of A03 is unverifiable here and "
+        "A02 measures the built-in eight instead"
+    )
+
+
+def a04_bad_layers(ctx: Context) -> str:
+    from qgis.core import QgsProject, QgsVectorLayer
+
+    table = QgsVectorLayer("None?field=p5:integer", "a04 table", "memory")
+    require(QgsProject.instance().addMapLayer(table) is not None, "the table layer was not added")
+    invalid = QgsVectorLayer(str(ctx.fixtures.root / "a04 missing.gpkg"), "a04 invalid", "ogr")
+    require(
+        QgsProject.instance().addMapLayer(invalid) is not None, "the invalid layer was not added"
+    )
+    require(table.isValid() and not invalid.isValid(), "the two probe layers are the wrong shape")
+
+    operations = (
+        "layer.list_available_renderers",
+        "layer.get_renderer",
+        "layer.list_style_categories",
+    )
+    for operation in operations:
+        record = ctx.run(operation, {"layer_id": "a04-no-such-layer"})
+        equal(record.status, ExecutionStatus.FAILED, f"{operation}: an unknown id")
+        equal(error_code(record), LAYER_NOT_FOUND, f"{operation}: the code for an unknown id")
+    for label, layer_id in (("a vector table", table.id()), ("an invalid layer", invalid.id())):
+        for operation in (*operations, "layer.get_qml"):
+            record = ctx.run(operation, {"layer_id": layer_id})
+            equal(record.status, ExecutionStatus.FAILED, f"{operation} on {label}")
+            equal(error_code(record), INVALID_LAYER, f"{operation}: the code for {label}")
+    return (
+        "an unknown id is LAYER_NOT_FOUND on all three renderer/style reads; a valid vector table "
+        "(no geometry) and a registered but invalid layer are INVALID_LAYER on all four"
+    )
+
+
+def a05_stable_result(ctx: Context) -> str:
+    vector_id = cities_layer(ctx, "a05 point")
+    raster_id = raster_layer(ctx, "a05 raster", ctx.fixtures.raster3)
+
+    counts = {}
+    for label, layer_id in (("vector", vector_id), ("raster", raster_id)):
+        first = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
+        equal(first.status, ExecutionStatus.SUCCEEDED, f"{label}: status")
+        result = result_of(first)
+        equal(sorted(result), ["renderer_types"], f"{label}: the result fields")
+        types = result["renderer_types"]
+        equal(types, sorted(types), f"{label}: ascending order")
+        equal(len(types), len(set(types)), f"{label}: duplicates in {types}")
+        second = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
+        equal(result_of(second), result, f"{label}: a repeated call differs")
+        counts[label] = len(types)
+    return (
+        f"deduplicated, ascending and identical on a repeated call, with only renderer_types in "
+        f"the result (vector {counts['vector']} types, raster {counts['raster']} types)"
+    )
+
+
+def a06_get_renderer(ctx: Context) -> str:
+    from qgis.core import QgsHeatmapRenderer
+
+    vector_id = cities_layer(ctx, "a06 point")
+    raster_id = raster_layer(ctx, "a06 raster", ctx.fixtures.raster3)
+
+    for layer_id in (vector_id, raster_id):
+        record = ctx.run("layer.get_renderer", {"layer_id": layer_id})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{layer_id}: status")
+        result = result_of(record)
+        equal(sorted(result), ["layer_id", "renderer_type"], "the result fields")
+        equal(result["renderer_type"], project_layer(layer_id).renderer().type(), "the live type")
+
+    # A renderer the setter cannot build is still read, and its configuration comes from QML.
+    project_layer(vector_id).setRenderer(QgsHeatmapRenderer())
+    equal(installed_renderer(ctx, vector_id), "heatmapRenderer", "a type the setter cannot build")
+    qml = qml_of(ctx, vector_id, ["Symbology"])
+    require("heatmapRenderer" in qml, "the heatmap configuration is not in the QML export")
+    return (
+        "both layer kinds report exactly the live renderer().type() with layer_id and "
+        "renderer_type only; a heatmapRenderer the setter cannot build reads back as "
+        "'heatmapRenderer' and its full configuration is in the Symbology QML"
+    )
+
+
+# ------------------------------------------------------ vector setters (10.4)
+
+
+def v01_null_symbol(ctx: Context) -> str:
+    from qgis.core import QgsProject
+
+    layer_id = sub_layer(ctx, "v01 polygon", fixtures.PARCELS_LAYER)
+    before = result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))
+    QgsProject.instance().setDirty(False)
+
+    record = set_renderer(ctx, layer_id, {"type": "nullSymbol"})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "nullSymbol", "the reported type")
+    equal(project_layer(layer_id).renderer().type(), "nullSymbol", "the installed native type")
+    equal(installed_renderer(ctx, layer_id), "nullSymbol", "layer.get_renderer")
+
+    after = result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))
+    for field in ("visible", "effective_visible", "in_layer_tree"):
+        equal(after[field], before[field], f"the layer's {field}")
+    node = QgsProject.instance().layerTreeRoot().findLayer(layer_id)
+    require(
+        node is not None and node.isVisible(),
+        "the renderer changed the layer tree's visibility",
+    )
+    require(QgsProject.instance().isDirty(), "layer.set_renderer left the project clean")
+    return (
+        "nullSymbol installed as the layer's own renderer, visibility and layer-tree presence "
+        "unchanged, and the project is dirty afterwards although QgsVectorLayer.setRenderer alone "
+        "does not mark it (measured)"
+    )
+
+
+def v02_single_symbol(ctx: Context) -> str:
+    from qgis.core import QgsSymbol
+
+    cases = (
+        (
+            "point",
+            cities_layer(ctx, "v02 point"),
+            {"type": "marker", "color": "#6CAC83", "size_mm": 3.5},
+        ),
+        (
+            "line",
+            sub_layer(ctx, "v02 line", fixtures.ROADS_LAYER),
+            {"type": "line", "color": "#D95843", "width_mm": 0.8},
+        ),
+        (
+            "polygon",
+            sub_layer(ctx, "v02 polygon", fixtures.PARCELS_LAYER),
+            {
+                "type": "fill",
+                "color": "#275E40",
+                "outline_color": "#111111",
+                "outline_width_mm": 0.5,
+            },
+        ),
+    )
+    for label, layer_id, symbol in cases:
+        record = set_renderer(ctx, layer_id, {"type": "singleSymbol", "symbol": symbol})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{label}: {record.error}")
+        equal(result_of(record)["renderer_type"], "singleSymbol", f"{label}: the reported type")
+        renderer = project_layer(layer_id).renderer()
+        equal(renderer.type(), "singleSymbol", f"{label}: the native renderer")
+        installed = renderer.symbol()
+        families = {"marker": QgsSymbol.Marker, "line": QgsSymbol.Line, "fill": QgsSymbol.Fill}
+        equal(installed.type(), families[symbol["type"]], f"{label}: the symbol family")
+        equal(installed.color().name(), symbol["color"].lower(), f"{label}: the colour")
+        if symbol["type"] == "marker":
+            equal(installed.size(), symbol["size_mm"], f"{label}: the marker size in mm")
+        elif symbol["type"] == "line":
+            equal(installed.width(), symbol["width_mm"], f"{label}: the line width in mm")
+        else:
+            layer_zero = installed.symbolLayer(0)
+            equal(layer_zero.strokeColor().name(), symbol["outline_color"].lower(), "outline")
+            equal(layer_zero.strokeWidth(), symbol["outline_width_mm"], "outline width")
+        equal(installed_renderer(ctx, layer_id), "singleSymbol", f"{label}: layer.get_renderer")
+    return (
+        "singleSymbol installed on Point, Line and Polygon with the declared colour, marker size, "
+        "line width and fill outline read back from the native symbol, each agreeing with "
+        "layer.get_renderer"
+    )
+
+
+def v03_categorized(ctx: Context) -> str:
+    layer_id = sub_layer(ctx, "v03 polygon", fixtures.PARCELS_LAYER)
+    config = {
+        "type": "categorizedSymbol",
+        "field": "landuse",
+        "categories": [
+            {"value": "forest", "label": "Forest", "symbol": {"type": "fill", "color": "#398F59"}},
+            {"value": "water", "label": "Water", "symbol": {"type": "fill", "color": "#419ACB"}},
+        ],
+    }
+    record = set_renderer(ctx, layer_id, config)
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "categorizedSymbol", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "categorizedSymbol", "the native renderer")
+    equal(renderer.classAttribute(), "landuse", "the classification field")
+    categories = renderer.categories()
+    equal([entry.value() for entry in categories], ["forest", "water"], "the category order")
+    equal([entry.label() for entry in categories], ["Forest", "Water"], "the labels")
+    equal(
+        [entry.symbol().color().name() for entry in categories],
+        ["#398f59", "#419acb"],
+        "the category colours",
+    )
+    field = project_layer(layer_id).fields().indexFromName("landuse")
+    require(field >= 0, "the field the renderer classifies by is gone")
+    values = {feature.attribute(field) for feature in project_layer(layer_id).getFeatures()}
+    require(
+        values <= {entry.value() for entry in categories},
+        f"the layer holds values the renderer has no category for: {values}",
+    )
+
+    qml = qml_of(ctx, layer_id, ["Symbology"])
+    for label in ("Forest", "Water"):
+        require(f'label="{label}"' in qml, f"{label} is missing from the QML export")
+
+    again = set_renderer(ctx, layer_id, config)
+    equal(again.status, ExecutionStatus.SUCCEEDED, f"the second identical call: {again.error}")
+    equal(
+        [entry.value() for entry in project_layer(layer_id).renderer().categories()],
+        ["forest", "water"],
+        "the category order after setting the same configuration twice",
+    )
+    return (
+        "categorizedSymbol keeps the given order, values, labels and colours on the native "
+        "QgsCategorizedSymbolRenderer, classifies by the declared field, covers every value the "
+        "layer holds, and appears with both labels in the QML; a second identical call is stable"
+    )
+
+
+def v04_graduated(ctx: Context) -> str:
+    layer_id = sub_layer(ctx, "v04 polygon", fixtures.PARCELS_LAYER)
+    ranges = [
+        {
+            "lower": 0,
+            "upper": 100,
+            "label": "Small",
+            "symbol": {"type": "fill", "color": "#CFE5B5"},
+        },
+        {
+            "lower": 100,
+            "upper": 200,
+            "label": "Large",
+            "symbol": {"type": "fill", "color": "#468B46"},
+        },
+    ]
+    record = set_renderer(
+        ctx, layer_id, {"type": "graduatedSymbol", "field": "area", "ranges": ranges}
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "graduatedSymbol", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "graduatedSymbol", "the native renderer")
+    equal(renderer.classAttribute(), "area", "the classification field")
+    installed = renderer.ranges()
+    equal([entry.lowerValue() for entry in installed], [0.0, 100.0], "the lower bounds")
+    equal([entry.upperValue() for entry in installed], [100.0, 200.0], "the upper bounds")
+    equal([entry.label() for entry in installed], ["Small", "Large"], "the labels")
+    equal(
+        [entry.symbol().color().name() for entry in installed],
+        ["#cfe5b5", "#468b46"],
+        "the range colours",
+    )
+
+    overlapping = [
+        ranges[0],
+        {
+            "lower": 50,
+            "upper": 200,
+            "label": "Overlap",
+            "symbol": {"type": "fill", "color": "#111111"},
+        },
+    ]
+    refused = set_renderer(
+        ctx, layer_id, {"type": "graduatedSymbol", "field": "area", "ranges": overlapping}
+    )
+    equal(refused.status, ExecutionStatus.FAILED, "overlapping ranges")
+    equal(error_code(refused), INVALID_INPUT, "the code for overlapping ranges")
+    equal(installed_renderer(ctx, layer_id), "graduatedSymbol", "the renderer after the refusal")
+    equal(
+        [entry.label() for entry in project_layer(layer_id).renderer().ranges()],
+        ["Small", "Large"],
+        "the ranges after the refusal",
+    )
+    return (
+        "graduatedSymbol installed both ranges with their bounds, labels and colours on the native "
+        "QgsGraduatedSymbolRenderer; ranges that overlap are FAILED(INVALID_INPUT) and the "
+        "installed ranges are unchanged"
+    )
+
+
+def v05_rules(ctx: Context) -> str:
+    layer_id = sub_layer(ctx, "v05 line", fixtures.ROADS_LAYER)
+    rules = [
+        {
+            "label": "First",
+            "filter": '"road_id" = 7',
+            "symbol": {"type": "line", "color": "#D95843", "width_mm": 0.8},
+        },
+        {
+            "label": "Second",
+            "filter": '"road_id" > 100',
+            "symbol": {"type": "line", "color": "#888888", "width_mm": 0.25},
+        },
+        {
+            "label": "Third",
+            "filter": '"road_id" < 0',
+            "symbol": {"type": "line", "color": "#00A0FF", "width_mm": 0.5},
+        },
+    ]
+    record = set_renderer(ctx, layer_id, {"type": "RuleRenderer", "rules": rules})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "RuleRenderer", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "RuleRenderer", "the native renderer")
+    children = renderer.rootRule().children()
+    equal(len(children), 3, "the number of flat rules")
+    equal([rule.label() for rule in children], ["First", "Second", "Third"], "the rule order")
+    equal(
+        [rule.filterExpression() for rule in children],
+        ['"road_id" = 7', '"road_id" > 100', '"road_id" < 0'],
+        "the expressions as given",
+    )
+    equal([rule.isElse() for rule in children], [False, False, False], "the ELSE flags")
+    require(all(rule.active() for rule in children), "a rule was installed inactive")
+    equal(
+        [rule.symbol().color().name() for rule in children],
+        ["#d95843", "#888888", "#00a0ff"],
+        "the rule colours",
+    )
+    qml = qml_of(ctx, layer_id, ["Symbology"])
+    for label in ("First", "Second", "Third"):
+        require(f'label="{label}"' in qml, f"{label} is missing from the QML export")
+    return (
+        "three flat rules installed on the native QgsRuleBasedRenderer in the given order, with "
+        "their filter expressions, symbols and active flags read back from rootRule(), and all "
+        "three labels in the Symbology QML"
+    )
+
+
+def v06_else_rule(ctx: Context) -> str:
+    layer_id = sub_layer(ctx, "v06 line", fixtures.ROADS_LAYER)
+    rules = [
+        {
+            "label": "Matched",
+            "filter": '"road_id" = 7',
+            "symbol": {"type": "line", "color": "#D95843", "width_mm": 0.8},
+        },
+        {
+            "label": "Everything else",
+            "else_rule": True,
+            "symbol": {"type": "line", "color": "#888888", "width_mm": 0.25},
+        },
+    ]
+    record = set_renderer(ctx, layer_id, {"type": "RuleRenderer", "rules": rules})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+
+    renderer = project_layer(layer_id).renderer()
+    children = renderer.rootRule().children()
+    equal(len(children), 2, "the rules including the implicit catch-all the PRD forbids")
+    equal([rule.label() for rule in children], ["Matched", "Everything else"], "the rule order")
+    equal([rule.isElse() for rule in children], [False, True], "the ELSE flags")
+    equal(children[-1].filterExpression(), "ELSE", "the native spelling of an else rule")
+    require(all(rule.active() for rule in children), "a rule was installed inactive")
+
+    qml = qml_of(ctx, layer_id, ["Symbology"])
+    require('label="Everything else"' in qml, "the else rule is missing from the QML export")
+    require(qml.count("<rule ") == 2, f"the QML export holds {qml.count('<rule ')} rule elements")
+    return (
+        "one ordinary rule and one ELSE rule are the only two children of rootRule(); the ELSE is "
+        "last and is the last child in the QML as well, so no implicit all-matching default rule "
+        "was appended"
+    )
+
+
+def v07_refusals(ctx: Context) -> str:
+    layer_id = sub_layer(ctx, "v07 line", fixtures.ROADS_LAYER)
+    kept = {
+        "type": "RuleRenderer",
+        "rules": [
+            {
+                "label": "Keep",
+                "filter": '"road_id" = 7',
+                "symbol": {"type": "line", "color": "#D95843", "width_mm": 0.8},
+            }
+        ],
+    }
+    equal(set_renderer(ctx, layer_id, kept).status, ExecutionStatus.SUCCEEDED, "the kept renderer")
+
+    symbol = {"type": "line", "color": "#111111", "width_mm": 0.3}
+    refused = {
+        "an invalid expression": {
+            "type": "RuleRenderer",
+            "rules": [{"label": "Bad", "filter": '"road_id" = = 1', "symbol": symbol}],
+        },
+        "two ELSE rules": {
+            "type": "RuleRenderer",
+            "rules": [
+                {"label": "One", "filter": "1 = 1", "symbol": symbol},
+                {"label": "A", "else_rule": True, "symbol": symbol},
+                {"label": "B", "else_rule": True, "symbol": symbol},
+            ],
+        },
+        "an ELSE that is not last": {
+            "type": "RuleRenderer",
+            "rules": [
+                {"label": "A", "else_rule": True, "symbol": symbol},
+                {"label": "B", "filter": "1 = 1", "symbol": symbol},
+            ],
+        },
+        "an ELSE with a filter": {
+            "type": "RuleRenderer",
+            "rules": [
+                {"label": "A", "filter": "1 = 1", "symbol": symbol},
+                {"label": "B", "else_rule": True, "filter": "1 = 1", "symbol": symbol},
+            ],
+        },
+    }
+    for label, config in refused.items():
+        record = set_renderer(ctx, layer_id, config)
+        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
+        equal(error_code(record), INVALID_INPUT, f"{label}: code")
+        equal(installed_renderer(ctx, layer_id), "RuleRenderer", f"{label}: the renderer type")
+        equal(
+            [rule.label() for rule in project_layer(layer_id).renderer().rootRule().children()],
+            ["Keep"],
+            f"{label}: the rules the old renderer still has",
+        )
+    return (
+        "an unparseable expression, two ELSE rules, an ELSE that is not last and an ELSE that "
+        "carries a filter are all FAILED(INVALID_INPUT), and the previously installed "
+        "RuleRenderer keeps its single rule every time"
+    )
+
+
+def v08_unsupported(ctx: Context) -> str:
+    layer_id = cities_layer(ctx, "v08 point")
+    kept = {"type": "singleSymbol", "symbol": {"type": "marker", "color": "#6CAC83"}}
+    equal(set_renderer(ctx, layer_id, kept).status, ExecutionStatus.SUCCEEDED, "the kept renderer")
+
+    unsupported = (
+        "heatmapRenderer",
+        "pointCluster",
+        "pointDisplacement",
+        "mergedFeatureRenderer",
+        "invertedPolygonRenderer",
+        "25dRenderer",
+        "embeddedSymbol",
+        "paletted",
+        "hillshade",
+    )
+    for name in unsupported:
+        record = set_renderer(ctx, layer_id, {"type": name})
+        equal(record.status, ExecutionStatus.FAILED, f"{name}: status")
+        equal(error_code(record), INVALID_INPUT, f"{name}: code")
+
+    mismatch = set_renderer(
+        ctx, layer_id, {"type": "singleSymbol", "symbol": {"type": "fill", "color": "#FFFFFF"}}
+    )
+    equal(mismatch.status, ExecutionStatus.FAILED, "a fill symbol on a point layer")
+    equal(error_code(mismatch), INVALID_INPUT, "the code for a symbol that does not match")
+    equal(installed_renderer(ctx, layer_id), "singleSymbol", "the renderer after the refusals")
+
+    candidates = result_of(ctx.run("layer.list_available_renderers", {"layer_id": layer_id}))[
+        "renderer_types"
+    ]
+    for name in ("heatmapRenderer", "pointCluster", "pointDisplacement"):
+        require(name in candidates, f"{name} is no longer a candidate: {candidates}")
+    return (
+        f"{len(unsupported)} renderer types the setter does not implement and a fill symbol on a "
+        "point layer are all FAILED(INVALID_INPUT) with the previous renderer untouched, while "
+        "layer.list_available_renderers still lists the unsupported types as candidates"
+    )
+
+
+# ------------------------------------------------------ raster setters (10.5)
+
+
+def r01_single_band_gray(ctx: Context) -> str:
+    from qgis.core import QgsContrastEnhancement, QgsSingleBandGrayRenderer
+
+    layer_id = raster_layer(ctx, "r01 raster", ctx.fixtures.raster3)
+    record = set_renderer(
+        ctx, layer_id, {"type": "singlebandgray", "band": 2, "min": 1.0, "max": 200.0}
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "singlebandgray", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "singlebandgray", "the native renderer")
+    require(isinstance(renderer, QgsSingleBandGrayRenderer), f"the native class: {type(renderer)}")
+    equal(renderer.inputBand(), 2, "the band the renderer reads")
+    enhancement = renderer.contrastEnhancement()
+    require(enhancement is not None, "the renderer carries no contrast enhancement")
+    equal(enhancement.minimumValue(), 1.0, "the minimum of the stretch")
+    equal(enhancement.maximumValue(), 200.0, "the maximum of the stretch")
+    equal(
+        enhancement.contrastEnhancementAlgorithm(),
+        QgsContrastEnhancement.StretchToMinimumMaximum,
+        "the contrast algorithm",
+    )
+    equal(installed_renderer(ctx, layer_id), "singlebandgray", "layer.get_renderer")
+    return (
+        "singlebandgray installed band 2 with a StretchToMinimumMaximum enhancement of 1.0..200.0 "
+        "on the native QgsSingleBandGrayRenderer (a Byte band, so the stretch is stored as given)"
+    )
+
+
+def r02_multiband_color(ctx: Context) -> str:
+    layer_id = raster_layer(ctx, "r02 raster", ctx.fixtures.raster3)
+    record = set_renderer(
+        ctx, layer_id, {"type": "multibandcolor", "red_band": 3, "green_band": 2, "blue_band": 2}
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "multibandcolor", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "multibandcolor", "the native renderer")
+    equal(renderer.redBand(), 3, "the red band")
+    equal(renderer.greenBand(), 2, "the green band")
+    equal(renderer.blueBand(), 2, "the blue band, which repeats the green one")
+    return (
+        "multibandcolor installed red=3, green=2, blue=2 on the native renderer: distinct bands "
+        "map to the channels and naming the same band twice is accepted"
+    )
+
+
+def r03_pseudo_color(ctx: Context) -> str:
+    from qgis.core import QgsColorRampShader
+
+    layer_id = raster_layer(ctx, "r03 raster", ctx.fixtures.raster3)
+    stops = [{"value": 0, "color": "#2665B8"}, {"value": 10, "color": "#F2E9A4"}]
+    record = set_renderer(
+        ctx,
+        layer_id,
+        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "discrete", "stops": stops},
+    )
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "singlebandpseudocolor", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "singlebandpseudocolor", "the native renderer")
+    equal(renderer.inputBand(), 2, "the band the renderer reads")
+    function = renderer.shader().rasterShaderFunction()
+    equal(function.colorRampType(), QgsColorRampShader.Discrete, "the ramp type for 'discrete'")
+    items = function.colorRampItemList()
+    equal([item.value for item in items], [0.0, 10.0], "the stop values")
+    equal([item.color.name() for item in items], ["#2665b8", "#f2e9a4"], "the stop colours")
+
+    linear = set_renderer(
+        ctx,
+        layer_id,
+        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "linear", "stops": stops},
+    )
+    equal(linear.status, ExecutionStatus.SUCCEEDED, f"the linear ramp: {linear.error}")
+    equal(
+        project_layer(layer_id).renderer().shader().rasterShaderFunction().colorRampType(),
+        QgsColorRampShader.Interpolated,
+        "the ramp type for 'linear'",
+    )
+
+    inverted = set_renderer(
+        ctx,
+        layer_id,
+        {
+            "type": "singlebandpseudocolor",
+            "band": 2,
+            "stops": [{"value": 10, "color": "#2665B8"}, {"value": 0, "color": "#F2E9A4"}],
+        },
+    )
+    equal(inverted.status, ExecutionStatus.FAILED, "stops in decreasing order")
+    equal(error_code(inverted), INVALID_INPUT, "the code for stops in decreasing order")
+    equal(installed_renderer(ctx, layer_id), "singlebandpseudocolor", "the renderer after that")
+    return (
+        "singlebandpseudocolor installed band 2 with the two stops and colors in the native "
+        "shader, "
+        "'discrete' maps to Discrete and 'linear' to Interpolated, and stops in decreasing order "
+        "are FAILED(INVALID_INPUT) with the installed renderer unchanged"
+    )
+
+
+def r04_single_color(ctx: Context) -> str:
+    layer_id = raster_layer(ctx, "r04 raster", ctx.fixtures.raster3)
+    record = set_renderer(ctx, layer_id, {"type": "singlecolor", "band": 3, "color": "#CC6633"})
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    equal(result_of(record)["renderer_type"], "singlecolor", "the reported type")
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "singlecolor", "the native renderer type")
+    equal(renderer.inputBand(), 3, "the band the renderer reads")
+    equal(renderer.color().name(), "#cc6633", "the installed colour")
+    equal(installed_renderer(ctx, layer_id), "singlecolor", "layer.get_renderer")
+    return (
+        "singlecolor installed band 3 and #CC6633 on the native 3.38+ raster renderer type "
+        "(distinct from singlebandcolordata), read back from the object itself"
+    )
+
+
+def r05_raster_refusals(ctx: Context) -> str:
+    layer_id = raster_layer(ctx, "r05 raster", ctx.fixtures.raster3)
+    kept = {"type": "singlebandgray", "band": 1, "min": 0.0, "max": 10.0}
+    equal(set_renderer(ctx, layer_id, kept).status, ExecutionStatus.SUCCEEDED, "the kept renderer")
+
+    stops = [{"value": 0, "color": "#2665B8"}, {"value": 10, "color": "#F2E9A4"}]
+    refused = {
+        "band 0": {"type": "singlebandgray", "band": 0, "min": 0.0, "max": 1.0},
+        "band 4 of a three-band raster": {
+            "type": "singlebandgray",
+            "band": 4,
+            "min": 0.0,
+            "max": 1.0,
+        },
+        "min equal to max": {"type": "singlebandgray", "band": 1, "min": 5.0, "max": 5.0},
+        "a NaN bound": {"type": "singlebandgray", "band": 1, "min": float("nan"), "max": 1.0},
+        "an infinite bound": {"type": "singlebandgray", "band": 1, "min": 0.0, "max": float("inf")},
+        "a band 9 in multibandcolor": {
+            "type": "multibandcolor",
+            "red_band": 1,
+            "green_band": 2,
+            "blue_band": 9,
+        },
+        "a short colour": {"type": "singlecolor", "band": 1, "color": "#12345"},
+        "a non-hex colour": {"type": "singlecolor", "band": 1, "color": "#GGGGGG"},
+        "stops in decreasing order": {
+            "type": "singlebandpseudocolor",
+            "band": 1,
+            "stops": [stops[1], stops[0]],
+        },
+        "an infinite stop": {
+            "type": "singlebandpseudocolor",
+            "band": 1,
+            "stops": [{"value": float("inf"), "color": "#2665B8"}, stops[1]],
+        },
+        "a single stop": {"type": "singlebandpseudocolor", "band": 1, "stops": [stops[0]]},
+    }
+    for label, config in refused.items():
+        record = set_renderer(ctx, layer_id, config)
+        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
+        equal(error_code(record), INVALID_INPUT, f"{label}: code")
+        equal(installed_renderer(ctx, layer_id), "singlebandgray", f"{label}: the renderer type")
+        renderer = project_layer(layer_id).renderer()
+        equal(renderer.inputBand(), 1, f"{label}: the band of the old renderer")
+    return (
+        f"{len(refused)} invalid raster configurations (band bounds, min>=max, non-finite "
+        "numbers, illegal colours, stop order, a single stop) are all FAILED(INVALID_INPUT), and "
+        "the previously installed singlebandgray renderer keeps its band and settings each time"
+    )
+
+
 CASES = (
     ("AT-01", at_01_duplicate_registration),
     ("AT-02", at_02_invalid_input),
@@ -2109,4 +3738,47 @@ CASES = (
     ("AT-49", at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory),
     ("AT-50", at_50_open_refuses_a_subdataset_that_names_a_remote_file),
     ("AT-51", at_51_open_reads_a_project_whose_layer_is_a_local_subdataset),
+    ("P01", p01_list_algorithms),
+    ("P02", p02_no_algorithm_allow_list),
+    ("P03", p03_algorithm_info_fields),
+    ("P04", p04_unknown_algorithm),
+    ("P05", p05_unknown_key),
+    ("P06", p06_buffer_memory_output),
+    ("P07", p07_array_input),
+    ("P08", p08_scalar_output),
+    ("P09", p09_multiple_outputs),
+    ("P10", p10_json_values),
+    ("P11", p11_cannot_execute),
+    ("P12", p12_input_path_policy),
+    ("P13", p13_destination_refused),
+    ("P14", p14_output_ownership),
+    ("P15", p15_non_json_output),
+    ("P16", p16_submit_cancel_queued),
+    ("P17", p17_no_injected_destination),
+    ("S01", s01_vector_categories),
+    ("S02", s02_raster_categories),
+    ("S03", s03_invalid_categories),
+    ("S04", s04_symbology_only),
+    ("S05", s05_multiple_and_raster_pipe),
+    ("S06", s06_export_failure),
+    ("A01", a01_vector_candidates),
+    ("A02", a02_raster_candidates),
+    ("A03", a03_third_party_candidate),
+    ("A03-raster", a03b_raster_third_party),
+    ("A04", a04_bad_layers),
+    ("A05", a05_stable_result),
+    ("A06", a06_get_renderer),
+    ("V01", v01_null_symbol),
+    ("V02", v02_single_symbol),
+    ("V03", v03_categorized),
+    ("V04", v04_graduated),
+    ("V05", v05_rules),
+    ("V06", v06_else_rule),
+    ("V07", v07_refusals),
+    ("V08", v08_unsupported),
+    ("R01", r01_single_band_gray),
+    ("R02", r02_multiband_color),
+    ("R03", r03_pseudo_color),
+    ("R04", r04_single_color),
+    ("R05", r05_raster_refusals),
 )

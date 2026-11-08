@@ -48,6 +48,9 @@ POP_NULLS = 2
 
 CITIES_LAYER = "cities"
 ROADS_LAYER = "roads"
+# A polygon table, so the fill symbol and the raster/vector renderer families have a
+# third geometry to be tried on (PRD v2 5.5, 10.4).
+PARCELS_LAYER = "parcels"
 
 # The marker a work root carries once this script owns it; nothing is ever removed
 # from a directory that does not hold it.
@@ -105,6 +108,8 @@ class Fixtures:
     spaced: Path
     corrupt_gpkg: Path
     raster: Path
+    # Three bands, so ``multibandcolor`` has a real RGB choice to make (PRD v2 7.2).
+    raster3: Path
     project: Path
     missing: Path
     corrupt_project: Path
@@ -180,6 +185,17 @@ def build(root: Path) -> Fixtures:
     )
     # A second table in the same GeoPackage: the ``sub_layer`` case of layer.add.
     _write_layer(cities, ROADS_LAYER, "LineString", ["road_id:integer"], [(7,)], append_layer=True)
+    # A polygon table with a text field and a numeric field: the categorized and
+    # graduated renderers need both shapes, and Point/Line/Polygon is what the
+    # geometry-dependent symbol rule covers (PRD v2 5.5, 6.3, 6.4).
+    _write_layer(
+        cities,
+        PARCELS_LAYER,
+        "Polygon",
+        ["landuse:string", "area:double"],
+        [("forest", 120.5), ("water", 41.0), ("forest", 80.25)],
+        append_layer=True,
+    )
 
     spaced = data / "city data.gpkg"
     spaced.write_bytes(cities.read_bytes())
@@ -189,6 +205,8 @@ def build(root: Path) -> Fixtures:
 
     raster = data / "cities.tif"
     _write_raster(raster)
+    raster3 = data / "bands3.tif"
+    _write_raster(raster3, bands=3)
 
     project = data / "project.qgz"
     _write_project(project, [(cities, CITIES_LAYER, "cities")], [raster])
@@ -307,6 +325,7 @@ def build(root: Path) -> Fixtures:
         spaced=spaced,
         corrupt_gpkg=corrupt_gpkg,
         raster=raster,
+        raster3=raster3,
         project=project,
         missing=missing,
         corrupt_project=corrupt_project,
@@ -380,18 +399,23 @@ def _write_layer(
         raise RuntimeError(f"could not write {path}: {message}")
 
 
-def _write_raster(path: Path) -> None:
-    """A tiny GeoTIFF, written by the GDAL the QGIS installation ships."""
+def _write_raster(path: Path, bands: int = 1) -> None:
+    """A tiny GeoTIFF, written by the GDAL the QGIS installation ships.
+
+    Band *n* is filled with ``3 * n``, so a case can tell the bands apart by value as
+    well as by number (PRD v2 7.2).
+    """
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
         from osgeo import gdal, osr
 
     driver = gdal.GetDriverByName("GTiff")
-    dataset = driver.Create(str(path), 8, 8, 1, gdal.GDT_Byte)
-    band = dataset.GetRasterBand(1)
-    band.Fill(3)
-    band.SetNoDataValue(0)
+    dataset = driver.Create(str(path), 8, 8, bands, gdal.GDT_Byte)
+    for index in range(1, bands + 1):
+        band = dataset.GetRasterBand(index)
+        band.Fill(3 * index)
+        band.SetNoDataValue(0)
     reference = osr.SpatialReference()
     reference.ImportFromEPSG(4326)
     dataset.SetProjection(reference.ExportToWkt())
