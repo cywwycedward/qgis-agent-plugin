@@ -478,7 +478,7 @@ def test_switching_to_a_smaller_form_shrinks_the_parameter_block(qapp: Any) -> N
     assert dock.operations.currentText() == "layer.add"
     tall = dock.form_host.sizeHint().height()
     assert dock.params.height() == tall, "the first layout fits the five rows"
-    assert dock.params.minimumHeight() == dock.params.maximumHeight(), "the block is fixed"
+    assert dock.params.minimumHeight() < tall, "the block shrinks and scrolls at the floor"
     run_y = dock.run_button.mapTo(dock.widget(), QPoint(0, 0)).y()
 
     row = [dock.operations.itemText(i) for i in range(dock.operations.count())].index(
@@ -490,7 +490,6 @@ def test_switching_to_a_smaller_form_shrinks_the_parameter_block(qapp: Any) -> N
     short = dock.form_host.sizeHint().height()
     assert short < tall
     assert dock.params.height() == short, "the block kept the previous operation's height"
-    assert dock.params.minimumHeight() == dock.params.maximumHeight()
     assert dock.run_button.mapTo(dock.widget(), QPoint(0, 0)).y() < run_y
 
     dock.close()
@@ -647,6 +646,68 @@ def test_ctrl_return_runs_the_selected_operation(qapp: Any) -> None:
 
     assert engine.calls == [("run_sync", "demo.op", {})]
     dock.close()
+
+
+def test_the_failed_state_survives_the_dock_minimum(qapp: Any) -> None:
+    """At its own minimum the dock keeps every banner line and the record inside the body.
+
+    A layout's minimum counts a wrapped label as one line; the banner is asked for
+    its height at the current width, so the floor is the real one.
+    """
+
+    engine = FakeEngine(
+        run_sync=_record(
+            ExecutionStatus.FAILED,
+            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="outside the allowed roots"),
+        )
+    )
+    registry = OperationRegistry()
+    register_all(registry)
+    dock = OperationDock(registry, engine)
+    window = QMainWindow()
+    window.addDockWidget(Qt.RightDockWidgetArea, dock)
+    window.resize(351, 900)
+    window.show()
+    window.resizeDocks([dock], [351], Qt.Horizontal)
+    QTest.qWait(120)
+
+    dock.editors["source_path"][1].setText("D:/temp/roads.gpkg")
+    dock.editors["name"][1].setText("roads")
+    dock.run()
+    QTest.qWait(150)
+
+    floor = dock.minimumSizeHint().height()
+    window.resize(351, floor)
+    QTest.qWait(250)
+
+    body = dock.widget()
+    hint = dock.error_hint
+    bottom = dock.result.mapTo(body, QPoint(0, 0)).y() + dock.result.height()
+    assert dock.feedback.height() >= dock.feedback.heightForWidth(dock.feedback.width())
+    assert hint.height() >= hint.heightForWidth(hint.width()), "the hint lost its last line"
+    assert dock.result.height() >= dock.result.minimumHeight()
+    assert bottom + 16 <= body.height(), "the record was pushed out of the body"
+    assert dock.params.height() < dock.form_host.sizeHint().height()
+    window.close()
+
+
+def test_a_failure_without_a_record_does_not_show_the_idle_hint(qapp: Any) -> None:
+    """The record area says what happened: a failed submit produced no record."""
+
+    engine = FakeEngine(run_sync=FrameworkError(ENGINE_CLOSING, "the engine is shutting down"))
+    dock = OperationDock(FakeRegistry(_spec("a.op"), _spec("b.op")), engine)
+
+    assert dock.result.hint.text().startswith("运行一次后")
+
+    dock.run()
+
+    assert dock.result.toPlainText() == ""
+    assert "没有产生执行记录" in dock.result.hint.text()
+    assert not dock.result.hint.isHidden()
+
+    dock.operations.setCurrentIndex(1)
+
+    assert dock.result.hint.text().startswith("运行一次后")
 
 
 def test_a_run_hands_the_keyboard_back(qapp: Any) -> None:

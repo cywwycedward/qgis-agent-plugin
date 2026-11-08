@@ -91,6 +91,14 @@ _ROW_PAD = 10
 # tall as its rows, so the record gets everything else.
 _FORM_MAX = 320
 
+# The shortest the block gets before it scrolls: one row and a scrollbar's worth.
+_FORM_MIN = 54
+
+# What the record area says when it has nothing to show; the two are not the same
+# thing, and a failed submit must not be told to run again.
+_IDLE_HINT = "运行一次后，这里显示 ExecutionRecord 的 JSON。"
+_NO_RECORD_HINT = "本次调用没有产生执行记录。"
+
 # How a schema ``type`` becomes an editor; anything not listed is a single-line text.
 _KINDS = {
     "boolean": "bool",
@@ -233,6 +241,21 @@ class _SpecDelegate(QStyledItemDelegate):
         width = QFontMetrics(meta_font).horizontalAdvance(index.data(_META_ROLE) or "")
         size.setWidth(size.width() + width + 2 * _ROW_PAD + 16)
         return size
+
+
+class _FormArea(QScrollArea):
+    """A scroll area that asks for its rows' height, and gives it back when space is short.
+
+    A plain scroll area reports a small hint, so the column would never give the form
+    the height its rows need; this one reports the rows and lets the layout shrink it
+    to a scrollable minimum when the dock is at its floor.
+    """
+
+    def sizeHint(self) -> QSize:
+        inner = self.widget()
+        if inner is None:
+            return super().sizeHint()
+        return QSize(super().sizeHint().width(), min(inner.sizeHint().height(), _FORM_MAX))
 
 
 class _Combo(QComboBox):
@@ -416,12 +439,16 @@ class OperationDock(QDockWidget):
         self.form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.form.setRowWrapPolicy(QFormLayout.DontWrapRows)
         self.form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.params = QScrollArea()
+        self.params = _FormArea()
         self.params.setObjectName("params")
         self.params.setWidget(self.form_host)
         self.params.setWidgetResizable(True)
         self.params.setFrameShape(QFrame.NoFrame)
         self.params.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Rows decide the height; below one row it scrolls rather than squeezing the
+        # record, and the layer above it can shrink it when the dock is at its floor.
+        self.params.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.params.setMinimumHeight(_FORM_MIN)
         # An operation with no parameters hides the block, margins and all.
         self.params.setVisible(False)
 
@@ -487,7 +514,7 @@ class OperationDock(QDockWidget):
         self.result.setObjectName("result")
         self.result.setReadOnly(True)
         self.result.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.result.set_hint("运行一次后，这里显示 ExecutionRecord 的 JSON。", self.look.muted)
+        self.result.set_hint(_IDLE_HINT, self.look.muted)
         self.result.setMinimumHeight(110)
         self.result.setAccessibleName("执行记录 JSON")
         self.result.setAccessibleDescription("只读；可以全选复制，或点“复制 JSON”。")
@@ -566,6 +593,7 @@ class OperationDock(QDockWidget):
             self.result.setVisible(False)
             self.empty_state.setVisible(True)
             self._apply_state("empty")
+            self._fit_wrapping_blocks()
             return
         self.operations.setCurrentIndex(0)
         # Adding the first item while blocked already made it current, so the change
@@ -574,6 +602,30 @@ class OperationDock(QDockWidget):
 
     def _selected_spec(self) -> OperationSpec | None:
         return self._specs.get(self.operations.currentData())
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._fit_wrapping_blocks()
+
+    def _fit_wrapping_blocks(self) -> None:
+        """Give the wrapping blocks the height their text needs at this width.
+
+        A layout's minimum counts a word-wrapped label as one line, so at the dock's
+        own minimum the error banner and the description used to lose their last
+        line and push the record past the body.  The width is known here, so say it.
+        """
+
+        if not self.isVisible():
+            return
+        width = max(0, self.width() - 32)  # the body's 16 px margins
+        width = max(0, self.width() - 32)  # the body's 16 px margins
+        for block in (self.details, self.feedback, self.empty_state):
+            if block.isHidden():
+                block.setMinimumHeight(0)
+                continue
+            needed = block.heightForWidth(width)
+            if needed > 0:
+                block.setMinimumHeight(needed)
 
     def _selection_changed(self, index: int) -> None:
         """A different operation: its form, and nothing left of the previous run."""
@@ -585,6 +637,7 @@ class OperationDock(QDockWidget):
         self._record = None
         self._note = ""
         self.result.clear()
+        self.result.set_hint(_IDLE_HINT, self.look.muted)
         self._render_summary()
         self._hide_banner()
         if spec is not None:
@@ -600,6 +653,7 @@ class OperationDock(QDockWidget):
             self.meta.setText("")
             self.summary.setText("")
         self.details.setVisible(bool(self.meta.text() or self.summary.text()))
+        self._fit_wrapping_blocks()
         self._apply_state("idle")
 
     def _build_form(self, spec: OperationSpec | None) -> None:
@@ -612,7 +666,6 @@ class OperationDock(QDockWidget):
         self.editors = {}
         if spec is None:
             self.params.setVisible(False)
-            self.params.setFixedHeight(0)
             self.space_before.changeSize(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
             return
         properties = spec.input_schema.get("properties") or {}
@@ -637,12 +690,9 @@ class OperationDock(QDockWidget):
         self.space_before.changeSize(
             0, 16 if properties else 0, QSizePolicy.Minimum, QSizePolicy.Fixed
         )
-        # The block is exactly as tall as its rows.  Anything less and a layout pass
-        # that is short of space -- a progress bar and a summary line appearing at
-        # once -- takes the difference out of the form the operator is reading.
-        self.params.setFixedHeight(
-            min(self.form_host.sizeHint().height(), _FORM_MAX) if properties else 0
-        )
+        # The rows were shown as they were added, so the hint is already the new
+        # height; tell the column to ask for it again instead of keeping the old one.
+        self.params.updateGeometry()
         self._apply_tab_order()
 
     def _apply_tab_order(self) -> None:
@@ -668,6 +718,7 @@ class OperationDock(QDockWidget):
         self._note = ""
         self._record = None
         self.result.clear()
+        self.result.set_hint(_IDLE_HINT, self.look.muted)
         self._render_summary()
         self._hide_banner()
         self._focus = QApplication.focusWidget()
@@ -851,6 +902,7 @@ class OperationDock(QDockWidget):
         self._record = None
         self._note = ""
         self.result.clear()
+        self.result.set_hint(_NO_RECORD_HINT, self.look.muted)
         self._render_summary()
         self._hide_banner()
         self._apply_state("failed")
@@ -863,9 +915,11 @@ class OperationDock(QDockWidget):
         self.error_hint.setText(hint)
         self.feedback.setAccessibleDescription(f"错误 {code}：{message}。{hint}")
         self.feedback.setVisible(True)
+        self._fit_wrapping_blocks()
 
     def _hide_banner(self) -> None:
         self.feedback.setVisible(False)
+        self._fit_wrapping_blocks()
 
     def _apply_state(self, state: str) -> None:
         """Say the state in the capsule, in colour, and let the controls agree."""
