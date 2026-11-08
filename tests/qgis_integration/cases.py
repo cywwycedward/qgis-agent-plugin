@@ -2853,10 +2853,26 @@ def p12_input_path_policy(ctx: Context) -> str:
             f"the failure message repeats {fragment!r}: {message_of(remote_record)!r}",
         )
     equal(project_layer_ids(), before, "the layers after the two refusals")
+
+    # The positive half of the same boundary: a CRS authority code has the shape of a
+    # URI scheme, and it is an identifier QGIS parses, not a source (review r1 B1).
+    reprojected = run_algorithm(
+        ctx,
+        "native:reprojectlayer",
+        {"INPUT": layer_id, "TARGET_CRS": "EPSG:32633", "OUTPUT": "memory:"},
+    )
+    equal(reprojected.status, ExecutionStatus.SUCCEEDED, f"reprojectlayer: {reprojected.error}")
+    equal(
+        output_layer(ctx, reprojected, "OUTPUT").crs().authid(),
+        "EPSG:32633",
+        "the CRS of the reprojected result",
+    )
     return (
         "a file outside allowed_data_roots and a /vsicurl URI given as a layer input were both "
         "refused as FAILED(PATH_NOT_ALLOWED) before the algorithm ran, no layer was added, and "
-        "neither error message repeats the path or the URI"
+        "neither error message repeats the path or the URI; TARGET_CRS='EPSG:32633' on the same "
+        "entry point SUCCEEDED and the result really is in EPSG:32633, so a CRS code is not "
+        "mistaken for a remote URI"
     )
 
 
@@ -3824,6 +3840,18 @@ def r03_pseudo_color(ctx: Context) -> str:
         "the ramp type for 'linear'",
     )
 
+    exact = set_renderer(
+        ctx,
+        layer_id,
+        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "exact", "stops": stops},
+    )
+    equal(exact.status, ExecutionStatus.SUCCEEDED, f"the exact ramp: {exact.error}")
+    equal(
+        project_layer(layer_id).renderer().shader().rasterShaderFunction().colorRampType(),
+        QgsColorRampShader.Exact,
+        "the ramp type for 'exact'",
+    )
+
     inverted = set_renderer(
         ctx,
         layer_id,
@@ -3839,7 +3867,8 @@ def r03_pseudo_color(ctx: Context) -> str:
     return (
         "singlebandpseudocolor installed band 2 with the two stops and colors in the native "
         "shader, "
-        "'discrete' maps to Discrete and 'linear' to Interpolated, and stops in decreasing order "
+        "'discrete' maps to Discrete, 'linear' to Interpolated and 'exact' to Exact, and stops in "
+        "decreasing order "
         "are FAILED(INVALID_INPUT) with the installed renderer unchanged"
     )
 

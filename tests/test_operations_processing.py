@@ -10,6 +10,7 @@ temporary store is visible from the test.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import subprocess
@@ -189,6 +190,7 @@ class FakeAlgorithm:
         results: Any = None,
         completed: bool = True,
         layers: tuple[Any, ...] = (),
+        errors: tuple[str, ...] = (),
     ) -> None:
         self.algorithm_id = algorithm_id
         self._name = name
@@ -201,6 +203,7 @@ class FakeAlgorithm:
         self._results = results
         self._completed = completed
         self._layers = layers
+        self._errors = errors
         self.calls: list[Any] = []
 
     def id(self) -> str:
@@ -233,6 +236,8 @@ class FakeAlgorithm:
 
     def run(self, parameters: Any, context: Any, feedback: Any) -> tuple[Any, bool]:
         self.calls.append(("run", parameters, context, feedback))
+        for text in self._errors:
+            feedback.reportError(text)
         for layer in self._layers:
             context.temporaryLayerStore().add(layer)
         return (self._results, self._completed)
@@ -254,6 +259,7 @@ class FakePrototype(FakeAlgorithm):
             results=self._results,
             completed=self._completed,
             layers=self._layers,
+            errors=self._errors,
         )
 
     def run(self, parameters: Any, context: Any, feedback: Any) -> tuple[Any, bool]:
@@ -316,6 +322,9 @@ class FakeQgis:
         class QgsProcessingFeedback:
             def __init__(self) -> None:
                 holder.feedback.append(self)
+
+            def reportError(self, message: str, fatalError: bool = False) -> None:
+                pass
 
         class QgsApplication:
             @staticmethod
@@ -397,6 +406,7 @@ def install(
     executable: bool = True,
     refusal: tuple[bool, str] | None = None,
     layers: tuple[Any, ...] = (),
+    errors: tuple[str, ...] = (),
 ) -> FakePrototype:
     prototype = FakePrototype(
         algorithm_id,
@@ -410,6 +420,7 @@ def install(
         results={} if results is None else results,
         completed=completed,
         layers=layers,
+        errors=errors,
     )
     fake.registry.prototypes[algorithm_id] = prototype
     return prototype
@@ -903,6 +914,190 @@ def test_a_remote_file_input_is_refused(fake_qgis: FakeQgis, data_root: Path, va
     assert code == PATH_NOT_ALLOWED
 
 
+def test_a_remote_value_is_refused_on_a_type_this_build_does_not_know(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A type the plugin cannot classify keeps the strict refusal (PRD §3.2.2)."""
+    install(fake_qgis, FakeDefinition("SRC", "customprobe"), results={})
+    code = refuse(
+        ops.ProcessingRunAlgorithm(),
+        make_context(FakeProject(), data_root),
+        run_params({"SRC": "/vsicurl/http://example.invalid/secret.csv"}),
+    )
+    assert code == PATH_NOT_ALLOWED
+    assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["EPSG:32633", "urn:ogc:def:crs:EPSG::32633", "32633", "+proj=utm +zone=33 +datum=WGS84"],
+    ids=["authid", "urn", "code", "proj"],
+)
+def test_a_crs_value_reaches_the_algorithm_as_it_arrived(
+    fake_qgis: FakeQgis, data_root: Path, value: str
+) -> None:
+    """A crs is an identifier QGIS reads itself, not a URI (review r1 B1).
+
+    ``EPSG:32633`` has the shape of a URI scheme, which is why the blanket remote
+    refusal used to reject ``native:reprojectlayer``'s standard spelling.
+    """
+    install(fake_qgis, FakeDefinition("TARGET_CRS", "crs"), results={})
+
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"TARGET_CRS": value})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"TARGET_CRS": value}
+
+
+@pytest.mark.parametrize(
+    ("type_", "value"),
+    [
+        ("string", "EPSG:32633"),
+        ("string", "table:alpha"),
+        ("string", "https://example.invalid/data.csv"),
+        ("enum", "\\\\server\\share\\data.csv"),
+        ("field", "roads:name"),
+        ("expression", '"pop" / 2'),
+        ("extent", "1,2,3,4 [EPSG:32633]"),
+        ("number", 3),
+        ("boolean", True),
+        ("layout", "A3:plan"),
+        ("maptheme", "A3:plan"),
+        ("attribute", "dim:name"),
+        ("color", "#ff0000"),
+        ("coordinateoperation", "EPSG:1188"),
+    ],
+    ids=[
+        "string-authid",
+        "string-table",
+        "string-url",
+        "enum-unc",
+        "field",
+        "expression",
+        "extent",
+        "number",
+        "boolean",
+        "layout",
+        "maptheme",
+        "attribute",
+        "color",
+        "coordinateoperation",
+    ],
+)
+def test_a_value_parameter_keeps_its_value(
+    fake_qgis: FakeQgis, data_root: Path, type_: str, value: Any
+) -> None:
+    """The plugin judges a value type not at all; parsing the value is QGIS's job."""
+    install(fake_qgis, FakeDefinition("VALUE", type_), results={})
+
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"VALUE": value})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"VALUE": value}
+
+
+# The 53 parameter type strings the 440 registered algorithms report on 3.44.13,
+# copied by hand: this is the independent statement the module's own lists must add up
+# to, so dropping a name from either side fails here instead of silently widening the
+# boundary.
+MEASURED_PARAMETER_TYPES = frozenset(
+    {
+        "aggregates",
+        "alignrasterlayers",
+        "area",
+        "attribute",
+        "authcfg",
+        "band",
+        "boolean",
+        "color",
+        "coordinateoperation",
+        "crs",
+        "databaseschema",
+        "databasetable",
+        "distance",
+        "duration",
+        "dxflayers",
+        "enum",
+        "execute_sql",
+        "expression",
+        "extent",
+        "field",
+        "fields_mapping",
+        "file",
+        "fileDestination",
+        "folderDestination",
+        "geometry",
+        "idw_interpolation_data",
+        "layer",
+        "layout",
+        "layoutitem",
+        "maptheme",
+        "matrix",
+        "mesh",
+        "meshdatasetgroups",
+        "meshdatasettime",
+        "multilayer",
+        "number",
+        "point",
+        "pointCloudDestination",
+        "pointcloud",
+        "providerconnection",
+        "raster",
+        "rasterDestination",
+        "raster_calc_expression",
+        "relief_colors",
+        "scale",
+        "sink",
+        "source",
+        "string",
+        "tininputlayers",
+        "vector",
+        "vectorDestination",
+        "vectorTileDestination",
+        "vectortilewriterlayers",
+    }
+)
+
+# The types that name I/O: a destination, one file, a layer reference, a provider
+# connection, or a value with layer references inside it.
+IO_PARAMETER_TYPES = frozenset(
+    {
+        "alignrasterlayers",
+        "databaseschema",
+        "databasetable",
+        "dxflayers",
+        "file",
+        "fileDestination",
+        "folderDestination",
+        "idw_interpolation_data",
+        "layer",
+        "mesh",
+        "multilayer",
+        "pointCloudDestination",
+        "pointcloud",
+        "providerconnection",
+        "raster",
+        "rasterDestination",
+        "sink",
+        "source",
+        "tininputlayers",
+        "vector",
+        "vectorDestination",
+        "vectorTileDestination",
+        "vectortilewriterlayers",
+    }
+)
+
+
+def test_the_value_and_io_lists_account_for_every_measured_parameter_type() -> None:
+    """Every one of the 53 measured types is either a value or an I/O type."""
+    assert ops._MEASURED_PARAMETER_TYPES == MEASURED_PARAMETER_TYPES
+    assert ops._IO_PARAMETER_TYPES == IO_PARAMETER_TYPES
+    assert ops._VALUE_PARAMETERS | ops._IO_PARAMETER_TYPES == MEASURED_PARAMETER_TYPES
+    assert ops._VALUE_PARAMETERS.isdisjoint(ops._IO_PARAMETER_TYPES)
+    assert len(MEASURED_PARAMETER_TYPES) == 53
+
+
 def test_a_layer_parameter_must_name_a_project_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     install(fake_qgis, FakeDefinition("INPUT", "source"), results={})
     code = refuse(
@@ -1089,6 +1284,36 @@ def test_a_run_without_a_result_mapping_is_an_internal_error(
         run_params({}),
     )
     assert code == INTERNAL_ERROR
+
+
+def test_a_run_that_reports_an_error_and_returns_nothing_is_an_internal_error(
+    fake_qgis: FakeQgis, data_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``ok=True`` is not success when the algorithm itself reported a failure."""
+    native = 'ERROR 1: PQconnectdb failed, connection to "127.0.0.1", port 1 refused'
+    install(fake_qgis, results={}, errors=(native,))
+    with (
+        caplog.at_level(logging.WARNING, logger="qgis_agent_plugin.operations.processing"),
+        pytest.raises(FrameworkError) as caught,
+    ):
+        ops.ProcessingRunAlgorithm().execute_main(
+            make_context(FakeProject(), data_root), run_params({})
+        )
+    assert caught.value.code == INTERNAL_ERROR
+    # The native text can quote a host or a path: it reaches the log, never the DTO.
+    assert "127.0.0.1" not in caught.value.message
+    assert native in caplog.text
+
+
+def test_a_run_that_reports_an_error_but_returns_a_result_stays_successful(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A run with real output is not overruled by text on the feedback."""
+    install(fake_qgis, results={"OUTPUT": "done"}, errors=("something it logged",))
+    result = ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({})
+    )
+    assert result.outputs == {"OUTPUT": "done"}
 
 
 def test_a_run_returns_every_scalar_and_structured_output(

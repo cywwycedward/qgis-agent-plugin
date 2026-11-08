@@ -1039,15 +1039,17 @@ def layer_field(layer: Any, name: str) -> Any:
     return fields.at(index)
 
 
-def category_key(field: Any, value: Any) -> tuple[str, Any]:
-    """The key two categories are compared by, normalised by the field's type.
+def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
+    """The key two categories are compared by, and the value the renderer stores.
 
-    An integer and a float are the same numeric category; a value the field cannot
-    hold is refused rather than passed on to render nothing (PRD v2 6.3).
+    An integer and a float are the same numeric category.  Every other value is
+    converted to the field's own type first: a value the field cannot hold is
+    refused instead of becoming a category that can never match, and two spellings
+    of one value (``True`` and ``"true"``) are one category (PRD v2 6.3).
     """
 
     if value is None:
-        return ("null", None)
+        return ("null", None), None
     if field.isNumeric():
         if isinstance(value, (bool, str)):
             raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
@@ -1059,18 +1061,17 @@ def category_key(field: Any, value: Any) -> tuple[str, Any]:
             raise FrameworkError(
                 INVALID_INPUT, "a category value does not fit the field type"
             ) from None
-        return ("number", number)
-    if isinstance(value, bool):
-        from qgis.PyQt.QtCore import QVariant
+        return ("number", number), value
 
-        # A boolean is only usable in a field that stores one; on a date or text
-        # field it is a category that can never match (PRD v2 6.3).
-        if field.type() == QVariant.Bool:
-            return ("value", value)
+    from qgis.PyQt.QtCore import QVariant
+
+    variant = QVariant(value)
+    if not variant.convert(field.type()):
         raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
-    if isinstance(value, str):
-        return ("value", value)
-    raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+    # The converted value -- a QDate for a date field, a bool for a boolean one -- is
+    # what the field can hold, so it is both the dedupe key and the native value.
+    converted = variant.value()
+    return ("value", converted), converted
 
 
 def raster_band(layer: Any, band: int) -> int:
@@ -1125,12 +1126,12 @@ def vector_renderer(layer: Any, config: VectorRendererConfig) -> Any:
         seen: set[tuple[str, Any]] = set()
         categories = []
         for entry in config.categories:
-            key = category_key(field, entry.value)
+            key, value = category_key(field, entry.value)
             if key in seen:
                 raise FrameworkError(INVALID_INPUT, "a category value repeats")
             seen.add(key)
             categories.append(
-                QgsRendererCategory(entry.value, simple_symbol(entry.symbol, expected), entry.label)
+                QgsRendererCategory(value, simple_symbol(entry.symbol, expected), entry.label)
             )
         return QgsCategorizedSymbolRenderer(config.field, categories)
     if isinstance(config, GraduatedRendererConfig):

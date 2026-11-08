@@ -22,6 +22,29 @@ always means "not provided": it is handed on for the native check to judge, so a
 absent or null destination ends as ``INVALID_INPUT`` from QGIS instead of a path
 verdict this module has no basis for.
 
+A database target that arrives in ordinary ``string`` parameters -- a host, a user,
+a schema, a table name -- is not judged at all, and that is an accepted boundary,
+not an oversight: the trust boundary of this plugin is the in-process, trusted
+provider, and a value that names no local file gives the path policy nothing to
+measure (PRD §8.3.4, §12).  A value that names network I/O or a virtual file system
+is different, because QGIS resolves it itself: a provided string of that kind is
+refused before the algorithm is called (PRD §8.3.2).  Which parameter types that
+refusal applies to is fixed by measurement rather than by a list of names that grows
+one type at a time: ``_MEASURED_PARAMETER_TYPES`` is every type string the 440
+algorithms registered in QGIS 3.44.13 report (53 of them), and ``_VALUE_PARAMETERS``
+is that surface minus the types that name I/O.  The strict set is exactly the
+destinations, ``file``, the seven layer-reference types (``source``, ``vector``,
+``raster``, ``mesh``, ``layer``, ``multilayer``, ``pointcloud``), the three
+provider-connection types and the five composite ones -- plus every type not among
+the measured 53, because a type this build has never seen is not known to carry a
+value.  A value type is not judged at all, so ``EPSG:32633`` in a ``crs``, a layout
+name, a theme name, a colour or a plain string reaches QGIS as it arrived: it is data
+QGIS parses, and refusing it would take away the standard spelling of more than fifty
+algorithms' ``crs`` parameters (PRD §3.2.2).  What an unknown type keeps is the remote
+refusal and nothing else -- a local path in an unknown type is still handed to QGIS
+untouched, because only ``file`` and the layer-reference types are paths this module
+has a rule for.
+
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
 """
@@ -88,6 +111,98 @@ _COMPOSITE_LAYER_PARAMETERS = frozenset(
 
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
+
+# The parameter type strings the 440 algorithms registered in 3.44.13 report, measured
+# in one probe over their definitions.  The boundary below is derived from this list
+# instead of growing one name at a time: a new QGIS type shows up here first, and
+# until it does it is an unknown type and keeps the remote refusal.
+_MEASURED_PARAMETER_TYPES = frozenset(
+    {
+        "aggregates",
+        "alignrasterlayers",
+        "area",
+        "attribute",
+        "authcfg",
+        "band",
+        "boolean",
+        "color",
+        "coordinateoperation",
+        "crs",
+        "databaseschema",
+        "databasetable",
+        "distance",
+        "duration",
+        "dxflayers",
+        "enum",
+        "execute_sql",
+        "expression",
+        "extent",
+        "field",
+        "fields_mapping",
+        "file",
+        "fileDestination",
+        "folderDestination",
+        "geometry",
+        "idw_interpolation_data",
+        "layer",
+        "layout",
+        "layoutitem",
+        "maptheme",
+        "matrix",
+        "mesh",
+        "meshdatasetgroups",
+        "meshdatasettime",
+        "multilayer",
+        "number",
+        "point",
+        "pointCloudDestination",
+        "pointcloud",
+        "providerconnection",
+        "raster",
+        "rasterDestination",
+        "raster_calc_expression",
+        "relief_colors",
+        "scale",
+        "sink",
+        "source",
+        "string",
+        "tininputlayers",
+        "vector",
+        "vectorDestination",
+        "vectorTileDestination",
+        "vectortilewriterlayers",
+    }
+)
+
+# The measured types that name I/O: a destination, one file, a layer reference, a
+# provider connection, or a value with layer references inside it.  The seven
+# destination types never reach the check -- ``isDestination()`` refuses them before
+# it -- and are listed so the two sets account for every measured type.
+_IO_PARAMETER_TYPES = (
+    frozenset(
+        {
+            "fileDestination",
+            "folderDestination",
+            "pointCloudDestination",
+            "rasterDestination",
+            "sink",
+            "vectorDestination",
+            "vectorTileDestination",
+        }
+    )
+    | _LAYER_PARAMETERS
+    | _CONNECTION_PARAMETERS
+    | _COMPOSITE_LAYER_PARAMETERS
+    | {_FILE_PARAMETER}
+)
+
+# The measured types that carry a value: QGIS parses them, it never resolves them as
+# I/O, so the remote-value refusal must not look at them.  ``crs`` and
+# ``coordinateoperation`` are the two whose authoritative spelling (``EPSG:32633``,
+# ``urn:ogc:def:crs:EPSG::32633``) matches the URI scheme shape; 3.44.13 has 60 ``crs``
+# and 2 ``coordinateoperation`` parameters, and QGIS accepts both.  A type outside the
+# measured set is not in here, so it keeps the refusal.
+_VALUE_PARAMETERS = _MEASURED_PARAMETER_TYPES - _IO_PARAMETER_TYPES
 
 
 def _json_image(value: Any) -> Any:
@@ -263,21 +378,32 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
     """The value to hand QGIS for one declared parameter.
 
     ``None`` is "not provided" for every family, so the native check decides whether
-    it is acceptable; every provided value is judged here.  Destinations, file
-    inputs, layer references and the types that hide layer references get a boundary
-    rule; anything else is passed through as it arrived, because the plugin does not
-    re-implement a second parameter schema (PRD §3.2.2).
+    it is acceptable; every provided value is judged here.  A provided string that
+    names network I/O or a virtual file system is refused unless the parameter's type
+    is one of the measured types that carries a value (``_VALUE_PARAMETERS``) -- a
+    type this build has never seen is not in that set, so it keeps the refusal --
+    because QGIS resolves such a value itself and would do it before the path policy
+    saw it; destinations, file inputs, layer references and the types that hide layer
+    references then get a boundary rule of their own, while anything else is passed
+    through as it arrived, because the plugin does not re-implement a second parameter
+    schema (PRD §3.2.2, §8.3.2, §12).
     """
 
     if value is None:
         return value
 
+    kind = definition.type()
     if definition.isDestination():
         if isinstance(value, str) and value.startswith(_MEMORY_OUTPUT):
             return value
         raise FrameworkError(PATH_NOT_ALLOWED, "only a memory output target is allowed")
+    if kind not in _VALUE_PARAMETERS and isinstance(value, str) and is_remote_uri(value):
+        # A URL, a UNC path or a ``/vsi`` path is I/O the path policy refuses outright,
+        # and QGIS would resolve it before the policy ever saw it (PRD §8.3.2).  A type
+        # that carries a value is exempt: its spelling is the algorithm's business, not
+        # a path this module could judge.
+        raise FrameworkError(PATH_NOT_ALLOWED, "a remote value is not an allowed input")
 
-    kind = definition.type()
     if kind in _CONNECTION_PARAMETERS:
         raise FrameworkError(PATH_NOT_ALLOWED, "a provider connection is not an allowed input")
     if kind in _COMPOSITE_LAYER_PARAMETERS:
@@ -459,6 +585,17 @@ class ProcessingRunAlgorithm(
     ) -> ProcessingRunAlgorithmResult:
         from qgis.core import QgsApplication, QgsProcessingContext, QgsProcessingFeedback
 
+        class ErrorCollectingFeedback(QgsProcessingFeedback):
+            """A run reports a failure through the feedback, not through ``ok`` alone."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.errors: list[str] = []
+
+            def reportError(self, message: str, fatalError: bool = False) -> None:
+                self.errors.append(message)
+                super().reportError(message, fatalError)
+
         registry = QgsApplication.processingRegistry()
         if registry.algorithmById(request.algorithm_id) is None:
             raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
@@ -491,7 +628,7 @@ class ProcessingRunAlgorithm(
         # Layer ids are resolved against the project the engine holds, never the
         # process-wide singleton (PRD §1.3, §3.2.3 step 5).
         context.setProject(ctx.project)
-        feedback = QgsProcessingFeedback()
+        feedback = ErrorCollectingFeedback()
 
         valid, message = algorithm.checkParameterValues(parameters, context)
         if not valid:
@@ -503,6 +640,15 @@ class ProcessingRunAlgorithm(
         results, completed = algorithm.run(parameters, context, feedback)
         if not completed:
             raise FrameworkError(INTERNAL_ERROR, "the algorithm did not complete")
+        if feedback.errors:
+            # The native text may quote a host or a path, so it only reaches the
+            # local log; a run that produced nothing after reporting an error is a
+            # failed run, whatever ``ok`` said (PRD §8.2, §3.2.3 step 7).
+            _LOGGER.warning("processing algorithm reported errors: %s", feedback.errors)
+            if not results:
+                raise FrameworkError(
+                    INTERNAL_ERROR, "the algorithm reported an error and returned no result"
+                )
         if not isinstance(results, dict):
             raise FrameworkError(INTERNAL_ERROR, "the algorithm returned no result mapping")
 
