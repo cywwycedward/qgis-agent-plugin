@@ -2,8 +2,9 @@
 
 ``initGui`` assembles a session -- the PRD 10.1 settings, the project generation,
 this plugin's own ``QgsTaskManager``, the adapter over it, the registry filled with
-the nine PRD 7.1 operations, and the engine -- and publishes the engine and the
-registry on ``iface``, which is where the Python Console finds them (PRD 1.3).
+the nine PRD 7.1 operations, and the engine -- puts the operation dock on the main
+window, and publishes the engine and the registry on ``iface``, which is where the
+Python Console finds them (PRD 1.3).
 
 ``unload`` is PRD 9.3 and nothing else: the engine stops accepting work and cancels
 what never started, every task this plugin started is asked to stop, and whatever is
@@ -174,6 +175,10 @@ class Plugin:
         self.engine: OperationEngine | None = None
         self.lifecycle: ProjectLifecycle | None = None
         self.supervisor: Supervisor | None = None
+        # The manual test surface; None when the interface cannot host a dock.
+        self.dock: Any = None
+        # Whoever hosts the dock: ``iface`` itself, or the window the fallback used.
+        self._dock_host: Any = None
 
     def initGui(self) -> None:
         from qgis.core import QgsProject, QgsTaskManager
@@ -209,6 +214,7 @@ class Plugin:
         # The only place the epoch is bumped: PRD 9.1 counts ``aboutToBeCleared`` once
         # and forbids a second counter such as ``cleared``.
         project.aboutToBeCleared.connect(self._project_about_to_be_cleared)
+        self._create_dock(registry, self.engine)
         self._publish()
 
     def unload(self) -> None:
@@ -217,6 +223,8 @@ class Plugin:
         # Nothing of ours connected: a repeated unload, or no load at all.
         with suppress(TypeError, RuntimeError):
             QgsProject.instance().aboutToBeCleared.disconnect(self._project_about_to_be_cleared)
+        # The dock goes first: its poll would otherwise touch an engine that is closing.
+        self._remove_dock()
         engine, supervisor = self.engine, self.supervisor
         self._withdraw()
         self.engine = self.registry = self.lifecycle = self.supervisor = None
@@ -243,6 +251,49 @@ class Plugin:
             engine.on_project_replaced()
         except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 9.1)
             _LOGGER.exception("the project replacement could not be recorded")
+
+    def _create_dock(self, registry: OperationRegistry, engine: OperationEngine) -> None:
+        """Create the operation dock and dock it on the right, once per session.
+
+        An interface that cannot host a dock -- a faked one, as the headless
+        acceptance harness has -- gets none: the session is whole without it, and Qt
+        is not imported at all in that case.
+        """
+
+        self._remove_dock()
+        host = self.iface
+        add = getattr(host, "addDockWidget", None)
+        if add is None:
+            window = getattr(host, "mainWindow", None)
+            host = window() if window is not None else None
+            if host is None:
+                return
+            add = host.addDockWidget
+        try:
+            from qgis.PyQt.QtCore import Qt
+
+            from .ui.dock import OperationDock
+        except ImportError:
+            return
+        dock = OperationDock(registry, engine)
+        add(Qt.RightDockWidgetArea, dock)
+        self.dock = dock
+        # The same host that docked it is the one that undocks it, so the
+        # ``mainWindow()`` fallback is not a half path.
+        self._dock_host = host
+
+    def _remove_dock(self) -> None:
+        """Take the dock off the host it was added to, then let Qt delete it."""
+
+        dock, self.dock = self.dock, None
+        host, self._dock_host = self._dock_host, None
+        if dock is None:
+            return
+        dock.shutdown()
+        remove = getattr(host, "removeDockWidget", None)
+        if remove is not None:
+            remove(dock)
+        dock.deleteLater()
 
     def _publish(self) -> None:
         """Put the session where the Python Console looks for it (PRD 1.3)."""

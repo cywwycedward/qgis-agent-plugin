@@ -18,10 +18,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 _GUARD = """
+import re
 import sys
+from pathlib import Path
 
 import qgis_agent_plugin
-from qgis_agent_plugin import operations, plugin
+from qgis_agent_plugin import operations, plugin, ui
 from qgis_agent_plugin.core import config, context, contracts, engine, execution_store
 from qgis_agent_plugin.core import models, registry, security
 from qgis_agent_plugin.core.runners import main_thread, qgs_task
@@ -61,6 +63,28 @@ leaked = sorted(
     if name.split(".")[0] in {"qgis", "PyQt5", "PyQt6", "PySide2", "PySide6"}
 )
 assert not leaked, leaked
+
+# ``ui/dock.py`` is the one module allowed to import Qt at module level, and the only
+# Qt it may import is ``qgis.PyQt``.  The rule is read off its source: importing it
+# would need Qt, and ``sys.modules`` cannot answer the question -- importing
+# ``qgis.PyQt`` already loads ``qgis.core`` and ``qgis.gui`` in this interpreter.
+dock_source = (Path(ui.__file__).parent / "dock.py").read_text(encoding="utf-8")
+offenders = [
+    line.strip()
+    for line in dock_source.splitlines()
+    if re.search(r"\\b(?:import|from)\\s+qgis\\b(?!\\.PyQt)", line)
+]
+assert not offenders, offenders
+
+# And it is really a widget a QMainWindow can dock, where Qt exists to ask.
+try:
+    from qgis.PyQt.QtWidgets import QDockWidget
+except ImportError:
+    pass
+else:
+    from qgis_agent_plugin.ui import dock
+
+    assert issubclass(dock.OperationDock, QDockWidget)
 """
 
 
