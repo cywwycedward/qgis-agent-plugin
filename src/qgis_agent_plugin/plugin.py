@@ -177,6 +177,8 @@ class Plugin:
         self.supervisor: Supervisor | None = None
         # The manual test surface; None when the interface cannot host a dock.
         self.dock: Any = None
+        # Whoever hosts the dock: ``iface`` itself, or the window the fallback used.
+        self._dock_host: Any = None
 
     def initGui(self) -> None:
         from qgis.core import QgsProject, QgsTaskManager
@@ -259,12 +261,14 @@ class Plugin:
         """
 
         self._remove_dock()
-        add = getattr(self.iface, "addDockWidget", None)
+        host = self.iface
+        add = getattr(host, "addDockWidget", None)
         if add is None:
-            window = getattr(self.iface, "mainWindow", None)
-            if window is None:
+            window = getattr(host, "mainWindow", None)
+            host = window() if window is not None else None
+            if host is None:
                 return
-            add = window().addDockWidget
+            add = host.addDockWidget
         try:
             from qgis.PyQt.QtCore import Qt
 
@@ -274,15 +278,19 @@ class Plugin:
         dock = OperationDock(registry, engine)
         add(Qt.RightDockWidgetArea, dock)
         self.dock = dock
+        # The same host that docked it is the one that undocks it, so the
+        # ``mainWindow()`` fallback is not a half path.
+        self._dock_host = host
 
     def _remove_dock(self) -> None:
-        """Take the dock off the main window and hand it to Qt for deletion."""
+        """Take the dock off the host it was added to, then let Qt delete it."""
 
         dock, self.dock = self.dock, None
+        host, self._dock_host = self._dock_host, None
         if dock is None:
             return
         dock.shutdown()
-        remove = getattr(self.iface, "removeDockWidget", None)
+        remove = getattr(host, "removeDockWidget", None)
         if remove is not None:
             remove(dock)
         dock.deleteLater()

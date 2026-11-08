@@ -18,7 +18,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 _GUARD = """
+import re
 import sys
+from pathlib import Path
 
 import qgis_agent_plugin
 from qgis_agent_plugin import operations, plugin, ui
@@ -62,25 +64,27 @@ leaked = sorted(
 )
 assert not leaked, leaked
 
-# The dock is the one module allowed to import Qt at module level, so it is asked
-# for last, and only where Qt exists: it may reach ``qgis.PyQt``, never the QGIS
-# API.  The Qt surface is imported first, so anything the dock pulls in after it is
-# a QGIS module it had no business importing.
+# ``ui/dock.py`` is the one module allowed to import Qt at module level, and the only
+# Qt it may import is ``qgis.PyQt``.  The rule is read off its source: importing it
+# would need Qt, and ``sys.modules`` cannot answer the question -- importing
+# ``qgis.PyQt`` already loads ``qgis.core`` and ``qgis.gui`` in this interpreter.
+dock_source = (Path(ui.__file__).parent / "dock.py").read_text(encoding="utf-8")
+offenders = [
+    line.strip()
+    for line in dock_source.splitlines()
+    if re.search(r"\\b(?:import|from)\\s+qgis\\b(?!\\.PyQt)", line)
+]
+assert not offenders, offenders
+
+# And it is really a widget a QMainWindow can dock, where Qt exists to ask.
 try:
-    import qgis.PyQt.QtWidgets  # noqa: F401 - the Qt surface the dock may use
+    from qgis.PyQt.QtWidgets import QDockWidget
 except ImportError:
     pass
 else:
-    qt_loaded = set(sys.modules)
     from qgis_agent_plugin.ui import dock
 
-    assert callable(dock.OperationDock)
-    reached = sorted(
-        name
-        for name in sys.modules
-        if (name == "qgis" or name.startswith("qgis.")) and name not in qt_loaded
-    )
-    assert not reached, reached
+    assert issubclass(dock.OperationDock, QDockWidget)
 """
 
 

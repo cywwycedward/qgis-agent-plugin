@@ -12,7 +12,7 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 | `src/qgis_agent_plugin/operations/` | 操作：一个文件一个能力族，装着它的 `Params`、`Result` 和 Operation 类，外加自己的清单元组；`__init__.py` 只做汇总（`register_all`） |
 | `src/qgis_agent_plugin/__init__.py` | 入口：QGIS 按名字在包上找的 `classFactory`（它只在被调用时才 import `plugin`） |
 | `src/qgis_agent_plugin/plugin.py` | 会话：`initGui`/`unload`（PRD 9.3 六步）、`Supervisor`（卸载后仍活着的任务的托管），以及坞窗的建/挂/卸 |
-| `src/qgis_agent_plugin/ui/dock.py` | 手工测试坞窗：列出 `OperationSpec`、按 `input_schema` 生成表单、`run_sync` 或 `submit`+轮询、把 `ExecutionRecord` 显示成 JSON（用户新增的测试工具，不在 PRD 里） |
+| `src/qgis_agent_plugin/ui/dock.py` | 手工测试坞窗：列出 `OperationSpec`、按 `input_schema` 生成表单、`run_sync` 或 `submit`+轮询、把 `ExecutionRecord` 显示成 JSON（用户新增的测试工具，不在 PRD 里）。`OperationDock` 是 `QDockWidget` 子类——`iface.addDockWidget`/`QMainWindow.addDockWidget` 只接受这个类型 |
 | `src/qgis_agent_plugin/metadata.txt` | 插件元数据（QGIS 插件管理器读的那个） |
 
 放置规则：
@@ -26,7 +26,7 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 
 - `core/*`、`operations/*`、`plugin.py` 必须能在裸解释器导入：QGIS **只能在函数体内 import，没有例外**（`plugin.initGui`/`unload`/`application_supervisor`/`read_settings`、`qgs_task.task_class`、`main_thread._post_to_event_queue`、各操作需要它的那一步）。
 - Qt 同样默认在函数体内 import；**模块级** Qt import 的许可只给 `plugin.py`、`core/runners/*` 与 `ui/dock.py`。目前只有 `ui/dock.py` 真的用了它（坞窗要继承 `QWidget`，在函数体内建一个类只是绕路）；`plugin.py` 与 runners 仍写在函数体内。`core/` 其余文件与 `operations/*` 只能在函数体内 import——守卫强制的是「模块级 import 会让裸解释器崩」，不是「文件里不许出现 QGIS/Qt 的 import」。
-- `ui/dock.py` 可以模块级 import Qt，**不得**模块级 import qgis：它只认识注册表、引擎和 Qt，前两者与 QGIS 无关。`ui/__init__.py` 保持空壳（只有 docstring），所以裸解释器永远不会顺着包入口碰到 Qt。`tests/test_package.py` 因此在「无 QGIS 模块泄漏」检查通过之后才尝试 import `ui.dock`（这个 import 允许因 Qt 失败），并在成功时断言它拉进来的 `qgis.*` 只有 `qgis.PyQt`。
+- `ui/dock.py` 可以模块级 import Qt，**不得**模块级 import qgis：它只认识注册表、引擎和 Qt，前两者与 QGIS 无关。`ui/__init__.py` 保持空壳（只有 docstring），所以裸解释器永远不会顺着包入口碰到 Qt。`tests/test_package.py` 因此**读 `ui/dock.py` 的源码**守这条规则（任何 `import qgis` / `from qgis.xxx` 都算违规，`from qgis.PyQt...` 除外）：import 之后查 `sys.modules` 不行——QGIS 解释器里 import `qgis.PyQt` 这个动作本身就把 `qgis.core`/`qgis.gui` 带进来了，那样的断言永远不会失败（F10 评审 r1）。Qt 存在时它还额外断言 `OperationDock` 是 `QDockWidget` 的子类。
 - 结果与错误只出 Pydantic DTO / 基本类型；绝不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举或 traceback。
 - 守卫同时断言九个 Operation 能在裸解释器里注册成功（PRD 7.1）。
 

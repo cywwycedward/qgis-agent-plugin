@@ -27,13 +27,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("qgis.PyQt.QtWidgets", reason="the operation dock needs Qt")
 
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDockWidget,
     QDoubleSpinBox,
+    QFormLayout,
     QLineEdit,
+    QMainWindow,
     QSpinBox,
 )
 
@@ -244,7 +248,23 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
 
     for row, spec in enumerate(registry.list_specs()):
         dock.operations.setCurrentRow(row)
-        assert set(dock.editors) == set(spec.input_schema["properties"])
+        properties = spec.input_schema["properties"]
+        assert set(dock.editors) == set(properties)
+        # An operation without parameters still gets its one "takes no arguments" row.
+        assert dock.form.rowCount() == max(len(properties), 1)
+
+
+def test_the_dock_is_something_a_real_main_window_accepts(qapp: Any) -> None:
+    """The r1 finding: a plain ``QWidget`` is refused by ``addDockWidget``."""
+
+    window = QMainWindow()
+    dock = _dock(FakeEngine())
+
+    window.addDockWidget(Qt.RightDockWidgetArea, dock)  # the real sip type check
+    assert window.dockWidgetArea(dock) == Qt.RightDockWidgetArea
+
+    window.removeDockWidget(dock)
+    assert window.dockWidgetArea(dock) == Qt.NoDockWidgetArea
 
 
 # --- the form ----------------------------------------------------------------
@@ -304,6 +324,39 @@ def test_a_field_that_is_not_json_stops_before_the_engine(qapp: Any) -> None:
     assert "items" in dock.error.text()
 
 
+def _fields(form: QFormLayout) -> list[Any]:
+    """The editor widgets the form shows right now, in row order."""
+
+    return [form.itemAt(row, QFormLayout.FieldRole).widget() for row in range(form.rowCount())]
+
+
+def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
+    """A switch replaces the rows: no editor of the old operation may stay behind."""
+
+    two = {
+        "type": "object",
+        "properties": {
+            "alpha": {"title": "Alpha", "type": "string"},
+            "beta": {"title": "Beta", "type": "string"},
+        },
+    }
+    one = {"type": "object", "properties": {"gamma": {"title": "Gamma", "type": "string"}}}
+    registry = FakeRegistry(_spec("first.op", schema=two), _spec("second.op", schema=one))
+
+    dock = OperationDock(registry, FakeEngine())
+
+    assert _fields(dock.form) == [dock.editors["alpha"][1], dock.editors["beta"][1]]
+
+    dock.operations.setCurrentRow(1)
+
+    assert set(dock.editors) == {"gamma"}
+    assert _fields(dock.form) == [dock.editors["gamma"][1]]
+
+    dock.operations.setCurrentRow(0)
+
+    assert _fields(dock.form) == [dock.editors["alpha"][1], dock.editors["beta"][1]]
+
+
 # --- running -----------------------------------------------------------------
 
 
@@ -340,6 +393,26 @@ def test_a_background_operation_is_submitted_and_polled_until_it_ends(qapp: Any)
     assert _wait_until(lambda: not dock.timer.isActive())
     assert [call[0] for call in engine.calls] == ["submit", "get", "get"]
     assert json.loads(dock.result.toPlainText())["status"] == "SUCCEEDED"
+    assert not dock.cancel_button.isEnabled()
+
+
+def test_a_live_background_call_owns_the_run_button(qapp: Any) -> None:
+    """While one call polls, a second run would steal its record and its cancel button."""
+
+    engine = FakeEngine(
+        submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
+        get=_record(ExecutionStatus.SUCCEEDED, ExecutionStrategy.BACKGROUND),
+    )
+    dock = _dock(engine, _spec(strategy=ExecutionStrategy.BACKGROUND))
+
+    dock.run()
+
+    assert not dock.run_button.isEnabled()
+    assert dock.cancel_button.isEnabled()
+
+    assert _wait_until(lambda: not dock.timer.isActive())
+
+    assert dock.run_button.isEnabled()
     assert not dock.cancel_button.isEnabled()
 
 
@@ -458,16 +531,44 @@ class _FakeTask:
 
 
 class FakeIface:
-    """The two interface calls the dock lifecycle makes, and what is docked."""
+    """The interface calls the dock lifecycle makes, backed by a real main window.
 
-    def __init__(self) -> None:
-        self.docks: list[OperationDock] = []
+    ``addDockWidget`` is the window's own, so a dock of the wrong Qt type is refused
+    here exactly as ``QgisInterface`` refuses it.  A fake that accepted any object is
+    what let a plain ``QWidget`` pass review r1.
+    """
 
-    def addDockWidget(self, area: Any, dock: OperationDock) -> None:
-        self.docks.append(dock)
+    def __init__(self, window: QMainWindow) -> None:
+        self.window = window
 
-    def removeDockWidget(self, dock: OperationDock) -> None:
-        self.docks.remove(dock)
+    def addDockWidget(self, area: Any, dock: Any) -> None:
+        self.window.addDockWidget(area, dock)
+
+    def removeDockWidget(self, dock: Any) -> None:
+        self.window.removeDockWidget(dock)
+
+    def mainWindow(self) -> QMainWindow:
+        return self.window
+
+    @property
+    def docks(self) -> list[Any]:
+        """What is docked right now: a removed dock keeps its parent but leaves the layout."""
+
+        return [
+            dock
+            for dock in self.window.findChildren(QDockWidget)
+            if self.window.dockWidgetArea(dock) != Qt.NoDockWidgetArea
+        ]
+
+
+class WindowOnlyIface:
+    """An interface that can dock only through ``mainWindow()``: the F10 fallback."""
+
+    def __init__(self, window: QMainWindow) -> None:
+        self.window = window
+
+    def mainWindow(self) -> QMainWindow:
+        return self.window
 
 
 @pytest.fixture
@@ -506,13 +607,14 @@ def fake_qgis(qapp: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 def test_a_second_load_leaves_one_dock_and_unload_stops_its_timer(
     fake_qgis: Any, qapp: Any
 ) -> None:
-    iface = FakeIface()
+    iface = FakeIface(QMainWindow())
     instance = plugin.Plugin(iface)
 
     instance.initGui()
     first = instance.dock
     assert isinstance(first, OperationDock)
     assert iface.docks == [first]
+    assert iface.window.dockWidgetArea(first) == Qt.RightDockWidgetArea
 
     instance.initGui()
     second = instance.dock
@@ -530,7 +632,7 @@ def test_a_second_load_leaves_one_dock_and_unload_stops_its_timer(
 
 
 def test_two_loads_and_unloads_leave_nothing_docked(fake_qgis: Any, qapp: Any) -> None:
-    iface = FakeIface()
+    iface = FakeIface(QMainWindow())
 
     for _ in range(2):
         instance = plugin.Plugin(iface)
@@ -549,3 +651,24 @@ def test_two_loads_and_unloads_leave_nothing_docked(fake_qgis: Any, qapp: Any) -
     # ``unload`` twice is what QGIS does when a plugin is disabled while unloaded.
     plugin.Plugin(iface).unload()
     assert iface.docks == []
+
+
+def test_the_main_window_fallback_docks_and_undocks_through_that_window(
+    fake_qgis: Any, qapp: Any
+) -> None:
+    """r1 finding 5: the ``mainWindow()`` fallback has to be symmetric."""
+
+    window = QMainWindow()
+    iface = WindowOnlyIface(window)
+    assert not hasattr(iface, "addDockWidget")
+    instance = plugin.Plugin(iface)
+
+    instance.initGui()
+    dock = instance.dock
+    assert isinstance(dock, OperationDock)
+    assert window.dockWidgetArea(dock) == Qt.RightDockWidgetArea
+
+    instance.unload()
+
+    assert instance.dock is None
+    assert window.dockWidgetArea(dock) == Qt.NoDockWidgetArea

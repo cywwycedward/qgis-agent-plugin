@@ -100,7 +100,7 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 | --- | --- |
 | 操作列表 | 全部已注册 Operation，按 name 升序，标签是 `name  [kind · strategy]`（例：`layer.add  [command · main_thread]`）。一个都没有时显示“没有注册的操作” |
 | 参数表单 | 由该 Operation 的 `input_schema` 生成，一字段一行；`*` 是必填。`bool` 勾选框、`integer`/`number` 数字框、`enum` 下拉，其余单行文本；`schema` 里的 `default` 已填好 |
-| 运行 | `main_thread` 直接 `engine.run_sync`（同步，运行期间按钮禁用）；`background` 走 `engine.submit`，然后每 200 ms 轮询 `engine.get`，状态行显示 status 与进度 |
+| 运行 | `main_thread` 直接 `engine.run_sync`（同步，运行期间按钮禁用）；`background` 走 `engine.submit`，然后每 200 ms 轮询 `engine.get`，状态行显示 status 与进度。“运行”在该后台调用到终态前一直禁用，所以一次只跟一个调用 |
 | 取消 | 只有后台调用运行中可点：调 `engine.cancel(id)`，回执（`accepted`/`status`/`reason`）显示在状态行；终态后自动禁用 |
 | 结果 | 只读文本框是 `ExecutionRecord` 的 JSON（`model_dump(mode="json")`，`ensure_ascii=False, indent=2`）。失败时 `error.code`/`error.message` 显示在表单下方 |
 
@@ -112,9 +112,10 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 - **默认配置下第一条错误就是 `PATH_NOT_ALLOWED`**。两个允许目录为空时，`layer.add`、
   `project.open`、`project.save` 都会被拒（见 §4），这不是坞窗的问题。
 
-`iface` 没有 `addDockWidget` 的宿主（例如只 fake 了接口的测试）不建坞窗，会话其余部分照常；
-禁用插件时坞窗随 `unload` 一起撤掉（停轮询定时器、`removeDockWidget`、`deleteLater`），重复
-启用/禁用不会留两个坞窗或两个定时器。
+`iface` 没有 `addDockWidget` 的宿主（例如只 fake 了接口的测试）会改用 `iface.mainWindow().addDockWidget(...)`；
+连主窗口也没有就不建坞窗，会话其余部分照常；两处用的是同一个宿主对象，所以撤销也是对称的。
+坞窗是 `QDockWidget`（`addDockWidget` 只收这个类型）。禁用插件时坞窗随 `unload` 一起撤掉（停轮询定时器、
+`removeDockWidget`、`deleteLater`），重复启用/禁用不会留两个坞窗或两个定时器。
 
 实测：坞窗的表单生成、两条执行路径、轮询与取消、生命周期由 `tests/test_ui_dock.py` 在
 `QT_QPA_PLATFORM=offscreen` 下覆盖（不需要 QGIS）；**真 QGIS 里的外观与交互未实测**，需要人工

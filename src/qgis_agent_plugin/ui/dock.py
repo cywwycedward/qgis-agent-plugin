@@ -21,6 +21,7 @@ from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDockWidget,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
@@ -56,8 +57,13 @@ _KINDS = {
 }
 
 
-class OperationDock(QWidget):
-    """One list of operations, one form per selection, one record on screen."""
+class OperationDock(QDockWidget):
+    """One list of operations, one form per selection, one record on screen.
+
+    A ``QDockWidget`` because that is what ``QMainWindow.addDockWidget`` and
+    ``QgisInterface.addDockWidget`` take; everything the dock shows lives inside the
+    one widget it carries.
+    """
 
     def __init__(self, registry: Any, engine: Any) -> None:
         super().__init__()
@@ -80,7 +86,8 @@ class OperationDock(QWidget):
     # -- the surface ---------------------------------------------------------
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
+        body = QWidget()
+        layout = QVBoxLayout(body)
         layout.addWidget(QLabel("操作"))
         self.operations = QListWidget()
         self.operations.currentItemChanged.connect(self._selection_changed)
@@ -109,6 +116,7 @@ class OperationDock(QWidget):
         self.result = QPlainTextEdit()
         self.result.setReadOnly(True)
         layout.addWidget(self.result, 1)
+        self.setWidget(body)
         self._refresh_buttons()
 
     def _fill_operations(self) -> None:
@@ -132,11 +140,10 @@ class OperationDock(QWidget):
     def _build_form(self, spec: OperationSpec | None) -> None:
         """Replace the editors with the selected operation's, one row per property."""
 
-        while self.form.count():
-            taken = self.form.takeAt(0)
-            widget = taken.widget()
-            if widget is not None:
-                widget.deleteLater()
+        # removeRow deletes the row's widgets too, so a switch cannot leave either a
+        # stale editor or an empty row behind.
+        while self.form.rowCount():
+            self.form.removeRow(0)
         self.editors = {}
         # A field error belongs to the operation that produced it, not to this one.
         self.error.setText("")
@@ -291,7 +298,9 @@ class OperationDock(QWidget):
         self._refresh_buttons()
 
     def _refresh_buttons(self) -> None:
-        self.run_button.setEnabled(not self._busy)
+        # One live background call at a time: while it runs, the cancel button is the
+        # only way forward, so a second run cannot silently take over its record.
+        self.run_button.setEnabled(not self._busy and self._execution_id is None)
         self.cancel_button.setEnabled(not self._busy and self._execution_id is not None)
 
 
