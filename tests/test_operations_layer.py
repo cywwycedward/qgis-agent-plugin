@@ -330,7 +330,6 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
         QgsRasterRendererRegistry=fake.QgsRasterRendererRegistry,
         Qgis=fake.Qgis,
     )
-    pyqt = fake_module("qgis.PyQt")
     qtxml = fake_module("qgis.PyQt.QtXml", QDomDocument=FakeDocument)
     pyqt = fake_module("qgis.PyQt", QtXml=qtxml)
     qgis_module = fake_module("qgis", core=core, PyQt=pyqt)
@@ -963,6 +962,20 @@ def test_get_qml_only_ors_the_requested_categories(fake_qgis: FakeQgis, data_roo
         ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology", "Labeling"]),
     )
     assert layer.style_exports[0][1] == category_flag(fake_qgis, ("Symbology", "Labeling"))
+
+
+def test_get_qml_exports_a_single_category(fake_qgis: FakeQgis, data_root: Path) -> None:
+    """One category takes a different flag path than several (PRD v2 §10.2 S04)."""
+
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+
+    result = ops.LayerGetQml().execute_main(
+        make_context(project, data_root),
+        ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology"]),
+    )
+    assert result.qml == layer.style_xml
+    assert layer.style_exports[0][1] == category_flag(fake_qgis, ("Symbology",))
 
 
 @pytest.mark.parametrize("categories", [[], ["Symbology", "Symbology"]])
