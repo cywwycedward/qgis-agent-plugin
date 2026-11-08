@@ -2806,10 +2806,19 @@ def p11_cannot_execute(ctx: Context) -> str:
         f"{target}.processAlgorithm" not in PROBE_CALLS,
         f"the algorithm ran although canExecute() answered false: {PROBE_CALLS}",
     )
+    # The numbers in the evidence are this run's own: a machine where a shipped algorithm
+    # refuses canExecute() must say so instead of repeating a fixed sentence (review r2 B1).
+    accepted = len(shipped) - len(refusing)
+    refusals = (
+        f"{len(refusing)} of them refuse ({', '.join(refusing[:3])})"
+        if refusing
+        else "none of them refuses"
+    )
     return (
-        f"the {len(shipped)} algorithms QGIS ships all answer canExecute() true (measured, so "
-        f"none can reach the refusal branch), while {target} — registered by this run through "
-        f"QgsProcessingRegistry.addProvider — is FAILED(INVALID_INPUT) with no result: the plugin "
+        f"{accepted} of the {len(shipped)} algorithms QGIS ships answer canExecute() true and "
+        f"{refusals} — measured in this run, so a shipped algorithm that refuses would be "
+        f"reported rather than papered over — while {target}, registered by this run through "
+        f"QgsProcessingRegistry.addProvider, is FAILED(INVALID_INPUT) with no result: the plugin "
         f"asked canExecute() and never called the algorithm"
     )
 
