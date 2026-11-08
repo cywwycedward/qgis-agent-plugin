@@ -961,6 +961,11 @@ def test_a_crs_value_reaches_the_algorithm_as_it_arrived(
         ("extent", "1,2,3,4 [EPSG:32633]"),
         ("number", 3),
         ("boolean", True),
+        ("layout", "A3:plan"),
+        ("maptheme", "A3:plan"),
+        ("attribute", "dim:name"),
+        ("color", "#ff0000"),
+        ("coordinateoperation", "EPSG:1188"),
     ],
     ids=[
         "string-authid",
@@ -972,18 +977,125 @@ def test_a_crs_value_reaches_the_algorithm_as_it_arrived(
         "extent",
         "number",
         "boolean",
+        "layout",
+        "maptheme",
+        "attribute",
+        "color",
+        "coordinateoperation",
     ],
 )
 def test_a_value_parameter_keeps_its_value(
     fake_qgis: FakeQgis, data_root: Path, type_: str, value: Any
 ) -> None:
-    """The remote refusal guards sources; a value type is data QGIS never resolves."""
+    """The plugin judges a value type not at all; parsing the value is QGIS's job."""
     install(fake_qgis, FakeDefinition("VALUE", type_), results={})
 
     ops.ProcessingRunAlgorithm().execute_main(
         make_context(FakeProject(), data_root), run_params({"VALUE": value})
     )
     assert fake_qgis.registry.instances[0].calls[2][1] == {"VALUE": value}
+
+
+# The 53 parameter type strings the 440 registered algorithms report on 3.44.13,
+# copied by hand: this is the independent statement the module's own lists must add up
+# to, so dropping a name from either side fails here instead of silently widening the
+# boundary.
+MEASURED_PARAMETER_TYPES = frozenset(
+    {
+        "aggregates",
+        "alignrasterlayers",
+        "area",
+        "attribute",
+        "authcfg",
+        "band",
+        "boolean",
+        "color",
+        "coordinateoperation",
+        "crs",
+        "databaseschema",
+        "databasetable",
+        "distance",
+        "duration",
+        "dxflayers",
+        "enum",
+        "execute_sql",
+        "expression",
+        "extent",
+        "field",
+        "fields_mapping",
+        "file",
+        "fileDestination",
+        "folderDestination",
+        "geometry",
+        "idw_interpolation_data",
+        "layer",
+        "layout",
+        "layoutitem",
+        "maptheme",
+        "matrix",
+        "mesh",
+        "meshdatasetgroups",
+        "meshdatasettime",
+        "multilayer",
+        "number",
+        "point",
+        "pointCloudDestination",
+        "pointcloud",
+        "providerconnection",
+        "raster",
+        "rasterDestination",
+        "raster_calc_expression",
+        "relief_colors",
+        "scale",
+        "sink",
+        "source",
+        "string",
+        "tininputlayers",
+        "vector",
+        "vectorDestination",
+        "vectorTileDestination",
+        "vectortilewriterlayers",
+    }
+)
+
+# The types that name I/O: a destination, one file, a layer reference, a provider
+# connection, or a value with layer references inside it.
+IO_PARAMETER_TYPES = frozenset(
+    {
+        "alignrasterlayers",
+        "databaseschema",
+        "databasetable",
+        "dxflayers",
+        "file",
+        "fileDestination",
+        "folderDestination",
+        "idw_interpolation_data",
+        "layer",
+        "mesh",
+        "multilayer",
+        "pointCloudDestination",
+        "pointcloud",
+        "providerconnection",
+        "raster",
+        "rasterDestination",
+        "sink",
+        "source",
+        "tininputlayers",
+        "vector",
+        "vectorDestination",
+        "vectorTileDestination",
+        "vectortilewriterlayers",
+    }
+)
+
+
+def test_the_value_and_io_lists_account_for_every_measured_parameter_type() -> None:
+    """Every one of the 53 measured types is either a value or an I/O type."""
+    assert ops._MEASURED_PARAMETER_TYPES == MEASURED_PARAMETER_TYPES
+    assert ops._IO_PARAMETER_TYPES == IO_PARAMETER_TYPES
+    assert ops._VALUE_PARAMETERS | ops._IO_PARAMETER_TYPES == MEASURED_PARAMETER_TYPES
+    assert ops._VALUE_PARAMETERS.isdisjoint(ops._IO_PARAMETER_TYPES)
+    assert len(MEASURED_PARAMETER_TYPES) == 53
 
 
 def test_a_layer_parameter_must_name_a_project_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
