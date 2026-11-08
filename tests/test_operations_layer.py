@@ -135,7 +135,14 @@ class FakeQVariant:
                 self.converted = bool(value)
                 return True
         elif target_type == FakeQVariant.String:
-            self.converted = value if isinstance(value, str) else str(value)
+            # Measured on 3.44.13: a bool becomes ``'true'``/``'false'`` (lower case) and a
+            # whole float loses its ``.0``.
+            if isinstance(value, bool):
+                self.converted = "true" if value else "false"
+            elif isinstance(value, float) and value.is_integer():
+                self.converted = str(int(value))
+            else:
+                self.converted = value if isinstance(value, str) else str(value)
             return True
         self.converted = None
         return False

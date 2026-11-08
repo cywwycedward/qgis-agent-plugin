@@ -28,7 +28,14 @@ not an oversight: the trust boundary of this plugin is the in-process, trusted
 provider, and a value that names no local file gives the path policy nothing to
 measure (PRD §8.3.4, §12).  A value that names network I/O or a virtual file system
 is different, because QGIS resolves it itself: every provided string of that kind is
-refused whatever its parameter type is, before the algorithm is called (PRD §8.3.2).
+refused when its parameter type can name a source, before the algorithm is called
+(PRD §8.3.2).  A type whose value is data rather than a source -- a CRS code, an
+expression, a plain string, a number -- is not judged: ``EPSG:32633`` has the shape
+of a URI scheme, and refusing it would take away the standard spelling of more than
+fifty algorithms' ``crs`` parameters (PRD §3.2.2).  A type this build does not know
+is not exempt: it keeps the remote-value refusal, and nothing else -- a local path in
+an unknown type is still handed to QGIS untouched, because only ``file`` and the
+layer-reference types are paths this module has a rule for.
 
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
@@ -96,6 +103,37 @@ _COMPOSITE_LAYER_PARAMETERS = frozenset(
 
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
+
+# Types whose value is data, not a source: QGIS parses them, it never resolves them
+# as I/O, so the remote-value refusal must not look at them.  ``crs`` and
+# ``coordinateoperation`` are the two whose authoritative spelling (``EPSG:32633``,
+# ``urn:ogc:def:crs:EPSG::32633``) matches the URI scheme shape; measured on 3.44.13
+# this is 60 ``crs`` and 2 ``coordinateoperation`` parameters, and QGIS accepts both.
+# Every other type -- including one not named here -- keeps the refusal.
+_VALUE_PARAMETERS = frozenset(
+    {
+        "aggregates",
+        "area",
+        "band",
+        "boolean",
+        "coordinateoperation",
+        "crs",
+        "distance",
+        "enum",
+        "expression",
+        "extent",
+        "field",
+        "fields_mapping",
+        "integer",
+        "matrix",
+        "meshdatasetgroups",
+        "number",
+        "point",
+        "range",
+        "relief_colors",
+        "string",
+    }
+)
 
 
 def _json_image(value: Any) -> Any:
@@ -272,28 +310,30 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
 
     ``None`` is "not provided" for every family, so the native check decides whether
     it is acceptable; every provided value is judged here.  A provided string that
-    names network I/O or a virtual file system is refused whatever the parameter's
-    type is, because QGIS resolves such a value itself; destinations, file inputs,
-    layer references and the types that hide layer references then get a boundary
-    rule of their own, while anything else is passed through as it arrived, because
-    the plugin does not re-implement a second parameter schema (PRD §3.2.2, §8.3.2,
-    §12).
+    names network I/O or a virtual file system is refused unless the parameter's type
+    is one that carries a value (``_VALUE_PARAMETERS``), because QGIS resolves such a
+    value itself and would do it before the path policy saw it; destinations, file
+    inputs, layer references and the types that hide layer references then get a
+    boundary rule of their own, while anything else is passed through as it arrived,
+    because the plugin does not re-implement a second parameter schema (PRD §3.2.2,
+    §8.3.2, §12).
     """
 
     if value is None:
         return value
 
+    kind = definition.type()
     if definition.isDestination():
         if isinstance(value, str) and value.startswith(_MEMORY_OUTPUT):
             return value
         raise FrameworkError(PATH_NOT_ALLOWED, "only a memory output target is allowed")
-    if isinstance(value, str) and is_remote_uri(value):
-        # No type is exempt: a URL, a UNC path or a ``/vsi`` path is network I/O the
-        # path policy only allows after its roots said yes, and QGIS would resolve it
-        # before the policy ever saw it (PRD §8.3.2).
+    if kind not in _VALUE_PARAMETERS and isinstance(value, str) and is_remote_uri(value):
+        # A URL, a UNC path or a ``/vsi`` path is network I/O the path policy only
+        # allows after its roots said yes, and QGIS would resolve it before the policy
+        # ever saw it (PRD §8.3.2).  A type that carries a value is exempt: its spelling
+        # is the algorithm's business, not a path this module could judge.
         raise FrameworkError(PATH_NOT_ALLOWED, "a remote value is not an allowed input")
 
-    kind = definition.type()
     if kind in _CONNECTION_PARAMETERS:
         raise FrameworkError(PATH_NOT_ALLOWED, "a provider connection is not an allowed input")
     if kind in _COMPOSITE_LAYER_PARAMETERS:

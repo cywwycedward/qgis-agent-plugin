@@ -914,27 +914,76 @@ def test_a_remote_file_input_is_refused(fake_qgis: FakeQgis, data_root: Path, va
     assert code == PATH_NOT_ALLOWED
 
 
-@pytest.mark.parametrize(
-    ("type_", "value"),
-    [
-        ("customprobe", "/vsicurl/http://example.invalid/secret.csv"),
-        ("string", "https://example.invalid/data.csv"),
-        ("enum", "\\\\server\\share\\data.csv"),
-    ],
-    ids=["unknown-type", "string", "enum"],
-)
-def test_a_remote_value_is_refused_whatever_the_parameter_type(
-    fake_qgis: FakeQgis, data_root: Path, type_: str, value: str
+def test_a_remote_value_is_refused_on_a_type_this_build_does_not_know(
+    fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """No type is exempt: a remote value is refused before QGIS ever sees it."""
-    install(fake_qgis, FakeDefinition("SRC", type_), results={})
+    """A type the plugin cannot classify keeps the strict refusal (PRD §3.2.2)."""
+    install(fake_qgis, FakeDefinition("SRC", "customprobe"), results={})
     code = refuse(
         ops.ProcessingRunAlgorithm(),
         make_context(FakeProject(), data_root),
-        run_params({"SRC": value}),
+        run_params({"SRC": "/vsicurl/http://example.invalid/secret.csv"}),
     )
     assert code == PATH_NOT_ALLOWED
     assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["EPSG:32633", "urn:ogc:def:crs:EPSG::32633", "32633", "+proj=utm +zone=33 +datum=WGS84"],
+    ids=["authid", "urn", "code", "proj"],
+)
+def test_a_crs_value_reaches_the_algorithm_as_it_arrived(
+    fake_qgis: FakeQgis, data_root: Path, value: str
+) -> None:
+    """A crs is an identifier QGIS reads itself, not a URI (review r1 B1).
+
+    ``EPSG:32633`` has the shape of a URI scheme, which is why the blanket remote
+    refusal used to reject ``native:reprojectlayer``'s standard spelling.
+    """
+    install(fake_qgis, FakeDefinition("TARGET_CRS", "crs"), results={})
+
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"TARGET_CRS": value})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"TARGET_CRS": value}
+
+
+@pytest.mark.parametrize(
+    ("type_", "value"),
+    [
+        ("string", "EPSG:32633"),
+        ("string", "table:alpha"),
+        ("string", "https://example.invalid/data.csv"),
+        ("enum", "\\\\server\\share\\data.csv"),
+        ("field", "roads:name"),
+        ("expression", '"pop" / 2'),
+        ("extent", "1,2,3,4 [EPSG:32633]"),
+        ("number", 3),
+        ("boolean", True),
+    ],
+    ids=[
+        "string-authid",
+        "string-table",
+        "string-url",
+        "enum-unc",
+        "field",
+        "expression",
+        "extent",
+        "number",
+        "boolean",
+    ],
+)
+def test_a_value_parameter_keeps_its_value(
+    fake_qgis: FakeQgis, data_root: Path, type_: str, value: Any
+) -> None:
+    """The remote refusal guards sources; a value type is data QGIS never resolves."""
+    install(fake_qgis, FakeDefinition("VALUE", type_), results={})
+
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"VALUE": value})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"VALUE": value}
 
 
 def test_a_layer_parameter_must_name_a_project_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
