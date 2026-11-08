@@ -29,9 +29,9 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 - Qt 同样默认在函数体内 import；**模块级** Qt import 的许可只给 `plugin.py`、`core/runners/*` 与 `ui/dock.py`。目前只有 `ui/dock.py` 真的用了它（坞窗要继承 `QDockWidget`，在函数体内建一个类只是绕路）；`plugin.py` 与 runners 仍写在函数体内。`core/` 其余文件与 `operations/*` 只能在函数体内 import——守卫强制的是「模块级 import 会让裸解释器崩」，不是「文件里不许出现 QGIS/Qt 的 import」。
 - `ui/dock.py` 可以模块级 import Qt，**不得**模块级 import qgis：它只认识注册表、引擎和 Qt，前两者与 QGIS 无关。`ui/__init__.py` 保持空壳（只有 docstring），所以裸解释器永远不会顺着包入口碰到 Qt。`tests/test_package.py` 因此**读 `ui/dock.py` 的源码**守这条规则（任何 `import qgis` / `from qgis.xxx` 都算违规，`from qgis.PyQt...` 除外）：import 之后查 `sys.modules` 不行——QGIS 解释器里 import `qgis.PyQt` 这个动作本身就把 `qgis.core`/`qgis.gui` 带进来了，那样的断言永远不会失败（F10 评审 r1）。Qt 存在时它还额外断言 `OperationDock` 是 `QDockWidget` 的子类。
 - 结果与错误只出 Pydantic DTO / 基本类型；绝不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举或 traceback。
-- 守卫同时断言九个 Operation 能在裸解释器里注册成功（PRD 7.1）。
+- 守卫同时断言十七个 Operation 能在裸解释器里注册成功（PRD v2 §2）。
 
-`tests/` 镜像机制层：`test_{contracts,models,registry,security}`（契约）、`test_{context,engine,execution_store}`（管线与状态机）、`test_{operations_project,operations_layer}`（操作）、`test_{qgs_task,background}`（后台适配）、`test_plugin_lifecycle`（加载/卸载、工程换代、Supervisor）、`test_ui_dock`（坞窗表单、运行、生命周期；Qt offscreen，裸解释器里整模块 skip）、`test_package`（导入层）。
+`tests/` 镜像机制层：`test_{contracts,models,registry,security}`（契约）、`test_{context,engine,execution_store}`（管线与状态机）、`test_{operations_project,operations_layer,operations_processing}`（操作）、`test_{qgs_task,background}`（后台适配）、`test_plugin_lifecycle`（加载/卸载、工程换代、Supervisor）、`test_ui_dock`（坞窗表单、运行、生命周期；Qt offscreen，裸解释器里整模块 skip）、`test_package`（导入层）。
 
 运行时的两个观察面：Python Console 里 `iface.agent_registry` / `iface.agent_engine`（插件加载期间存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，默认七项见 `core/config.py`。
 

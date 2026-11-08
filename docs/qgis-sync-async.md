@@ -22,7 +22,7 @@
 
 阻塞主线程的副作用是 Qt 不再派发事件：所有排到主线程的东西都要等这次调用返回。本插件的
 `run_sync` 就是这种情况——它在主线程同步调 `execute_main`，调用期间 GUI 不动。这也解释了为什么
-只有八个 Operation 允许 `run_sync`：唯一的后台 Operation 用 `run_sync` 会被
+只有十六个 Operation 允许 `run_sync`：唯一的后台 Operation `layer.sum_numeric_field` 用 `run_sync` 会被
 `UNSUPPORTED_EXECUTION_MODE` 拒绝，避免“同步等一个 QgsTask”这种会死锁的写法。
 
 ## 2. 异步：`QgsTask` 与 `QgsTaskManager`
@@ -155,8 +155,9 @@ progressChanged 报告 100 次（1.0 … 100.0 各一次；1.0 的步进每次�
 ## 8. 本插件没有用到的机制
 
 - **Processing**（`QgsProcessingAlgRunnerTask`）：有自己的一套 `prepare/runPrepared/postProcess`
-  与 context/feedback 生命周期；MVP 的九个 Operation 里没有 Processing 调用，后台那个是纯 Python
-  求和（PRD 7.10）。接 Processing 属于 P1。
+  与 context/feedback 生命周期；v1 的九个 Operation 里没有 Processing 调用，后台那个是纯 Python
+  求和（PRD 7.10）。v2 的 `processing.run_algorithm` 在主线程直接调 `algorithm.run()`，不用这个任务类
+  （PRD v2 §3.2、§9）。
 - **渲染 job**（`QgsMapRendererParallelJob`）：自带线程与 `finished()` **signal**，本插件不渲染。
 - **`QgsTask.fromFunction`**：够短，但拿不到 `setDependentLayers` 那类实例方法；本插件用子类。
 

@@ -27,6 +27,7 @@ from qgis_agent_plugin import operations, plugin, ui
 from qgis_agent_plugin.core import config, context, contracts, engine, execution_store
 from qgis_agent_plugin.core import models, registry, security
 from qgis_agent_plugin.core.runners import main_thread, qgs_task
+from qgis_agent_plugin.operations import processing
 
 assert callable(qgis_agent_plugin.classFactory)
 assert callable(plugin.Plugin)
@@ -41,21 +42,33 @@ assert callable(main_thread.MainThreadRunner)
 assert callable(qgs_task.OperationTaskRunner)
 assert callable(qgs_task.task_class)
 
-# The nine operations of PRD 7.1 register in an interpreter that has no QGIS.
+# The seventeen operations of PRD v2 §2 register in an interpreter that has no QGIS,
+# and each one publishes the kind, strategy and risk label the PRD lists.
 filled = registry.OperationRegistry()
 operations.register_all(filled)
-assert len(filled.list_specs()) == 9, filled.list_specs()
-assert {spec.name for spec in filled.list_specs()} == {
-    "project.create",
-    "project.open",
-    "project.save",
-    "project.get_info",
-    "layer.add",
-    "layer.list",
-    "layer.get_info",
-    "layer.set_visibility",
-    "layer.sum_numeric_field",
+specs = filled.list_specs()
+assert len(specs) == 17, specs
+assert {spec.name: (spec.kind.value, spec.strategy.value, spec.destructive) for spec in specs} == {
+    "project.create": ("command", "main_thread", True),
+    "project.open": ("command", "main_thread", True),
+    "project.save": ("command", "main_thread", True),
+    "project.get_info": ("query", "main_thread", False),
+    "layer.add": ("command", "main_thread", False),
+    "layer.list": ("query", "main_thread", False),
+    "layer.get_info": ("query", "main_thread", False),
+    "layer.set_visibility": ("command", "main_thread", False),
+    "layer.sum_numeric_field": ("query", "background", False),
+    "layer.list_style_categories": ("query", "main_thread", False),
+    "layer.get_qml": ("query", "main_thread", False),
+    "layer.list_available_renderers": ("query", "main_thread", False),
+    "layer.get_renderer": ("query", "main_thread", False),
+    "layer.set_renderer": ("command", "main_thread", True),
+    "processing.list_algorithms": ("query", "main_thread", False),
+    "processing.get_algorithm_info": ("query", "main_thread", False),
+    "processing.run_algorithm": ("command", "main_thread", True),
 }
+# The one module that carries its own tuple, so a copy here would drift.
+assert len(processing.PROCESSING_OPERATIONS) == 3
 
 leaked = sorted(
     name

@@ -11,16 +11,40 @@ must fail when it loads, not when someone calls it.
 from __future__ import annotations
 
 from ..core.registry import OperationRegistry
-from .layer import LayerAdd, LayerGetInfo, LayerList, LayerSetVisibility, LayerSumNumericField
+from .layer import (
+    LayerAdd,
+    LayerGetInfo,
+    LayerGetQml,
+    LayerGetRenderer,
+    LayerList,
+    LayerListAvailableRenderers,
+    LayerListStyleCategories,
+    LayerSetRenderer,
+    LayerSetVisibility,
+    LayerSumNumericField,
+)
+from .processing import PROCESSING_OPERATIONS
 from .project import ProjectCreate, ProjectGetInfo, ProjectOpen, ProjectSave
 
 __all__ = ["LAYER_OPERATIONS", "OPERATIONS", "PROJECT_OPERATIONS", "register_all"]
 
 PROJECT_OPERATIONS = (ProjectCreate, ProjectOpen, ProjectSave, ProjectGetInfo)
-LAYER_OPERATIONS = (LayerAdd, LayerList, LayerGetInfo, LayerSetVisibility, LayerSumNumericField)
+LAYER_OPERATIONS = (
+    LayerAdd,
+    LayerList,
+    LayerGetInfo,
+    LayerSetVisibility,
+    LayerSumNumericField,
+    LayerListStyleCategories,
+    LayerGetQml,
+    LayerListAvailableRenderers,
+    LayerGetRenderer,
+    LayerSetRenderer,
+)
 
-# In the order of the PRD 7.1 table: the four ``project.*``, then the five ``layer.*``.
-OPERATIONS = (*PROJECT_OPERATIONS, *LAYER_OPERATIONS)
+# In the order of the PRD v2 §2/§9 table: the four ``project.*``, then the ten
+# ``layer.*``, then the three ``processing.*`` (whose tuple lives in ``processing``).
+OPERATIONS = (*PROJECT_OPERATIONS, *LAYER_OPERATIONS, *PROCESSING_OPERATIONS)
 
 
 def register_all(registry: OperationRegistry) -> None:

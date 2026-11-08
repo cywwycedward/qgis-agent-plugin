@@ -77,14 +77,14 @@ restart QGIS; enable "QGIS Agent" under Plugins > Manage and Install Plugins if 
 
 ```python
 hasattr(iface, "agent_engine"), hasattr(iface, "agent_registry")  # (True, True)
-len(iface.agent_registry.list_specs())  # 9
+len(iface.agent_registry.list_specs())  # 17
 iface.agent_engine.run_sync("project.get_info", {}).status  # 'SUCCEEDED'
 ```
 
 实测（headless，同一套类手工装配，因为 headless 没有 `iface`）：
 
 ```text
-specs: 9
+specs: 17
 run_sync project.get_info -> SUCCEEDED
 submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 ```
@@ -94,7 +94,7 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 ### 操作坞窗（手工测试入口）
 
 插件启用后会多一个坞窗，标题 **QGIS Agent 操作**，停靠在主窗口右侧：`视图 → 面板` 里勾它，
-或右键工具栏空白处。它给人工验证九个 Operation 用，不属于 PRD 的框架面。
+或右键工具栏空白处。它给人工验证十七个 Operation 用，不属于 PRD 的框架面。
 
 一次测试三步：**选操作 → 填必要的参数 → 运行并读懂结果**。界面自上而下：
 
@@ -252,7 +252,7 @@ $ & 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests   # 裸解释
 
 | 文件 | 内容 |
 | --- | --- |
-| `docs/OPERATIONS.md` | 九个 Operation 的参数/返回/错误码契约 |
+| `docs/OPERATIONS.md` | 十七个 Operation 的契约（v2 的八个指向 PRD v2 §2–§7） |
 | `docs/ERRORS.md` | 25 个错误码、`cancel` 回执、日志与排查 |
 | `docs/CONSOLE.md` | Python Console 样例，标注实测状态 |
 | `docs/qgis-sync-async.md` | QGIS 3.44 的线程模型，以及本插件怎么用它 |

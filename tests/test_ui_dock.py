@@ -95,6 +95,37 @@ FORM = {
 }
 
 
+# What pydantic emits for a named enum and for a discriminated union: the property is
+# a ``$ref``, and the enum or the branches sit behind the definition table.
+REFERRED = {
+    "type": "object",
+    "properties": {
+        "renderer": {"$ref": "#/$defs/RendererConfig"},
+        "mode": {"$ref": "#/$defs/Mode"},
+    },
+    "required": ["renderer"],
+    "$defs": {
+        "Mode": {"enum": ["fast", "safe"], "title": "Mode", "type": "string"},
+        "RendererConfig": {
+            "discriminator": {"propertyName": "type"},
+            "oneOf": [{"$ref": "#/$defs/PointRenderer"}, {"$ref": "#/$defs/LineRenderer"}],
+        },
+        "PointRenderer": {
+            "properties": {"type": {"const": "point"}},
+            "required": ["type"],
+            "title": "PointRenderer",
+            "type": "object",
+        },
+        "LineRenderer": {
+            "properties": {"type": {"const": "line"}},
+            "required": ["type"],
+            "title": "LineRenderer",
+            "type": "object",
+        },
+    },
+}
+
+
 @pytest.fixture(scope="session")
 def qapp() -> Any:
     """One Qt application for this module; offscreen, with no QGIS involved."""
@@ -323,7 +354,7 @@ def test_the_summary_shows_the_description_of_the_selection(qapp: Any) -> None:
 
 
 def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -> None:
-    """The nine PRD operations, whose schemas carry enums, bools and nullable unions."""
+    """The schemas actually registered: enums, bools and nullable unions among them."""
 
     registry = OperationRegistry()
     register_all(registry)
@@ -383,6 +414,25 @@ def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
     assert "必填" in dock.form.labelForField(editors["name"]).text()
     assert "必填" in dock.form.labelForField(editors["kind"]).text()
     assert "必填" not in dock.form.labelForField(editors["note"]).text()
+
+
+def test_a_schema_behind_a_ref_keeps_its_union_and_its_enum(qapp: Any) -> None:
+    """``layer.set_renderer`` publishes its renderer as a ``$ref``, not as a ``oneOf``."""
+
+    engine = FakeEngine(run_sync=_record())
+    dock = _dock(engine, _spec(schema=REFERRED))
+
+    # The union is one definition away, so the property is a JSON field, not text.
+    assert dock.editors["renderer"][0] == "json"
+    mode = dock.editors["mode"][1]
+    assert isinstance(mode, QComboBox)
+    assert [mode.itemText(row) for row in range(mode.count())] == ["fast", "safe"]
+
+    dock.editors["renderer"][1].setText('{"type": "line"}')
+    mode.setCurrentIndex(1)
+    dock.run()
+
+    assert engine.calls == [("run_sync", "demo.op", {"renderer": {"type": "line"}, "mode": "safe"})]
 
 
 def test_an_empty_field_is_left_to_the_model_default(qapp: Any) -> None:
@@ -1140,7 +1190,7 @@ def test_two_loads_and_unloads_leave_nothing_docked(fake_qgis: Any, qapp: Any) -
         instance.initGui()
         dock = instance.dock
         assert isinstance(dock, OperationDock)
-        assert dock.operations.count() == 9
+        assert dock.operations.count() == 17
         dock.timer.start()
 
         instance.unload()
