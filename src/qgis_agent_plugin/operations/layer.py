@@ -21,6 +21,11 @@ already carries without changing it.  Which categories apply is the PRD's fixed
 list, not something read back out of the XML; the QML itself comes from the
 layer's own native export; and both renderer lists come from the live QGIS
 registries rather than a table kept here.
+
+The renderer setter is the one operation here that replaces state.  It builds the
+whole native renderer before the layer is touched, then installs it in one call,
+so a refused configuration cannot leave the layer with half a style or with none
+(PRD v2 5.4).
 """
 
 from __future__ import annotations
@@ -29,9 +34,17 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 from ..core.contracts import (
     BackgroundOperationMixin,
@@ -734,3 +747,499 @@ class LayerGetRenderer(
             layer_id=request.layer_id,
             renderer_type="" if renderer is None else renderer.type(),
         )
+
+
+# --- setting the renderer: the structured configurations (PRD v2 5.4-7.5) ---
+
+# A colour is six RGB hex digits with no alpha and a length is millimetres:
+# those are the only shapes the simple-symbol API here accepts (PRD v2 5.5).
+type ColorHex = Annotated[StrictStr, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
+type FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+type PositiveMm = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+type Band = Annotated[StrictInt, Field(ge=1)]
+
+
+class MarkerSymbolConfig(BaseModel):
+    """A round marker, the only point symbol this version can configure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["marker"]
+    color: ColorHex
+    size_mm: PositiveMm = 2.0
+
+
+class LineSymbolConfig(BaseModel):
+    """A solid line: no dash pattern, no offset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["line"]
+    color: ColorHex
+    width_mm: PositiveMm = 0.3
+
+
+class FillSymbolConfig(BaseModel):
+    """A flat fill with a simple outline; the outline cannot be hidden."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["fill"]
+    color: ColorHex
+    outline_color: ColorHex = "#333333"
+    outline_width_mm: PositiveMm = 0.3
+
+
+type SimpleSymbolConfig = Annotated[
+    MarkerSymbolConfig | LineSymbolConfig | FillSymbolConfig,
+    Field(discriminator="type"),
+]
+
+
+class NullSymbolRendererConfig(BaseModel):
+    """Draws no feature symbol; it is not the same as hiding the layer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["nullSymbol"]
+
+
+class SingleSymbolRendererConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["singleSymbol"]
+    symbol: SimpleSymbolConfig
+
+
+class CategoryConfig(BaseModel):
+    """One value of the key field and the symbol it is drawn with."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str | int | FiniteFloat | bool | None
+    label: StrictStr = Field(min_length=1)
+    symbol: SimpleSymbolConfig
+
+
+class CategorizedRendererConfig(BaseModel):
+    """The caller supplies every category: nothing is derived from the data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["categorizedSymbol"]
+    field: StrictStr = Field(min_length=1)
+    categories: list[CategoryConfig] = Field(min_length=1)
+
+
+class RangeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lower: FiniteFloat
+    upper: FiniteFloat
+    label: StrictStr = Field(min_length=1)
+    symbol: SimpleSymbolConfig
+
+    @model_validator(mode="after")
+    def _lower_is_below_upper(self) -> RangeConfig:
+        if self.lower >= self.upper:
+            raise ValueError("lower must be below upper")
+        return self
+
+
+class GraduatedRendererConfig(BaseModel):
+    """The caller supplies every breakpoint; QGIS classifies nothing itself."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["graduatedSymbol"]
+    field: StrictStr = Field(min_length=1)
+    ranges: list[RangeConfig] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _ranges_are_ordered(self) -> GraduatedRendererConfig:
+        # Adjacent ranges may share an endpoint; gaps are the caller's choice.
+        for previous, current in zip(self.ranges, self.ranges[1:], strict=False):
+            if current.lower < previous.upper:
+                raise ValueError("ranges must be ordered by lower and must not overlap")
+        return self
+
+
+class RuleConfig(BaseModel):
+    """A flat rule: a filter expression or the single ELSE, plus its symbol."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: StrictStr = Field(min_length=1)
+    filter: StrictStr | None = None
+    else_rule: StrictBool = False
+    symbol: SimpleSymbolConfig
+
+
+class RuleRendererConfig(BaseModel):
+    """Rules keep the caller's order; nesting and scale limits are out of scope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["RuleRenderer"]
+    rules: list[RuleConfig] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_else_and_it_is_last(self) -> RuleRendererConfig:
+        for position, rule in enumerate(self.rules):
+            if rule.else_rule:
+                if rule.filter is not None:
+                    raise ValueError("an else rule takes no filter")
+                if position != len(self.rules) - 1:
+                    raise ValueError("an else rule must be the last rule")
+            elif rule.filter is None or not rule.filter.strip():
+                raise ValueError("a rule needs a filter expression")
+        return self
+
+
+class SingleBandGrayConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["singlebandgray"]
+    band: Band
+    min: FiniteFloat
+    max: FiniteFloat
+
+    @model_validator(mode="after")
+    def _min_is_below_max(self) -> SingleBandGrayConfig:
+        if self.min >= self.max:
+            raise ValueError("min must be below max")
+        return self
+
+
+class MultiBandColorConfig(BaseModel):
+    """The same band may name two or three channels."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["multibandcolor"]
+    red_band: Band
+    green_band: Band
+    blue_band: Band
+
+
+class ColorStop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: FiniteFloat
+    color: ColorHex
+
+
+class PseudoColorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["singlebandpseudocolor"]
+    band: Band
+    interpolation: Literal["linear", "discrete", "exact"] = "linear"
+    stops: list[ColorStop] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _stops_increase(self) -> PseudoColorConfig:
+        values = [stop.value for stop in self.stops]
+        if any(current <= previous for previous, current in zip(values, values[1:], strict=False)):
+            raise ValueError("stops must be strictly increasing")
+        return self
+
+
+class SingleColorRasterConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["singlecolor"]
+    band: Band
+    color: ColorHex
+
+
+type VectorRendererConfig = Annotated[
+    NullSymbolRendererConfig
+    | SingleSymbolRendererConfig
+    | CategorizedRendererConfig
+    | GraduatedRendererConfig
+    | RuleRendererConfig,
+    Field(discriminator="type"),
+]
+
+type RasterRendererConfig = Annotated[
+    SingleBandGrayConfig | MultiBandColorConfig | PseudoColorConfig | SingleColorRasterConfig,
+    Field(discriminator="type"),
+]
+
+# One union, so a type outside the nine listed is refused by the model itself.
+type RendererConfig = Annotated[
+    VectorRendererConfig | RasterRendererConfig,
+    Field(discriminator="type"),
+]
+
+# The shader ramp type per declared interpolation: values are the names of
+# ``QgsColorRampShader.Type`` members (PRD v2 7.3).
+PSEUDO_RAMP_TYPES = {"linear": "Interpolated", "discrete": "Discrete", "exact": "Exact"}
+
+
+class LayerSetRendererParams(Params):
+    layer_id: StrictStr = Field(min_length=1)
+    renderer: RendererConfig
+
+
+class LayerSetRendererResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_id: StrictStr
+    renderer_type: StrictStr
+
+
+def expected_symbol_type(layer: Any) -> Literal["marker", "line", "fill"]:
+    """The simple symbol a layer's geometry takes; Multi* reports its base type."""
+
+    from qgis.core import Qgis
+
+    geometry = layer.geometryType()
+    if geometry == Qgis.GeometryType.Point:
+        return "marker"
+    if geometry == Qgis.GeometryType.Line:
+        return "line"
+    if geometry == Qgis.GeometryType.Polygon:
+        return "fill"
+    raise FrameworkError(INVALID_LAYER, "the layer has no supported geometry")
+
+
+def simple_symbol(config: SimpleSymbolConfig, expected: str) -> Any:
+    """One native symbol from the declared colour and size alone (PRD v2 5.5)."""
+
+    if config.type != expected:
+        raise FrameworkError(INVALID_INPUT, "the symbol does not match the layer geometry")
+    if config.type == "marker":
+        from qgis.core import QgsMarkerSymbol
+
+        return QgsMarkerSymbol.createSimple({"color": config.color, "size": config.size_mm})
+    if config.type == "line":
+        from qgis.core import QgsLineSymbol
+
+        return QgsLineSymbol.createSimple({"color": config.color, "width": config.width_mm})
+    from qgis.core import QgsFillSymbol
+
+    return QgsFillSymbol.createSimple(
+        {
+            "color": config.color,
+            "outline_color": config.outline_color,
+            "outline_width": config.outline_width_mm,
+        }
+    )
+
+
+def layer_field(layer: Any, name: str) -> Any:
+    """The layer's own field, so a value is checked against its real type."""
+
+    fields = layer.fields()
+    index = fields.indexFromName(name)
+    if index < 0:
+        raise FrameworkError(INVALID_FIELD_TYPE, "the layer has no such field")
+    return fields.at(index)
+
+
+def category_key(field: Any, value: Any) -> tuple[str, Any]:
+    """The key two categories are compared by, normalised by the field's type.
+
+    An integer and a float are the same numeric category; a value the field cannot
+    hold is refused rather than passed on to render nothing (PRD v2 6.3).
+    """
+
+    if value is None:
+        return ("null", None)
+    if field.isNumeric():
+        if isinstance(value, (bool, str)):
+            raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+        try:
+            number = float(value)
+        except OverflowError:
+            # An integer the float cannot hold is not finite for this purpose, and it
+            # must not reach either the dedupe key or the native category.
+            raise FrameworkError(
+                INVALID_INPUT, "a category value does not fit the field type"
+            ) from None
+        return ("number", number)
+    if isinstance(value, bool):
+        from qgis.PyQt.QtCore import QVariant
+
+        # A boolean is only usable in a field that stores one; on a date or text
+        # field it is a category that can never match (PRD v2 6.3).
+        if field.type() == QVariant.Bool:
+            return ("value", value)
+        raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+    if isinstance(value, str):
+        return ("value", value)
+    raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+
+
+def raster_band(layer: Any, band: int) -> int:
+    """Bands are 1-based and only the layer's own bands are addressable."""
+
+    if not 1 <= band <= layer.bandCount():
+        raise FrameworkError(INVALID_INPUT, "a band is outside the raster's bands")
+    return band
+
+
+RASTER_RENDERER_CONFIGS = (
+    SingleBandGrayConfig,
+    MultiBandColorConfig,
+    PseudoColorConfig,
+    SingleColorRasterConfig,
+)
+
+
+def build_renderer(layer: Any, config: RendererConfig) -> Any:
+    """The complete native renderer; the layer is not touched here (PRD v2 5.4)."""
+
+    if isinstance(config, RASTER_RENDERER_CONFIGS):
+        if layer_kind(layer) != "raster":
+            raise FrameworkError(INVALID_LAYER, "the renderer does not apply to this layer")
+        return raster_renderer(layer, config)
+    if layer_kind(layer) != "vector":
+        raise FrameworkError(INVALID_LAYER, "the renderer does not apply to this layer")
+    return vector_renderer(layer, config)
+
+
+def vector_renderer(layer: Any, config: VectorRendererConfig) -> Any:
+    """Build one of the five vector renderers, symbols included."""
+
+    from qgis.core import (
+        QgsCategorizedSymbolRenderer,
+        QgsExpression,
+        QgsGraduatedSymbolRenderer,
+        QgsNullSymbolRenderer,
+        QgsRendererCategory,
+        QgsRendererRange,
+        QgsRuleBasedRenderer,
+        QgsSingleSymbolRenderer,
+    )
+
+    expected = expected_symbol_type(layer)
+    if isinstance(config, NullSymbolRendererConfig):
+        return QgsNullSymbolRenderer()
+    if isinstance(config, SingleSymbolRendererConfig):
+        return QgsSingleSymbolRenderer(simple_symbol(config.symbol, expected))
+    if isinstance(config, CategorizedRendererConfig):
+        field = layer_field(layer, config.field)
+        seen: set[tuple[str, Any]] = set()
+        categories = []
+        for entry in config.categories:
+            key = category_key(field, entry.value)
+            if key in seen:
+                raise FrameworkError(INVALID_INPUT, "a category value repeats")
+            seen.add(key)
+            categories.append(
+                QgsRendererCategory(entry.value, simple_symbol(entry.symbol, expected), entry.label)
+            )
+        return QgsCategorizedSymbolRenderer(config.field, categories)
+    if isinstance(config, GraduatedRendererConfig):
+        if not layer_field(layer, config.field).isNumeric():
+            raise FrameworkError(INVALID_FIELD_TYPE, "the field is not a number")
+        ranges = [
+            QgsRendererRange(
+                entry.lower, entry.upper, simple_symbol(entry.symbol, expected), entry.label
+            )
+            for entry in config.ranges
+        ]
+        return QgsGraduatedSymbolRenderer(config.field, ranges)
+
+    # A rule's filter is only checked for syntax: its result is never evaluated here.
+    for rule in config.rules:
+        if not rule.else_rule and QgsExpression(rule.filter or "").hasParserError():
+            raise FrameworkError(INVALID_INPUT, "a rule filter is not a valid expression")
+    root = QgsRuleBasedRenderer.Rule(None)
+    for rule in config.rules:
+        child = QgsRuleBasedRenderer.Rule(
+            simple_symbol(rule.symbol, expected),
+            filterExp=rule.filter or "",
+            label=rule.label,
+            elseRule=rule.else_rule,
+        )
+        child.setActive(True)
+        root.appendChild(child)
+    return QgsRuleBasedRenderer(root)
+
+
+def raster_renderer(layer: Any, config: RasterRendererConfig) -> Any:
+    """Build one of the four raster renderers from the layer's own provider."""
+
+    from qgis.core import (
+        QgsColorRampShader,
+        QgsContrastEnhancement,
+        QgsMultiBandColorRenderer,
+        QgsRasterShader,
+        QgsRasterSingleColorRenderer,
+        QgsSingleBandGrayRenderer,
+        QgsSingleBandPseudoColorRenderer,
+    )
+    from qgis.PyQt.QtGui import QColor
+
+    provider = layer.dataProvider()
+    if isinstance(config, MultiBandColorConfig):
+        red, green, blue = (
+            raster_band(layer, band)
+            for band in (config.red_band, config.green_band, config.blue_band)
+        )
+        return QgsMultiBandColorRenderer(provider, red, green, blue)
+    band = raster_band(layer, config.band)
+    if isinstance(config, SingleBandGrayConfig):
+        renderer = QgsSingleBandGrayRenderer(provider, band)
+        # The enhancement takes the band's own data type, or a float band's values
+        # would be clipped to an 8-bit range before the stretch sees them.
+        enhancement = QgsContrastEnhancement(provider.dataType(band))
+        # The algorithm setter below builds the lookup table once; the two values
+        # only store their bounds (PRD v2 7.1).
+        enhancement.setMinimumValue(config.min, False)
+        enhancement.setMaximumValue(config.max, False)
+        enhancement.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum)
+        renderer.setContrastEnhancement(enhancement)
+        return renderer
+    if isinstance(config, PseudoColorConfig):
+        ramp = QgsColorRampShader()
+        ramp.setColorRampType(getattr(QgsColorRampShader, PSEUDO_RAMP_TYPES[config.interpolation]))
+        ramp.setColorRampItemList(
+            [
+                QgsColorRampShader.ColorRampItem(stop.value, QColor(stop.color))
+                for stop in config.stops
+            ]
+        )
+        shader = QgsRasterShader()
+        shader.setRasterShaderFunction(ramp)
+        return QgsSingleBandPseudoColorRenderer(provider, band, shader)
+    return QgsRasterSingleColorRenderer(provider, band, QColor(config.color))
+
+
+class LayerSetRenderer(
+    BaseCommand[LayerSetRendererParams, LayerSetRendererResult],
+    MainThreadOperationMixin[LayerSetRendererParams, LayerSetRendererResult],
+):
+    """Replace one layer's whole renderer in a single call (PRD v2 5.4).
+
+    Every refusal happens before ``setRenderer``: the old renderer is still the
+    one installed.  Once installed, the layer owns the object; only its type name
+    is reported, so nothing here keeps using it.
+    """
+
+    name = "layer.set_renderer"
+    description = "Replace one layer's renderer with a structured configuration"
+    input_model = LayerSetRendererParams
+    output_model = LayerSetRendererResult
+    destructive = True
+
+    def execute_main(
+        self, ctx: OperationContext, request: LayerSetRendererParams
+    ) -> LayerSetRendererResult:
+        layer = layer_for_style(ctx.project, request.layer_id)
+        try:
+            renderer = build_renderer(layer, request.renderer)
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+            ctx.project.setDirty(True)
+            renderer_type = layer.renderer().type()
+        except FrameworkError:
+            raise
+        except Exception as error:  # noqa: BLE001 - one native failure is one refusal
+            # The native message may name a field or a file, so it stays out of the record.
+            raise FrameworkError(INTERNAL_ERROR, "the renderer could not be set") from error
+        return LayerSetRendererResult(layer_id=request.layer_id, renderer_type=renderer_type)
