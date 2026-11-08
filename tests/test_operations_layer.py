@@ -98,15 +98,23 @@ class FakeSymbol:
         self.properties = dict(properties)
 
 
-class FakeField:
-    """The one field property the setter reads: whether it is a number."""
+# The fake's ``QVariant.Type`` values; the real ones are Bool 1, String 10, Date 14.
+VARIANT_STRING = 10
 
-    def __init__(self, name: str, numeric: bool = True) -> None:
+
+class FakeField:
+    """What the setter reads of a field: its numeric kind and its QVariant type."""
+
+    def __init__(self, name: str, numeric: bool = True, field_type: int = VARIANT_STRING) -> None:
         self.name = name
         self.numeric = numeric
+        self.field_type = field_type
 
     def isNumeric(self) -> bool:
         return self.numeric
+
+    def type(self) -> int:
+        return self.field_type
 
 
 class FakeFields:
@@ -374,6 +382,7 @@ class FakeQgis:
             GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2),
             DataType=types.SimpleNamespace(Byte=1, Float32=6),
         )
+        QVariant = types.SimpleNamespace(Bool=1, String=10, Date=14)
 
         class FakeRasterProvider:
             def __init__(self) -> None:
@@ -606,6 +615,7 @@ class FakeQgis:
         self.QgsApplication = QgsApplication
         self.QgsRasterRendererRegistry = QgsRasterRendererRegistry
         self.Qgis = Qgis
+        self.QVariant: Any = QVariant
         # The renderer setter's native classes, for the tests' isinstance assertions.
         self.QgsMarkerSymbol: Any = QgsMarkerSymbol
         self.QgsLineSymbol: Any = QgsLineSymbol
@@ -665,13 +675,15 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
     )
     qtxml = fake_module("qgis.PyQt.QtXml", QDomDocument=FakeDocument)
     qtgui = fake_module("qgis.PyQt.QtGui", QColor=FakeColor)
-    pyqt = fake_module("qgis.PyQt", QtXml=qtxml, QtGui=qtgui)
+    qtcore = fake_module("qgis.PyQt.QtCore", QVariant=fake.QVariant)
+    pyqt = fake_module("qgis.PyQt", QtXml=qtxml, QtGui=qtgui, QtCore=qtcore)
     qgis_module = fake_module("qgis", core=core, PyQt=pyqt)
     monkeypatch.setitem(sys.modules, "qgis", qgis_module)
     monkeypatch.setitem(sys.modules, "qgis.core", core)
     monkeypatch.setitem(sys.modules, "qgis.PyQt", pyqt)
     monkeypatch.setitem(sys.modules, "qgis.PyQt.QtXml", qtxml)
     monkeypatch.setitem(sys.modules, "qgis.PyQt.QtGui", qtgui)
+    monkeypatch.setitem(sys.modules, "qgis.PyQt.QtCore", qtcore)
     return fake
 
 
@@ -2092,6 +2104,53 @@ def test_an_unrepresentable_category_value_is_refused(fake_qgis: FakeQgis, data_
     assert code == INVALID_INPUT
     assert fake_qgis.built == []
     assert layer.renderer_sets == []
+
+
+def test_a_boolean_category_is_refused_on_a_field_that_is_not_boolean(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A bool on a date field would be a category that can never match."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "events", geometry=POLYGON)
+    layer.field_list = [FakeField("recorded", numeric=False, field_type=fake_qgis.QVariant.Date)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "events",
+            {
+                "type": "categorizedSymbol",
+                "field": "recorded",
+                "categories": [{"value": True, "label": "True", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert fake_qgis.built == []
+    assert layer.renderer_sets == []
+
+
+def test_a_boolean_category_is_accepted_on_a_boolean_field(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "flags", geometry=POLYGON)
+    layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "flags",
+            {
+                "type": "categorizedSymbol",
+                "field": "active",
+                "categories": [{"value": True, "label": "On", "symbol": FILL}],
+            },
+        ),
+    )
+    assert layer.renderer_sets[0].categories[0].value is True
+    assert result.renderer_type == "categorizedSymbol"
 
 
 def test_a_missing_graduated_field_is_invalid_field_type(

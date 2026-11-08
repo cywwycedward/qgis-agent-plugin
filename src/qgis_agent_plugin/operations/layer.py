@@ -1060,7 +1060,15 @@ def category_key(field: Any, value: Any) -> tuple[str, Any]:
                 INVALID_INPUT, "a category value does not fit the field type"
             ) from None
         return ("number", number)
-    if isinstance(value, (bool, str)):
+    if isinstance(value, bool):
+        from qgis.PyQt.QtCore import QVariant
+
+        # A boolean is only usable in a field that stores one; on a date or text
+        # field it is a category that can never match (PRD v2 6.3).
+        if field.type() == QVariant.Bool:
+            return ("value", value)
+        raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+    if isinstance(value, str):
         return ("value", value)
     raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
 
