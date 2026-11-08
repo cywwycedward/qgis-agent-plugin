@@ -1,21 +1,23 @@
 # ruff: noqa: E402 - the platform and the Qt import have to precede the dock import.
 
-"""The operation dock: schema to form, form to arguments, and one record on screen.
+"""The operation dock: the selector, the form, the six states, and one record on screen.
 
-The dock is the manual test entry (F10), so what it shows is asserted here: the
-list order and labels, the editor each property becomes, which fields become
-arguments, the two engine paths (``run_sync`` for a main-thread call, ``submit`` plus
-polling for a background one), the JSON in the result box, and the two ways a
-failure must become text instead of reaching the Qt slot.
+The dock is the manual test entry (F10) and an Operate surface (F11), so what is
+asserted here is what an operator sees and can do: the operation each schema
+becomes, which fields become arguments, the capsule and the controls in every
+state (idle / running / ok / failed / cancelled / empty), the keyboard path, the
+colour pairs the theme derives from a light and a dark palette, and the two
+engine paths (``run_sync`` for a main-thread call, ``submit`` plus polling for a
+background one).  Failures must become text, never reach the Qt slot.
 
 Qt is real and offscreen; QGIS is only faked where ``initGui`` needs it.  The dock
 is the one module that imports Qt at module level, so this whole module skips
-rather than fails in the bare interpreter (``tests/test_package.py`` keeps that
-rule intact).
+rather than fails in the bare interpreter (``tests/test_package.py`` guards that).
 """
 
 import json
 import os
+import re
 import sys
 import time
 import types
@@ -28,23 +30,24 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("qgis.PyQt.QtWidgets", reason="the operation dock needs Qt")
 
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor, QPalette
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
-    QDoubleSpinBox,
     QFormLayout,
     QLineEdit,
     QMainWindow,
-    QSpinBox,
 )
 
 from qgis_agent_plugin import plugin
 from qgis_agent_plugin.core.models import (
     ENGINE_CLOSING,
     INTERNAL_ERROR,
+    INVALID_INPUT,
+    PATH_NOT_ALLOWED,
     CancelReceipt,
     ErrorDetail,
     ExecutionRecord,
@@ -56,7 +59,8 @@ from qgis_agent_plugin.core.models import (
 )
 from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.operations import register_all
-from qgis_agent_plugin.ui.dock import OperationDock
+from qgis_agent_plugin.ui import theme
+from qgis_agent_plugin.ui.dock import _DESTRUCTIVE_ROLE, _META_ROLE, OperationDock
 
 # Every editor kind in one schema: text, bool, integer, number, enum, a nullable
 # string and a nullable array, with two required fields and defaults on the rest.
@@ -149,13 +153,15 @@ def _spec(
     name: str = "demo.op",
     strategy: ExecutionStrategy = ExecutionStrategy.MAIN_THREAD,
     schema: dict[str, Any] | None = None,
+    description: str = "a demo operation",
+    destructive: bool = False,
 ) -> OperationSpec:
     return OperationSpec(
         name=name,
-        description="a demo operation",
+        description=description,
         kind=OperationKind.QUERY,
         strategy=strategy,
-        destructive=False,
+        destructive=destructive,
         input_schema=schema if schema is not None else {"type": "object", "properties": {}},
         output_schema={"type": "object"},
         pydantic_major=2,
@@ -215,28 +221,72 @@ def _wait_until(predicate: Any, timeout_ms: int = 2000) -> bool:
     return predicate()
 
 
-# --- the operation list ------------------------------------------------------
+def _fields(form: QFormLayout) -> list[Any]:
+    """The editor widgets the form shows right now, in row order."""
+
+    return [form.itemAt(row, QFormLayout.FieldRole).widget() for row in range(form.rowCount())]
 
 
-def test_the_list_is_sorted_and_shows_kind_and_strategy(qapp: Any) -> None:
+def _light_palette() -> QPalette:
+    palette = QPalette()
+    for role, color in {
+        QPalette.Window: "#efefef",
+        QPalette.Base: "#ffffff",
+        QPalette.WindowText: "#1a1a1a",
+        QPalette.Text: "#1a1a1a",
+        QPalette.Button: "#efefef",
+        QPalette.ButtonText: "#1a1a1a",
+        QPalette.Highlight: "#308cc6",
+        QPalette.HighlightedText: "#ffffff",
+    }.items():
+        palette.setColor(role, QColor(color))
+    return palette
+
+
+def _dark_palette() -> QPalette:
+    palette = QPalette()
+    for role, color in {
+        QPalette.Window: "#2b2b2b",
+        QPalette.Base: "#1e1e1e",
+        QPalette.WindowText: "#e8e8e8",
+        QPalette.Text: "#e8e8e8",
+        QPalette.Button: "#2b2b2b",
+        QPalette.ButtonText: "#e8e8e8",
+        QPalette.Highlight: "#4a9eff",
+        QPalette.HighlightedText: "#101010",
+    }.items():
+        palette.setColor(role, QColor(color))
+    return palette
+
+
+# --- the selector ------------------------------------------------------------
+
+
+def test_the_selector_is_sorted_and_carries_kind_and_strategy(qapp: Any) -> None:
     registry = FakeRegistry(_spec("layer.sum", ExecutionStrategy.BACKGROUND), _spec("layer.list"))
 
     dock = OperationDock(registry, FakeEngine())
 
-    labels = [dock.operations.item(row).text() for row in range(dock.operations.count())]
-    assert labels == [
-        "layer.list  [query · main_thread]",
-        "layer.sum  [query · background]",
-    ]
-    assert dock.empty.isHidden()
+    names = [dock.operations.itemText(row) for row in range(dock.operations.count())]
+    assert names == ["layer.list", "layer.sum"]
+    assert dock.operations.itemData(1, _META_ROLE) == "query · background"
+    assert dock.operations.currentText() == "layer.list"
 
 
-def test_an_empty_registry_says_so_instead_of_showing_nothing(qapp: Any) -> None:
-    dock = OperationDock(FakeRegistry(), FakeEngine())
+def test_a_destructive_operation_is_marked_in_the_selector(qapp: Any) -> None:
+    dock = _dock(FakeEngine(), _spec("project.create", destructive=True))
 
-    assert dock.operations.count() == 0
-    assert not dock.empty.isHidden()
-    assert dock.empty.text() == "没有注册的操作"
+    assert dock.operations.itemData(0, _DESTRUCTIVE_ROLE) is True
+    assert "可破坏" in dock.meta.text()
+    assert dock.meta.styleSheet() != ""
+
+
+def test_the_summary_shows_the_description_of_the_selection(qapp: Any) -> None:
+    dock = _dock(FakeEngine(), _spec(description="Read one layer's identity"))
+
+    assert dock.meta.text() == "query · main_thread"
+    assert dock.summary.text() == "Read one layer's identity"
+    assert not dock.details.isHidden()
 
 
 def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -> None:
@@ -247,7 +297,7 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
     dock = OperationDock(registry, FakeEngine())
 
     for row, spec in enumerate(registry.list_specs()):
-        dock.operations.setCurrentRow(row)
+        dock.operations.setCurrentIndex(row)
         properties = spec.input_schema["properties"]
         assert set(dock.editors) == set(properties)
         # An operation without parameters still gets its one "takes no arguments" row.
@@ -255,7 +305,7 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
 
 
 def test_the_dock_is_something_a_real_main_window_accepts(qapp: Any) -> None:
-    """The r1 finding: a plain ``QWidget`` is refused by ``addDockWidget``."""
+    """The F10 r1 finding: a plain ``QWidget`` is refused by ``addDockWidget``."""
 
     window = QMainWindow()
     dock = _dock(FakeEngine())
@@ -271,44 +321,60 @@ def test_the_dock_is_something_a_real_main_window_accepts(qapp: Any) -> None:
 
 
 def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
+    """Bools keep their state; every field that can be empty shows its default."""
+
     dock = _dock(FakeEngine(), _spec(schema=FORM))
     editors = {name: widget for name, (_, widget) in dock.editors.items()}
 
     assert set(editors) == {"name", "flag", "count", "ratio", "kind", "note", "items"}
     assert isinstance(editors["flag"], QCheckBox)
     assert editors["flag"].isChecked()
-    assert isinstance(editors["count"], QSpinBox)
-    assert editors["count"].value() == 3
-    assert isinstance(editors["ratio"], QDoubleSpinBox)
-    assert editors["ratio"].value() == 0.5
+    assert isinstance(editors["count"], QLineEdit)
+    assert editors["count"].placeholderText() == "3"
+    assert isinstance(editors["ratio"], QLineEdit)
+    assert editors["ratio"].placeholderText() == "0.5"
     assert isinstance(editors["kind"], QComboBox)
-    assert editors["kind"].currentText() == "raster"
     assert [editors["kind"].itemText(row) for row in range(editors["kind"].count())] == [
+        "默认（raster）",
         "vector",
         "raster",
     ]
+    assert editors["kind"].currentIndex() == 0
     assert isinstance(editors["name"], QLineEdit)
+    assert editors["name"].placeholderText() == "必填"
     assert isinstance(editors["items"], QLineEdit)
-    assert editors["items"].text() == "[1, 2]"
-    # The required ones carry the marker; the optional ones do not.
-    assert dock.form.labelForField(editors["name"]).text() == "Name *"
-    assert dock.form.labelForField(editors["kind"]).text() == "Kind *"
-    assert dock.form.labelForField(editors["note"]).text() == "Note"
+    assert editors["items"].placeholderText() == "[1, 2]"
+    # The field labels are the dock's words where it has them, and are marked when required.
+    assert "必填" in dock.form.labelForField(editors["name"]).text()
+    assert "必填" in dock.form.labelForField(editors["kind"]).text()
+    assert "必填" not in dock.form.labelForField(editors["note"]).text()
 
 
 def test_an_empty_field_is_left_to_the_model_default(qapp: Any) -> None:
     engine = FakeEngine(run_sync=_record())
     dock = _dock(engine, _spec(schema=FORM))
 
-    dock.editors["name"][1].setText("")
-    dock.editors["note"][1].setText("  ")
+    dock.run()
+
+    # Only the checkbox submits without being asked: it has no empty state.
+    assert engine.calls == [("run_sync", "demo.op", {"flag": True})]
+
+
+def test_a_filled_field_is_submitted_in_its_own_type(qapp: Any) -> None:
+    engine = FakeEngine(run_sync=_record())
+    dock = _dock(engine, _spec(schema=FORM))
+
+    dock.editors["name"][1].setText("roads")
+    dock.editors["count"][1].setText("7")
+    dock.editors["ratio"][1].setText("0.25")
+    dock.editors["kind"][1].setCurrentIndex(2)
     dock.run()
 
     assert engine.calls == [
         (
             "run_sync",
             "demo.op",
-            {"flag": True, "count": 3, "ratio": 0.5, "kind": "raster", "items": [1, 2]},
+            {"name": "roads", "flag": True, "count": 7, "ratio": 0.25, "kind": "raster"},
         )
     ]
 
@@ -321,17 +387,13 @@ def test_a_field_that_is_not_json_stops_before_the_engine(qapp: Any) -> None:
     dock.run()
 
     assert engine.calls == []
-    assert "items" in dock.error.text()
-
-
-def _fields(form: QFormLayout) -> list[Any]:
-    """The editor widgets the form shows right now, in row order."""
-
-    return [form.itemAt(row, QFormLayout.FieldRole).widget() for row in range(form.rowCount())]
+    assert dock.error_code.text() == INVALID_INPUT
+    assert "items" in dock.error_message.text()
+    assert dock.capsule.text() == theme.STATE_LABELS["failed"]
 
 
 def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
-    """A switch replaces the rows: no editor of the old operation may stay behind."""
+    """A switch replaces the rows and wipes what belonged to the previous operation."""
 
     two = {
         "type": "object",
@@ -344,35 +406,230 @@ def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
     registry = FakeRegistry(_spec("first.op", schema=two), _spec("second.op", schema=one))
 
     dock = OperationDock(registry, FakeEngine())
-
     assert _fields(dock.form) == [dock.editors["alpha"][1], dock.editors["beta"][1]]
+    dock.result.setPlainText("{}")
+    dock._show_banner(INTERNAL_ERROR, "boom")
 
-    dock.operations.setCurrentRow(1)
+    dock.operations.setCurrentIndex(1)
 
     assert set(dock.editors) == {"gamma"}
     assert _fields(dock.form) == [dock.editors["gamma"][1]]
+    assert dock.result.toPlainText() == ""
+    assert dock.result_summary.text() == "尚未运行"
+    assert dock.feedback.isHidden()
+    assert dock.state == "idle"
 
-    dock.operations.setCurrentRow(0)
+    dock.operations.setCurrentIndex(0)
 
     assert _fields(dock.form) == [dock.editors["alpha"][1], dock.editors["beta"][1]]
 
 
-# --- running -----------------------------------------------------------------
+# --- the six states ----------------------------------------------------------
 
 
-def test_a_main_thread_operation_is_run_synchronously(qapp: Any) -> None:
+def test_the_idle_state_offers_a_run_and_nothing_to_cancel(qapp: Any) -> None:
+    dock = _dock(FakeEngine(), _spec(schema=FORM))
+
+    assert dock.capsule.text() == "就绪"
+    assert dock.run_button.isEnabled()
+    assert not dock.cancel_button.isEnabled()
+    assert not dock.copy_button.isEnabled()
+    assert dock.progress.isHidden()
+    assert dock.feedback.isHidden()
+    assert dock.result_summary.text() == "尚未运行"
+    # Every control says what it is, and the state says what it means.
+    for control in (dock.operations, dock.run_button, dock.cancel_button, dock.copy_button):
+        assert control.accessibleName().strip()
+        assert control.toolTip().strip()
+    assert "就绪" in dock.capsule.accessibleDescription()
+
+
+def test_a_running_background_call_locks_the_form_and_offers_cancel(qapp: Any) -> None:
+    engine = FakeEngine(
+        submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
+        get=_record(ExecutionStatus.RUNNING, ExecutionStrategy.BACKGROUND, progress=0),
+    )
+    dock = _dock(engine, _spec(strategy=ExecutionStrategy.BACKGROUND, schema=FORM))
+
+    dock.run()
+
+    assert dock.capsule.text() == "运行中"
+    assert not dock.operations.isEnabled()
+    assert not dock.editors["name"][1].isEnabled()
+    assert not dock.run_button.isEnabled()
+    assert dock.cancel_button.isEnabled()
+    assert not dock.progress.isHidden()
+    # No number yet, so the bar is indeterminate rather than frozen at zero.
+    assert (dock.progress.minimum(), dock.progress.maximum()) == (0, 0)
+    assert "运行中" in dock.result_summary.text()
+
+    dock.shutdown()
+
+
+def test_the_bar_becomes_real_progress_when_the_runner_reports_it(qapp: Any) -> None:
+    engine = FakeEngine(
+        submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
+        get=_record(ExecutionStatus.RUNNING, ExecutionStrategy.BACKGROUND, progress=40),
+    )
+    dock = _dock(engine, _spec(strategy=ExecutionStrategy.BACKGROUND))
+
+    dock.run()
+
+    assert _wait_until(lambda: dock.progress.maximum() == 100)
+    assert dock.progress.value() == 40
+    assert "40%" in dock.result_summary.text()
+
+    dock.shutdown()
+
+
+def test_a_successful_call_ends_ok_with_copyable_json(qapp: Any) -> None:
     engine = FakeEngine(run_sync=_record(result={"layer_count": 0}))
     dock = _dock(engine)
 
     dock.run()
 
-    assert engine.calls == [("run_sync", "demo.op", {})]
-    assert "SUCCEEDED" in dock.status.text()
-    assert dock.error.text() == ""
-    assert not dock.timer.isActive()
+    assert dock.capsule.text() == "完成"
+    assert dock.progress.isHidden()
+    assert dock.feedback.isHidden()
+    assert dock.copy_button.isEnabled()
+    assert dock.run_button.isEnabled()
+    assert dock.result_summary.text() == "完成 · 100% · 1.0 s"
     shown = json.loads(dock.result.toPlainText())
     assert shown["status"] == "SUCCEEDED"
     assert shown["result"] == {"layer_count": 0}
+
+
+def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> None:
+    engine = FakeEngine(
+        run_sync=_record(
+            ExecutionStatus.FAILED,
+            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="outside the allowed roots"),
+        )
+    )
+    dock = _dock(engine)
+
+    dock.run()
+
+    assert dock.capsule.text() == "失败"
+    assert not dock.feedback.isHidden()
+    assert dock.error_code.text() == PATH_NOT_ALLOWED
+    assert dock.error_message.text() == "outside the allowed roots"
+    assert "allowed_data_roots" in dock.error_hint.text()
+    assert PATH_NOT_ALLOWED in dock.feedback.accessibleDescription()
+    # The record itself is still there to copy.
+    assert json.loads(dock.result.toPlainText())["status"] == "FAILED"
+
+
+def test_a_cancelled_call_ends_cancelled(qapp: Any) -> None:
+    engine = FakeEngine(
+        submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
+        get=_record(ExecutionStatus.CANCELLED, ExecutionStrategy.BACKGROUND),
+    )
+    dock = _dock(engine, _spec(strategy=ExecutionStrategy.BACKGROUND))
+
+    dock.run()
+
+    assert _wait_until(lambda: dock.capsule.text() == "已取消")
+    assert dock.progress.isHidden()
+    assert dock.run_button.isEnabled()
+    assert not dock.cancel_button.isEnabled()
+
+
+def test_an_empty_registry_teaches_instead_of_showing_nothing(qapp: Any) -> None:
+    dock = OperationDock(FakeRegistry(), FakeEngine())
+
+    assert dock.capsule.text() == "无操作"
+    assert dock.operations.count() == 0
+    assert dock.operations.placeholderText() == "没有可用的操作"
+    assert not dock.operations.isEnabled()
+    assert not dock.empty_state.isHidden()
+    assert dock.empty_state.findChild(type(dock.summary), "emptyTitle").text() == "还没有注册的操作"
+    assert dock.result.isHidden()
+    assert dock.result_summary.isHidden()
+    assert not dock.run_button.isEnabled()
+    assert not dock.cancel_button.isEnabled()
+    assert not dock.copy_button.isEnabled()
+
+
+# --- the keyboard ------------------------------------------------------------
+
+
+def test_ctrl_return_runs_the_selected_operation(qapp: Any) -> None:
+    engine = FakeEngine(run_sync=_record())
+    dock = _dock(engine)
+
+    dock.show()
+    dock.activateWindow()
+    dock.run_button.setFocus()
+    QTest.qWait(30)
+
+    QTest.keyClick(dock, Qt.Key_Return, Qt.ControlModifier)
+
+    assert engine.calls == [("run_sync", "demo.op", {})]
+    dock.close()
+
+
+def test_the_tab_order_goes_selector_then_fields_then_run(qapp: Any) -> None:
+    dock = _dock(FakeEngine(), _spec(schema=FORM))
+
+    chain: list[Any] = []
+    widget = dock
+    for _ in range(200):
+        widget = widget.nextInFocusChain()
+        if widget is dock:
+            break
+        chain.append(widget)
+
+    steps = [chain.index(dock.operations)]
+    steps += [chain.index(editor) for _, editor in dock.editors.values()]
+    steps.append(chain.index(dock.run_button))
+    assert steps == sorted(steps)
+    assert len(set(steps)) == len(steps)
+
+
+# --- the theme ---------------------------------------------------------------
+
+
+def test_every_text_pair_clears_its_contrast_floor(qapp: Any) -> None:
+    """Light and dark both: body and secondary text 4.5:1, capsules 3:1."""
+
+    for factory in (_light_palette, _dark_palette):
+        look = theme.build(factory())
+        for name, (foreground, background, floor) in look.pairs().items():
+            ratio = theme.contrast(foreground, background)
+            assert ratio >= floor, f"{name}: {ratio:.2f} < {floor}"
+
+
+def test_the_dock_follows_the_application_palette(qapp: Any) -> None:
+    original = QApplication.palette()
+    try:
+        QApplication.setPalette(_light_palette())
+        light = OperationDock(FakeRegistry(_spec()), FakeEngine())
+        QApplication.setPalette(_dark_palette())
+        dark = OperationDock(FakeRegistry(_spec()), FakeEngine())
+    finally:
+        QApplication.setPalette(original)
+
+    assert light.look.surface.name() != dark.look.surface.name()
+    assert light.look.text.name() != dark.look.text.name()
+    assert light.look.capsule("ok") != dark.look.capsule("ok")
+    # Each dock painted itself with its own palette.
+    assert light.look.surface.name() in light.styleSheet()
+    assert dark.look.surface.name() in dark.styleSheet()
+
+
+def test_no_module_but_the_theme_names_a_colour(qapp: Any) -> None:
+    """The dock's colour comes from the palette: only ``theme.py`` may hold a literal."""
+
+    ui_dir = os.path.dirname(theme.__file__)
+    for name in sorted(os.listdir(ui_dir)):
+        if not name.endswith(".py") or name == "theme.py":
+            continue
+        with open(os.path.join(ui_dir, name), encoding="utf-8") as handle:
+            assert re.search(r"#[0-9a-fA-F]{3,8}", handle.read()) is None, name
+
+
+# --- running, polling and cancel ---------------------------------------------
 
 
 def test_a_background_operation_is_submitted_and_polled_until_it_ends(qapp: Any) -> None:
@@ -428,7 +685,8 @@ def test_a_submit_that_is_refused_at_once_is_not_polled(qapp: Any) -> None:
     dock.run()
 
     assert not dock.timer.isActive()
-    assert "no runner" in dock.error.text()
+    assert "no runner" in dock.error_message.text()
+    assert dock.error_code.text() == INTERNAL_ERROR
 
 
 def test_cancel_shows_the_receipt_then_the_cancelled_record(qapp: Any) -> None:
@@ -450,9 +708,19 @@ def test_cancel_shows_the_receipt_then_the_cancelled_record(qapp: Any) -> None:
     dock.cancel()
 
     assert engine.calls[-1] == ("cancel", "e1")
-    assert "accepted=True" in dock.status.text()
+    assert "accepted=True" in dock.result_summary.text()
     assert _wait_until(lambda: not dock.timer.isActive())
     assert json.loads(dock.result.toPlainText())["status"] == "CANCELLED"
+
+
+def test_copy_json_puts_the_record_on_the_clipboard(qapp: Any) -> None:
+    dock = _dock(FakeEngine(run_sync=_record(result={"layer_count": 0})))
+    dock.run()
+
+    dock.copy_button.click()
+
+    assert QApplication.clipboard().text() == dock.result.toPlainText()
+    assert dock.copy_button.text() == "已复制"
 
 
 # --- failures never reach the slot -------------------------------------------
@@ -464,10 +732,13 @@ def test_a_refused_call_is_shown_in_the_dock_not_raised(qapp: Any) -> None:
 
     dock.run()
 
-    assert "ENGINE_CLOSING" in dock.error.text()
-    assert "shutting down" in dock.error.text()
+    assert dock.capsule.text() == "失败"
+    assert dock.error_code.text() == ENGINE_CLOSING
+    assert "shutting down" in dock.error_message.text()
+    assert "重新启用" in dock.error_hint.text()
     assert dock.result.toPlainText() == ""
     assert dock.run_button.isEnabled()
+    assert not dock.copy_button.isEnabled()
 
 
 def test_an_unexpected_failure_is_shown_not_raised(qapp: Any) -> None:
@@ -476,8 +747,9 @@ def test_an_unexpected_failure_is_shown_not_raised(qapp: Any) -> None:
 
     dock.run()
 
-    assert "RuntimeError" in dock.error.text()
-    assert "boom" in dock.error.text()
+    assert dock.error_code.text() == INTERNAL_ERROR
+    assert "RuntimeError" in dock.error_message.text()
+    assert "boom" in dock.error_message.text()
     assert dock.run_button.isEnabled()
 
 
@@ -490,7 +762,7 @@ def test_a_failure_while_polling_ends_the_poll_and_is_shown(qapp: Any) -> None:
 
     dock.run()
 
-    assert _wait_until(lambda: "ENGINE_CLOSING" in dock.error.text())
+    assert _wait_until(lambda: dock.error_code.text() == ENGINE_CLOSING)
     assert not dock.timer.isActive()
 
 
@@ -596,9 +868,8 @@ def fake_qgis(qapp: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         QgsTask=_FakeTask,
     )
     qgis = types.ModuleType("qgis")
-    qgis.core = core
-    # Kept as it is: the dock is Qt-only, and that is the point of this half.
-    qgis.PyQt = sys.modules["qgis.PyQt"]
+    # The faked package's surface: the real Qt face and the faked core.
+    qgis.__dict__.update(core=core, PyQt=sys.modules["qgis.PyQt"])
     monkeypatch.setitem(sys.modules, "qgis", qgis)
     monkeypatch.setitem(sys.modules, "qgis.core", core)
     return types.SimpleNamespace(project=project, manager=manager)
