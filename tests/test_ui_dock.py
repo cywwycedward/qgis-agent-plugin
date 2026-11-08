@@ -36,7 +36,7 @@ for _fonts in (r"C:\Windows\Fonts", "/usr/share/fonts"):
 
 pytest.importorskip("qgis.PyQt.QtWidgets", reason="the operation dock needs Qt")
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtGui import QColor, QPalette
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import (
@@ -459,6 +459,43 @@ def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
     assert _fields(dock.form) == [dock.editors["alpha"][1], dock.editors["beta"][1]]
 
 
+def test_switching_to_a_smaller_form_shrinks_the_parameter_block(qapp: Any) -> None:
+    """The block is as tall as the current operation's rows, not the last one's.
+
+    The path matters: open on ``layer.add`` (five rows), let the dock lay out, then
+    switch to a two-row operation.  Picking the small operation before the first
+    layout hides the bug, because the first size hint is already the right one.
+    """
+
+    registry = OperationRegistry()
+    register_all(registry)
+    dock = OperationDock(registry, FakeEngine())
+    # Big enough for the five rows, so the first layout is not squeezed by the window.
+    dock.resize(420, 760)
+    dock.show()
+    QTest.qWait(80)
+
+    assert dock.operations.currentText() == "layer.add"
+    tall = dock.form_host.sizeHint().height()
+    assert dock.params.height() == tall, "the first layout fits the five rows"
+    assert dock.params.minimumHeight() == dock.params.maximumHeight(), "the block is fixed"
+    run_y = dock.run_button.mapTo(dock.widget(), QPoint(0, 0)).y()
+
+    row = [dock.operations.itemText(i) for i in range(dock.operations.count())].index(
+        "layer.sum_numeric_field"
+    )
+    dock.operations.setCurrentIndex(row)
+    QTest.qWait(80)
+
+    short = dock.form_host.sizeHint().height()
+    assert short < tall
+    assert dock.params.height() == short, "the block kept the previous operation's height"
+    assert dock.params.minimumHeight() == dock.params.maximumHeight()
+    assert dock.run_button.mapTo(dock.widget(), QPoint(0, 0)).y() < run_y
+
+    dock.close()
+
+
 # --- the six states ----------------------------------------------------------
 
 
@@ -609,6 +646,21 @@ def test_ctrl_return_runs_the_selected_operation(qapp: Any) -> None:
     QTest.keyClick(dock, Qt.Key_Return, Qt.ControlModifier)
 
     assert engine.calls == [("run_sync", "demo.op", {})]
+    dock.close()
+
+
+def test_a_run_hands_the_keyboard_back(qapp: Any) -> None:
+    """Disabling the form during a call must not leave focus parked on the record view."""
+
+    dock = _dock(FakeEngine(run_sync=_record()))
+    dock.show()
+    QTest.qWait(40)
+    assert QApplication.focusWidget() is dock.operations
+
+    dock.run()
+    QTest.qWait(40)
+
+    assert QApplication.focusWidget() is dock.operations
     dock.close()
 
 

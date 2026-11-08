@@ -235,16 +235,6 @@ class _SpecDelegate(QStyledItemDelegate):
         return size
 
 
-class _FormArea(QScrollArea):
-    """A scroll area that asks for its rows' height, and gives it back when space is short."""
-
-    def sizeHint(self) -> QSize:
-        inner = self.widget()
-        if inner is None:
-            return super().sizeHint()
-        return QSize(super().sizeHint().width(), min(inner.sizeHint().height(), _FORM_MAX))
-
-
 class _Combo(QComboBox):
     """A combo whose chevron is drawn here.
 
@@ -368,6 +358,9 @@ class OperationDock(QDockWidget):
         # The record being shown, and what the cancel receipt added to its line.
         self._record: ExecutionRecord | None = None
         self._note = ""
+        # Where the keyboard was when the run started: disabling the form would
+        # otherwise park it on the record view.
+        self._focus: Any = None
         self.look = theme.build(QApplication.palette())
         self.timer = QTimer(self)
         self.timer.setInterval(POLL_MS)
@@ -423,15 +416,12 @@ class OperationDock(QDockWidget):
         self.form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.form.setRowWrapPolicy(QFormLayout.DontWrapRows)
         self.form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.params = _FormArea()
+        self.params = QScrollArea()
         self.params.setObjectName("params")
         self.params.setWidget(self.form_host)
         self.params.setWidgetResizable(True)
         self.params.setFrameShape(QFrame.NoFrame)
         self.params.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # Rows decide the height; below that it scrolls rather than squeezing the record.
-        self.params.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        self.params.setMinimumHeight(24)
         # An operation with no parameters hides the block, margins and all.
         self.params.setVisible(False)
 
@@ -622,6 +612,7 @@ class OperationDock(QDockWidget):
         self.editors = {}
         if spec is None:
             self.params.setVisible(False)
+            self.params.setFixedHeight(0)
             self.space_before.changeSize(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
             return
         properties = spec.input_schema.get("properties") or {}
@@ -633,12 +624,24 @@ class OperationDock(QDockWidget):
             editor.setAccessibleName(title)
             editor.setToolTip(_field_tooltip(title, name, schema))
             self.editors[name] = (kind, editor)
-            self.form.addRow(_field_label(title, name in required, self.look), editor)
+            label = _field_label(title, name in required, self.look)
+            self.form.addRow(label, editor)
+            # A widget added to the layout of an already-visible window stays hidden
+            # until the next event turn, and a hidden row contributes nothing to the
+            # form's height: the block would be sized for no rows at all.
+            label.show()
+            editor.show()
         # Nothing to fill means no block at all: a one-line "takes no parameters"
         # row under a 16 px gap read as an unfinished section, not as an answer.
         self.params.setVisible(bool(properties))
         self.space_before.changeSize(
             0, 16 if properties else 0, QSizePolicy.Minimum, QSizePolicy.Fixed
+        )
+        # The block is exactly as tall as its rows.  Anything less and a layout pass
+        # that is short of space -- a progress bar and a summary line appearing at
+        # once -- takes the difference out of the form the operator is reading.
+        self.params.setFixedHeight(
+            min(self.form_host.sizeHint().height(), _FORM_MAX) if properties else 0
         )
         self._apply_tab_order()
 
@@ -667,6 +670,7 @@ class OperationDock(QDockWidget):
         self.result.clear()
         self._render_summary()
         self._hide_banner()
+        self._focus = QApplication.focusWidget()
         self._apply_state("running")
         self._show_progress(0)
         if spec.strategy is ExecutionStrategy.MAIN_THREAD:
@@ -866,7 +870,7 @@ class OperationDock(QDockWidget):
     def _apply_state(self, state: str) -> None:
         """Say the state in the capsule, in colour, and let the controls agree."""
 
-        self.state = state
+        previous, self.state = self.state, state
         label = theme.STATE_LABELS[state]
         foreground, background = self.look.capsule(state)
         self.capsule.setText(label)
@@ -880,6 +884,18 @@ class OperationDock(QDockWidget):
         for _, editor in self.editors.values():
             editor.setEnabled(state != "running")
         self._refresh_buttons()
+        if previous == "running" and state != "running":
+            self._restore_focus()
+
+    def _restore_focus(self) -> None:
+        """Put the keyboard back where the run took it from."""
+
+        widget, self._focus = self._focus, None
+        try:
+            if widget is not None and widget.isVisible() and widget.isEnabled():
+                widget.setFocus()
+        except RuntimeError:  # the widget went away with the operation that owned it
+            self._focus = None
 
     def _show_progress(self, progress: float) -> None:
         """A live call: indeterminate until the runner reports a real number."""
