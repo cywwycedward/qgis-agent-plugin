@@ -13,6 +13,7 @@ QGIS Agent 插件本体。构建/部署/测试入口见 `package.json`。
 | `src/qgis_agent_plugin/__init__.py` | 入口：QGIS 按名字在包上找的 `classFactory`（它只在被调用时才 import `plugin`） |
 | `src/qgis_agent_plugin/plugin.py` | 会话：`initGui`/`unload`（PRD 9.3 六步）、`Supervisor`（卸载后仍活着的任务的托管），以及坞窗的建/挂/卸 |
 | `src/qgis_agent_plugin/ui/dock.py` | 手工测试坞窗：列出 `OperationSpec`、按 `input_schema` 生成表单、`run_sync` 或 `submit`+轮询、把 `ExecutionRecord` 显示成 JSON（用户新增的测试工具，不在 PRD 里）。`OperationDock` 是 `QDockWidget` 子类——`iface.addDockWidget`/`QMainWindow.addDockWidget` 只接受这个类型 |
+| `src/qgis_agent_plugin/ui/theme.py` | 坞窗的唯一配色来源：从 `QApplication.palette()` 角色算出文字/边框/强调/语义色，生成 QSS，并提供对比度自检（浅色与深色主题都成立）。不写任何十六进制颜色 |
 | `src/qgis_agent_plugin/metadata.txt` | 插件元数据（QGIS 插件管理器读的那个） |
 
 放置规则：
