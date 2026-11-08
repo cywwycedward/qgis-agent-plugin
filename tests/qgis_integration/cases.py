@@ -254,10 +254,17 @@ def style_categories_attribute(qml: str) -> set[str]:
     return set((xml_root(qml).get("styleCategories") or "").split("|"))
 
 
-def qml_files() -> list[str]:
-    """Every ``.qml`` file under the run's own working directory (a run writes none)."""
+def qml_files(*roots: Path) -> list[str]:
+    """Every ``.qml`` file under the given roots (the working directory by default).
 
-    return sorted(str(path) for path in Path.cwd().rglob("*.qml"))
+    ``layer.get_qml`` has no file path at all, so a run must leave every scanned root
+    untouched; the run's own directory and the fixture root are both scanned (S04).
+    """
+
+    found: list[str] = []
+    for root in roots or (Path.cwd(),):
+        found.extend(str(path) for path in Path(root).rglob("*.qml"))
+    return sorted(found)
 
 
 def message_of(record: ExecutionRecord) -> str:
@@ -2220,9 +2227,136 @@ RASTER_RENDERER_TYPES = [
     "singlecolor",
 ]
 
+# The acceptance registers its own Processing provider: it is the only way to reach the
+# third-party paths PRD 10.1 asks for, because no algorithm QGIS ships here refuses
+# canExecute() or returns a value with no JSON image (measured: 440/440 answer true).
+# A provider added through ``QgsProcessingRegistry.addProvider`` is a third-party
+# provider in the only sense this plugin can see, and its algorithms go through the
+# ordinary path (discovery, createAlgorithmById, canExecute, checkParameterValues, run).
+PROBE_PROVIDER = "p5probe"
+PROBE_ALGORITHMS = (
+    f"{PROBE_PROVIDER}:cant_execute",
+    f"{PROBE_PROVIDER}:non_json",
+    f"{PROBE_PROVIDER}:runs",
+)
+# What the registered probe algorithms were asked to do, so a case can show the plugin
+# stopped at canExecute() rather than running the algorithm, and that P15's transfer
+# really happened before the result was refused.
+PROBE_CALLS: list[str] = []
+# The native registry takes ownership of a provider; the Python wrapper stays alive here
+# for the same reason ``_REGISTERED_RENDERER_METADATA`` does.
+_registered_provider: list[Any] = []
+
+
+def processing_probe_provider() -> None:
+    """Register the acceptance's own provider once, and refuse to run without it.
+
+    The classes live inside this function because this module may not import QGIS at
+    module level (the repository's import rule), and ``Skip`` is raised only when the
+    registry itself refuses the provider (``addProvider()`` returning false), which is
+    the one condition that would leave the third-party paths unmeasurable.
+    """
+
+    if _registered_provider:
+        return
+    from qgis.core import (
+        QgsApplication,
+        QgsProcessingAlgorithm,
+        QgsProcessingOutputNumber,
+        QgsProcessingOutputVectorLayer,
+        QgsProcessingProvider,
+        QgsVectorLayer,
+    )
+
+    class CannotExecute(QgsProcessingAlgorithm):
+        """A third-party algorithm that answers ``canExecute()`` false (P11)."""
+
+        def name(self) -> str:
+            return "cant_execute"
+
+        def displayName(self) -> str:
+            return "P5 probe: cannot execute"
+
+        def createInstance(self):  # noqa: N802 - the native spelling
+            return CannotExecute()
+
+        def initAlgorithm(self, config=None):  # noqa: N802 - the native spelling
+            pass
+
+        def canExecute(self):  # noqa: N802 - the native spelling
+            PROBE_CALLS.append(f"{PROBE_PROVIDER}:cant_execute.canExecute")
+            # 3.44 binds this as (bool, message); the plugin has to read the tuple.
+            return False, "the p5 acceptance probe is unavailable on this machine"
+
+        def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+            PROBE_CALLS.append(f"{PROBE_PROVIDER}:cant_execute.processAlgorithm")
+            raise AssertionError("an algorithm whose canExecute() is false must never run")
+
+    class NonJsonResult(QgsProcessingAlgorithm):
+        """Hands over a real result layer, then a value with no JSON image (P15)."""
+
+        def name(self) -> str:
+            return "non_json"
+
+        def displayName(self) -> str:
+            return "P5 probe: non-JSON result"
+
+        def createInstance(self):  # noqa: N802 - the native spelling
+            return NonJsonResult()
+
+        def initAlgorithm(self, config=None):  # noqa: N802 - the native spelling
+            self.addOutput(QgsProcessingOutputVectorLayer("LAYER", "the layer it hands over"))
+
+        def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+            PROBE_CALLS.append(f"{PROBE_PROVIDER}:non_json.processAlgorithm")
+            layer = QgsVectorLayer("Point?field=p5:string", "p5 probe result", "memory")
+            context.temporaryLayerStore().addMapLayer(layer)
+            # ``LAYER`` first, so the plugin really transfers it, then a value that has
+            # no lossless JSON image: the refusal must undo that transfer again.
+            return {"LAYER": layer.id(), "OBJECT": object()}
+
+    class Runs(QgsProcessingAlgorithm):
+        """A third-party algorithm that really runs and returns JSON (P02)."""
+
+        def name(self) -> str:
+            return "runs"
+
+        def displayName(self) -> str:
+            return "P5 probe: runs"
+
+        def createInstance(self):  # noqa: N802 - the native spelling
+            return Runs()
+
+        def initAlgorithm(self, config=None):  # noqa: N802 - the native spelling
+            self.addOutput(QgsProcessingOutputNumber("VALUE", "a number"))
+
+        def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+            PROBE_CALLS.append(f"{PROBE_PROVIDER}:runs.processAlgorithm")
+            return {"VALUE": 42}
+
+    class AcceptanceProvider(QgsProcessingProvider):
+        def id(self) -> str:
+            return PROBE_PROVIDER
+
+        def name(self) -> str:
+            return "P5 acceptance probes"
+
+        def loadAlgorithms(self) -> None:  # noqa: N802 - the native spelling
+            for algorithm in (CannotExecute(), NonJsonResult(), Runs()):
+                self.addAlgorithm(algorithm)
+
+    provider = AcceptanceProvider()
+    if not QgsApplication.processingRegistry().addProvider(provider):
+        raise Skip(
+            "the processing registry refused the acceptance's own provider (addProvider() "
+            "returned false), so the third-party paths of P01/P02/P11/P15 cannot be measured here"
+        )
+    _registered_provider.append(provider)
+
 
 def p01_list_algorithms(ctx: Context) -> str:
     require_processing()
+    processing_probe_provider()
     native = {algorithm.id(): algorithm for algorithm in processing_algorithms()}
 
     record = ctx.run("processing.list_algorithms", {})
@@ -2237,16 +2371,24 @@ def p01_list_algorithms(ctx: Context) -> str:
     sample = summaries[0]
     equal(sample["name"], native[sample["id"]].displayName(), "a display name from the registry")
     equal(sample["group"], native[sample["id"]].group(), "a group from the registry")
+    for algorithm_id in PROBE_ALGORITHMS:
+        require(
+            algorithm_id in ids,
+            f"the third-party algorithm {algorithm_id} is missing from the list",
+        )
     prefixes = {algorithm_id.split(":")[0] for algorithm_id in ids}
     require(len(prefixes) > 1, f"only one provider prefix in the list: {sorted(prefixes)}")
     return (
-        f"{len(ids)} algorithms in id order, exactly the live registry's, over {len(prefixes)} "
-        f"provider prefixes ({', '.join(sorted(prefixes))}), three fields each"
+        f"{len(ids)} algorithms in id order, exactly the live registry's "
+        f"({len(ids) - len(PROBE_ALGORITHMS)} from QGIS's own providers plus the "
+        f"{len(PROBE_ALGORITHMS)} this run registered), over {len(prefixes)} provider prefixes "
+        f"({', '.join(sorted(prefixes))}), three fields each"
     )
 
 
 def p02_no_algorithm_allow_list(ctx: Context) -> str:
     require_processing()
+    processing_probe_provider()
     algorithms = processing_algorithms()
 
     refused = []
@@ -2257,29 +2399,43 @@ def p02_no_algorithm_allow_list(ctx: Context) -> str:
             refused.append(f"{algorithm.id()}: {code}")
     require(not refused, f"the definition of {len(refused)} algorithms was refused: {refused[:3]}")
 
-    other = next((item for item in algorithms if item.id() == "3d:tessellate"), None)
-    if other is None:
-        raise Skip(
-            "no algorithm of a provider other than 'native' can be run from a project layer on "
-            "this machine (3d:tessellate is absent), so the runnable half of P02 has no example "
-            f"here; the discovery half was covered for all {len(algorithms)} algorithms"
+    # A provider this run registered is the third-party example PRD 10.1 asks for.
+    third_party = run_algorithm(ctx, f"{PROBE_PROVIDER}:runs", {})
+    equal(
+        third_party.status,
+        ExecutionStatus.SUCCEEDED,
+        f"{PROBE_PROVIDER}:runs failed: {third_party.error}",
+    )
+    equal(outputs_of(third_party), {"VALUE": 42}, "the third-party run's outputs")
+
+    # A provider QGIS ships itself but that is not 'native', when this machine has one.
+    extra = "no QGIS-shipped non-native provider with a runnable algorithm is installed here"
+    shipped = next((item for item in algorithms if item.id() == "3d:tessellate"), None)
+    if shipped is not None:
+        layer_id = cities_layer(ctx, "p02 cities")
+        record = run_algorithm(ctx, shipped.id(), {"INPUT": layer_id, "OUTPUT": "memory:"})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{shipped.id()} failed: {record.error}")
+        equal(shipped.provider().id(), "3d", "the provider of the algorithm that ran")
+        layer = output_layer(ctx, record, "OUTPUT")
+        require(layer.isValid(), "the result of a non-native provider is not a valid layer")
+        extra = (
+            f"provider '3d' also ran {shipped.id()} from a project layer into memory "
+            f"({layer.featureCount()} features in the project)"
         )
-    layer_id = cities_layer(ctx, "p02 cities")
-    record = run_algorithm(ctx, other.id(), {"INPUT": layer_id, "OUTPUT": "memory:"})
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"{other.id()} failed: {record.error}")
-    equal(other.provider().id(), "3d", "the provider of the algorithm that ran")
-    layer = output_layer(ctx, record, "OUTPUT")
-    require(layer.isValid(), "the result of a non-native provider is not a valid layer")
     return (
         f"all {len(algorithms)} registered algorithms answered get_algorithm_info, so discovery "
-        f"filters nothing; provider '3d' really ran {other.id()} from a project layer into memory "
-        f"({layer.featureCount()} features in the project)"
+        f"filters nothing; the provider this run registered ran {PROBE_PROVIDER}:runs for real "
+        f"(VALUE=42); {extra}"
     )
 
 
 def p03_algorithm_info_fields(ctx: Context) -> str:
     require_processing()
-    from qgis.core import QgsApplication, QgsProcessingParameterDefinition
+    from qgis.core import (
+        QgsApplication,
+        QgsProcessingParameterDefinition,
+        QgsProcessingParameterEnum,
+    )
 
     registry = QgsApplication.processingRegistry()
     nine_fields = [
@@ -2335,7 +2491,7 @@ def p03_algorithm_info_fields(ctx: Context) -> str:
                 list(definition.dependsOnOtherParameters()),
                 f"{name}: depends_on",
             )
-            if hasattr(definition, "options"):
+            if isinstance(definition, QgsProcessingParameterEnum):
                 equal(parameter["options"], list(definition.options()), f"{name}: option order")
             else:
                 equal(parameter["options"], None, f"{name}: options on a non-enum parameter")
@@ -2615,26 +2771,46 @@ def p10_json_values(ctx: Context) -> str:
 
 def p11_cannot_execute(ctx: Context) -> str:
     require_processing()
+    processing_probe_provider()
     algorithms = processing_algorithms()
+    shipped = [item for item in algorithms if item.id() not in PROBE_ALGORITHMS]
     refusing = []
-    for algorithm in algorithms:
+    for algorithm in shipped:
         outcome = algorithm.canExecute()
         executable = bool(outcome[0]) if isinstance(outcome, tuple) else bool(outcome)
         if not executable:
             refusing.append(algorithm.id())
-    if refusing:
-        record = run_algorithm(ctx, refusing[0], {})
-        equal(record.status, ExecutionStatus.FAILED, f"{refusing[0]} cannot execute")
-        equal(error_code(record), INVALID_INPUT, "the code for an algorithm that cannot execute")
-        return (
-            f"{len(refusing)} of {len(algorithms)} algorithms report canExecute() False; "
-            f"{refusing[0]} was refused as FAILED(INVALID_INPUT)"
-        )
-    raise Skip(
-        f"none of the {len(algorithms)} registered algorithms reports canExecute() False on this "
-        "machine, so no real algorithm can reach the FAILED(INVALID_INPUT) branch of P11: "
-        "未验收/依据缺失 (charter 7/E1 measured the (bool, message) binding here); the branch is "
-        "covered only by the fake in tests/test_operations_processing.py"
+
+    # The probe the run registered answers canExecute() with a false first element, so the
+    # plugin's own refusal branch is reachable without a fake (PRD 10.1 P11, charter 7/E1).
+    target = f"{PROBE_PROVIDER}:cant_execute"
+    require(
+        any(algorithm.id() == target for algorithm in algorithms),
+        f"the registered probe {target} is missing from the live registry",
+    )
+    PROBE_CALLS.clear()
+    record = run_algorithm(ctx, target, {})
+    equal(record.status, ExecutionStatus.FAILED, f"{target} cannot execute")
+    equal(error_code(record), INVALID_INPUT, "the code for an algorithm that cannot execute")
+    require(record.result is None, "a refused run carries a result")
+    message = message_of(record)
+    require(
+        "cannot execute" in message,
+        f"the refusal did not come from the canExecute() check: {message!r}",
+    )
+    require(
+        f"{target}.canExecute" in PROBE_CALLS,
+        f"the plugin never asked the probe whether it can execute: {PROBE_CALLS}",
+    )
+    require(
+        f"{target}.processAlgorithm" not in PROBE_CALLS,
+        f"the algorithm ran although canExecute() answered false: {PROBE_CALLS}",
+    )
+    return (
+        f"the {len(shipped)} algorithms QGIS ships all answer canExecute() true (measured, so "
+        f"none can reach the refusal branch), while {target} — registered by this run through "
+        f"QgsProcessingRegistry.addProvider — is FAILED(INVALID_INPUT) with no result: the plugin "
+        f"asked canExecute() and never called the algorithm"
     )
 
 
@@ -2735,14 +2911,59 @@ def p14_output_ownership(ctx: Context) -> str:
 
 def p15_non_json_output(ctx: Context) -> str:
     require_processing()
-    algorithms = processing_algorithms()
-    raise Skip(
-        f"no algorithm among the {len(algorithms)} registered here returns a value with no "
-        "lossless JSON image: every native output is a string, a number or a result layer the run "
-        "hands over by id (P06/P09/P14), so the INTERNAL_ERROR branch of the result normaliser "
-        "cannot be reached without a third-party provider returning QGIS objects, and none is "
-        "installed: 未验收/依据缺失, covered only by the fake in "
-        "tests/test_operations_processing.py"
+    processing_probe_provider()
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    added: list[str] = []
+    removed: list[str] = []
+
+    # The result layer the probe hands over first must be taken into the project and then
+    # removed again: PRD 3.2.3 undoes only what this run added.
+    def note_added(layer: Any) -> None:
+        added.append(layer.id())
+
+    def note_removed(layer_id: str) -> None:
+        removed.append(layer_id)
+
+    before = project_layer_ids()
+    project.layerWasAdded.connect(note_added)
+    project.layerRemoved.connect(note_removed)
+    try:
+        record = run_algorithm(ctx, f"{PROBE_PROVIDER}:non_json", {})
+    finally:
+        project.layerWasAdded.disconnect(note_added)
+        project.layerRemoved.disconnect(note_removed)
+
+    equal(record.status, ExecutionStatus.FAILED, "a result with no lossless JSON image")
+    equal(error_code(record), INTERNAL_ERROR, "the code for a result with no JSON image")
+    require(record.result is None, "a failed run carries a result")
+    require(
+        f"{PROBE_PROVIDER}:non_json.processAlgorithm" in PROBE_CALLS,
+        f"the plugin refused the run without calling the algorithm: {PROBE_CALLS}",
+    )
+
+    message = message_of(record)
+    leaks = ("0x", "object at", "<object", "QgsVectorLayer", "\\")
+    leaked = [leak for leak in leaks if leak in message]
+    require(
+        not leaked,
+        f"the failure message describes the object or a path ({leaked}): {message!r}",
+    )
+
+    equal(len(added), 1, f"the result layer the probe handed over was added {len(added)} times")
+    equal(removed, added, "the layers the failed run removed, against the ones it added")
+    for layer_id in added:
+        require(
+            layer_id not in project_layers(),
+            f"the layer {layer_id!r} of the failed run stayed in the project",
+        )
+    equal(project_layer_ids(), before, "the project's layers after the failed run")
+    return (
+        f"{PROBE_PROVIDER}:non_json handed over a real result layer and then an object; the run "
+        f"is FAILED(INTERNAL_ERROR) with no result, the message names neither the object nor a "
+        f"path ({message!r}), and the layer this run added ({added[0][:8]}…) was removed again, "
+        f"so the project is back to its {len(before)} layers"
     )
 
 
@@ -2864,7 +3085,8 @@ def s03_invalid_categories(ctx: Context) -> str:
 
 def s04_symbology_only(ctx: Context) -> str:
     layer_id = sub_layer(ctx, "s04 polygon", fixtures.PARCELS_LAYER)
-    files_before = qml_files()
+    scanned = (Path.cwd(), ctx.fixtures.root.parent)
+    files_before = qml_files(*scanned)
 
     record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": ["Symbology"]})
     equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.get_qml failed: {record.error}")
@@ -2875,7 +3097,7 @@ def s04_symbology_only(ctx: Context) -> str:
     equal(root.tag, "qgis", "the QML root element")
     equal(root.get("styleCategories"), "Symbology", "the categories the root declares")
     require("renderer-v2" in qml, "the exported XML carries no renderer")
-    equal(qml_files(), files_before, "the .qml files this export created")
+    equal(qml_files(*scanned), files_before, "the .qml files this export created")
     return (
         f"a Symbology-only export is valid XML ({len(qml)} bytes) whose qgis root declares "
         'styleCategories="Symbology" and carries a renderer-v2 node, and the run created no '

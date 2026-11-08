@@ -114,7 +114,9 @@ def start_processing() -> None:
     if source:
         plugins = Path(source).resolve().parents[1] / "plugins"
         if str(plugins) not in sys.path:
-            sys.path.insert(0, str(plugins))
+            # Appended, not inserted: the repository's own ``src`` keeps its place at
+            # the front of the search path (run_acceptance.py puts it there).
+            sys.path.append(str(plugins))
     try:
         from processing.core.Processing import Processing
 
