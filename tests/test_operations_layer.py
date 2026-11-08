@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import types
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,47 @@ class FakeSymbol:
 
 # The fake's ``QVariant.Type`` values; the real ones are Bool 1, String 10, Date 14.
 VARIANT_STRING = 10
+
+
+class FakeQVariant:
+    """A value and the one conversion the setter asks of it.
+
+    ``convert`` mirrors the 3.44.13 measurements: a date target takes an ISO date
+    string and refuses everything else, a boolean target takes every string but
+    ``'false'``/``'0'``/``''`` (``'yes'``, ``'1'`` and ``'nope'`` all become True),
+    and a string target takes any value as its text.
+    """
+
+    Bool = 1
+    String = VARIANT_STRING
+    Date = 14
+
+    def __init__(self, value: Any) -> None:
+        self.converted: Any = value
+
+    def convert(self, target_type: int) -> bool:
+        value = self.converted
+        if target_type == FakeQVariant.Date:
+            try:
+                self.converted = date.fromisoformat(value) if isinstance(value, str) else None
+            except ValueError:
+                self.converted = None
+            return self.converted is not None
+        if target_type == FakeQVariant.Bool:
+            if isinstance(value, str):
+                self.converted = value.strip().lower() not in {"", "0", "false"}
+                return True
+            if isinstance(value, (bool, int, float)):
+                self.converted = bool(value)
+                return True
+        elif target_type == FakeQVariant.String:
+            self.converted = value if isinstance(value, str) else str(value)
+            return True
+        self.converted = None
+        return False
+
+    def value(self) -> Any:
+        return self.converted
 
 
 class FakeField:
@@ -382,7 +424,7 @@ class FakeQgis:
             GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2),
             DataType=types.SimpleNamespace(Byte=1, Float32=6),
         )
-        QVariant = types.SimpleNamespace(Bool=1, String=10, Date=14)
+        QVariant = FakeQVariant
 
         class FakeRasterProvider:
             def __init__(self) -> None:
@@ -433,17 +475,23 @@ class FakeQgis:
         class QgsMarkerSymbol:
             @staticmethod
             def createSimple(properties: dict[str, Any]) -> FakeSymbol:
-                return FakeSymbol("marker", properties)
+                symbol = FakeSymbol("marker", properties)
+                record("markerSymbol", symbol)
+                return symbol
 
         class QgsLineSymbol:
             @staticmethod
             def createSimple(properties: dict[str, Any]) -> FakeSymbol:
-                return FakeSymbol("line", properties)
+                symbol = FakeSymbol("line", properties)
+                record("lineSymbol", symbol)
+                return symbol
 
         class QgsFillSymbol:
             @staticmethod
             def createSimple(properties: dict[str, Any]) -> FakeSymbol:
-                return FakeSymbol("fill", properties)
+                symbol = FakeSymbol("fill", properties)
+                record("fillSymbol", symbol)
+                return symbol
 
         class QgsNullSymbolRenderer(FakeBuiltRenderer):
             renderer_type = "nullSymbol"
@@ -463,6 +511,7 @@ class FakeQgis:
                 self.value = value
                 self.symbol = symbol
                 self.label = label
+                record("category", self)
 
         class QgsCategorizedSymbolRenderer(FakeBuiltRenderer):
             renderer_type = "categorizedSymbol"
@@ -1628,7 +1677,12 @@ def test_a_single_symbol_renderer_takes_the_declared_properties(
         "outline_width": 0.5,
     }
     assert result.renderer_type == "singleSymbol"
-    assert layer.events == ["construct:singleSymbol", "setRenderer", "repaint"]
+    assert layer.events == [
+        "construct:fillSymbol",
+        "construct:singleSymbol",
+        "setRenderer",
+        "repaint",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1759,7 +1813,14 @@ def test_a_flat_rule_renderer_builds_its_rules_in_order(
     assert all(child.active is True for child in children)
     assert [child.symbol.kind for child in children] == ["line", "line", "line"]
     assert result.renderer_type == "RuleRenderer"
-    assert layer.events == ["construct:RuleRenderer", "setRenderer", "repaint"]
+    assert layer.events == [
+        "construct:lineSymbol",
+        "construct:lineSymbol",
+        "construct:lineSymbol",
+        "construct:RuleRenderer",
+        "setRenderer",
+        "repaint",
+    ]
 
 
 def test_a_single_band_gray_renderer_carries_its_stretch(
@@ -2151,6 +2212,77 @@ def test_a_boolean_category_is_accepted_on_a_boolean_field(
     )
     assert layer.renderer_sets[0].categories[0].value is True
     assert result.renderer_type == "categorizedSymbol"
+
+
+@pytest.mark.parametrize("value", ["true", "True", "yes", "1"], ids=repr)
+def test_a_string_a_boolean_field_converts_is_written_as_that_boolean(
+    fake_qgis: FakeQgis, data_root: Path, value: str
+) -> None:
+    """The converted value is what the renderer stores, so a feature can match it."""
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "flags", geometry=POLYGON)
+    layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
+
+    set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "flags",
+            {
+                "type": "categorizedSymbol",
+                "field": "active",
+                "categories": [{"value": value, "label": "On", "symbol": FILL}],
+            },
+        ),
+    )
+    assert layer.renderer_sets[0].categories[0].value is True
+
+
+def test_a_boolean_and_its_string_form_are_one_category(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """Two spellings of the same value dedupe on the converted value, not the raw one."""
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "flags", geometry=POLYGON)
+    layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "flags",
+            {
+                "type": "categorizedSymbol",
+                "field": "active",
+                "categories": [
+                    {"value": True, "label": "On", "symbol": FILL},
+                    {"value": "true", "label": "Also on", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_a_date_field_takes_a_date_string_and_refuses_a_non_date(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A date category has to convert to a date, or it can never match a feature."""
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "events", geometry=POLYGON)
+    layer.field_list = [FakeField("recorded", numeric=False, field_type=fake_qgis.QVariant.Date)]
+    ctx = make_context(project, data_root)
+    payload = {
+        "type": "categorizedSymbol",
+        "field": "recorded",
+        "categories": [{"value": "2024-01-01", "label": "First", "symbol": FILL}],
+    }
+
+    set_renderer(ctx, setter_payload("events", payload))
+    assert layer.renderer_sets[0].categories[0].value == date(2024, 1, 1)
+
+    payload["categories"] = [{"value": "nope", "label": "Broken", "symbol": FILL}]
+    assert refuse_renderer(ctx, setter_payload("events", payload)) == INVALID_INPUT
+    assert len(layer.renderer_sets) == 1
 
 
 def test_a_missing_graduated_field_is_invalid_field_type(

@@ -22,6 +22,14 @@ always means "not provided": it is handed on for the native check to judge, so a
 absent or null destination ends as ``INVALID_INPUT`` from QGIS instead of a path
 verdict this module has no basis for.
 
+A database target that arrives in ordinary ``string`` parameters -- a host, a user,
+a schema, a table name -- is not judged at all, and that is an accepted boundary,
+not an oversight: the trust boundary of this plugin is the in-process, trusted
+provider, and a value that names no local file gives the path policy nothing to
+measure (PRD §8.3.4, §12).  A value that names network I/O or a virtual file system
+is different, because QGIS resolves it itself: every provided string of that kind is
+refused whatever its parameter type is, before the algorithm is called (PRD §8.3.2).
+
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
 """
@@ -263,10 +271,13 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
     """The value to hand QGIS for one declared parameter.
 
     ``None`` is "not provided" for every family, so the native check decides whether
-    it is acceptable; every provided value is judged here.  Destinations, file
-    inputs, layer references and the types that hide layer references get a boundary
-    rule; anything else is passed through as it arrived, because the plugin does not
-    re-implement a second parameter schema (PRD §3.2.2).
+    it is acceptable; every provided value is judged here.  A provided string that
+    names network I/O or a virtual file system is refused whatever the parameter's
+    type is, because QGIS resolves such a value itself; destinations, file inputs,
+    layer references and the types that hide layer references then get a boundary
+    rule of their own, while anything else is passed through as it arrived, because
+    the plugin does not re-implement a second parameter schema (PRD §3.2.2, §8.3.2,
+    §12).
     """
 
     if value is None:
@@ -276,6 +287,11 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
         if isinstance(value, str) and value.startswith(_MEMORY_OUTPUT):
             return value
         raise FrameworkError(PATH_NOT_ALLOWED, "only a memory output target is allowed")
+    if isinstance(value, str) and is_remote_uri(value):
+        # No type is exempt: a URL, a UNC path or a ``/vsi`` path is network I/O the
+        # path policy only allows after its roots said yes, and QGIS would resolve it
+        # before the policy ever saw it (PRD §8.3.2).
+        raise FrameworkError(PATH_NOT_ALLOWED, "a remote value is not an allowed input")
 
     kind = definition.type()
     if kind in _CONNECTION_PARAMETERS:
@@ -459,6 +475,17 @@ class ProcessingRunAlgorithm(
     ) -> ProcessingRunAlgorithmResult:
         from qgis.core import QgsApplication, QgsProcessingContext, QgsProcessingFeedback
 
+        class ErrorCollectingFeedback(QgsProcessingFeedback):
+            """A run reports a failure through the feedback, not through ``ok`` alone."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.errors: list[str] = []
+
+            def reportError(self, message: str, fatalError: bool = False) -> None:
+                self.errors.append(message)
+                super().reportError(message, fatalError)
+
         registry = QgsApplication.processingRegistry()
         if registry.algorithmById(request.algorithm_id) is None:
             raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
@@ -491,7 +518,7 @@ class ProcessingRunAlgorithm(
         # Layer ids are resolved against the project the engine holds, never the
         # process-wide singleton (PRD §1.3, §3.2.3 step 5).
         context.setProject(ctx.project)
-        feedback = QgsProcessingFeedback()
+        feedback = ErrorCollectingFeedback()
 
         valid, message = algorithm.checkParameterValues(parameters, context)
         if not valid:
@@ -503,6 +530,15 @@ class ProcessingRunAlgorithm(
         results, completed = algorithm.run(parameters, context, feedback)
         if not completed:
             raise FrameworkError(INTERNAL_ERROR, "the algorithm did not complete")
+        if feedback.errors:
+            # The native text may quote a host or a path, so it only reaches the
+            # local log; a run that produced nothing after reporting an error is a
+            # failed run, whatever ``ok`` said (PRD §8.2, §3.2.3 step 7).
+            _LOGGER.warning("processing algorithm reported errors: %s", feedback.errors)
+            if not results:
+                raise FrameworkError(
+                    INTERNAL_ERROR, "the algorithm reported an error and returned no result"
+                )
         if not isinstance(results, dict):
             raise FrameworkError(INTERNAL_ERROR, "the algorithm returned no result mapping")
 

@@ -10,6 +10,7 @@ temporary store is visible from the test.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import subprocess
@@ -189,6 +190,7 @@ class FakeAlgorithm:
         results: Any = None,
         completed: bool = True,
         layers: tuple[Any, ...] = (),
+        errors: tuple[str, ...] = (),
     ) -> None:
         self.algorithm_id = algorithm_id
         self._name = name
@@ -201,6 +203,7 @@ class FakeAlgorithm:
         self._results = results
         self._completed = completed
         self._layers = layers
+        self._errors = errors
         self.calls: list[Any] = []
 
     def id(self) -> str:
@@ -233,6 +236,8 @@ class FakeAlgorithm:
 
     def run(self, parameters: Any, context: Any, feedback: Any) -> tuple[Any, bool]:
         self.calls.append(("run", parameters, context, feedback))
+        for text in self._errors:
+            feedback.reportError(text)
         for layer in self._layers:
             context.temporaryLayerStore().add(layer)
         return (self._results, self._completed)
@@ -254,6 +259,7 @@ class FakePrototype(FakeAlgorithm):
             results=self._results,
             completed=self._completed,
             layers=self._layers,
+            errors=self._errors,
         )
 
     def run(self, parameters: Any, context: Any, feedback: Any) -> tuple[Any, bool]:
@@ -316,6 +322,9 @@ class FakeQgis:
         class QgsProcessingFeedback:
             def __init__(self) -> None:
                 holder.feedback.append(self)
+
+            def reportError(self, message: str, fatalError: bool = False) -> None:
+                pass
 
         class QgsApplication:
             @staticmethod
@@ -397,6 +406,7 @@ def install(
     executable: bool = True,
     refusal: tuple[bool, str] | None = None,
     layers: tuple[Any, ...] = (),
+    errors: tuple[str, ...] = (),
 ) -> FakePrototype:
     prototype = FakePrototype(
         algorithm_id,
@@ -410,6 +420,7 @@ def install(
         results={} if results is None else results,
         completed=completed,
         layers=layers,
+        errors=errors,
     )
     fake.registry.prototypes[algorithm_id] = prototype
     return prototype
@@ -903,6 +914,29 @@ def test_a_remote_file_input_is_refused(fake_qgis: FakeQgis, data_root: Path, va
     assert code == PATH_NOT_ALLOWED
 
 
+@pytest.mark.parametrize(
+    ("type_", "value"),
+    [
+        ("customprobe", "/vsicurl/http://example.invalid/secret.csv"),
+        ("string", "https://example.invalid/data.csv"),
+        ("enum", "\\\\server\\share\\data.csv"),
+    ],
+    ids=["unknown-type", "string", "enum"],
+)
+def test_a_remote_value_is_refused_whatever_the_parameter_type(
+    fake_qgis: FakeQgis, data_root: Path, type_: str, value: str
+) -> None:
+    """No type is exempt: a remote value is refused before QGIS ever sees it."""
+    install(fake_qgis, FakeDefinition("SRC", type_), results={})
+    code = refuse(
+        ops.ProcessingRunAlgorithm(),
+        make_context(FakeProject(), data_root),
+        run_params({"SRC": value}),
+    )
+    assert code == PATH_NOT_ALLOWED
+    assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
+
+
 def test_a_layer_parameter_must_name_a_project_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     install(fake_qgis, FakeDefinition("INPUT", "source"), results={})
     code = refuse(
@@ -1089,6 +1123,36 @@ def test_a_run_without_a_result_mapping_is_an_internal_error(
         run_params({}),
     )
     assert code == INTERNAL_ERROR
+
+
+def test_a_run_that_reports_an_error_and_returns_nothing_is_an_internal_error(
+    fake_qgis: FakeQgis, data_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``ok=True`` is not success when the algorithm itself reported a failure."""
+    native = 'ERROR 1: PQconnectdb failed, connection to "127.0.0.1", port 1 refused'
+    install(fake_qgis, results={}, errors=(native,))
+    with (
+        caplog.at_level(logging.WARNING, logger="qgis_agent_plugin.operations.processing"),
+        pytest.raises(FrameworkError) as caught,
+    ):
+        ops.ProcessingRunAlgorithm().execute_main(
+            make_context(FakeProject(), data_root), run_params({})
+        )
+    assert caught.value.code == INTERNAL_ERROR
+    # The native text can quote a host or a path: it reaches the log, never the DTO.
+    assert "127.0.0.1" not in caught.value.message
+    assert native in caplog.text
+
+
+def test_a_run_that_reports_an_error_but_returns_a_result_stays_successful(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A run with real output is not overruled by text on the feedback."""
+    install(fake_qgis, results={"OUTPUT": "done"}, errors=("something it logged",))
+    result = ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({})
+    )
+    assert result.outputs == {"OUTPUT": "done"}
 
 
 def test_a_run_returns_every_scalar_and_structured_output(

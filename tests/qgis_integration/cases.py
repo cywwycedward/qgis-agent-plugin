@@ -3824,6 +3824,18 @@ def r03_pseudo_color(ctx: Context) -> str:
         "the ramp type for 'linear'",
     )
 
+    exact = set_renderer(
+        ctx,
+        layer_id,
+        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "exact", "stops": stops},
+    )
+    equal(exact.status, ExecutionStatus.SUCCEEDED, f"the exact ramp: {exact.error}")
+    equal(
+        project_layer(layer_id).renderer().shader().rasterShaderFunction().colorRampType(),
+        QgsColorRampShader.Exact,
+        "the ramp type for 'exact'",
+    )
+
     inverted = set_renderer(
         ctx,
         layer_id,
@@ -3839,7 +3851,8 @@ def r03_pseudo_color(ctx: Context) -> str:
     return (
         "singlebandpseudocolor installed band 2 with the two stops and colors in the native "
         "shader, "
-        "'discrete' maps to Discrete and 'linear' to Interpolated, and stops in decreasing order "
+        "'discrete' maps to Discrete, 'linear' to Interpolated and 'exact' to Exact, and stops in "
+        "decreasing order "
         "are FAILED(INVALID_INPUT) with the installed renderer unchanged"
     )
 
