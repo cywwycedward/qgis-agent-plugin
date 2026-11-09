@@ -2876,36 +2876,73 @@ def p12_input_path_policy(ctx: Context) -> str:
     )
 
 
-def p13_destination_refused(ctx: Context) -> str:
+def p13_destination_policy(ctx: Context) -> str:
     require_processing()
-    from qgis.core import QgsProcessing
+    from qgis.core import QgsProcessing, QgsVectorLayer
 
     layer_id = cities_layer(ctx, "p13 cities")
-    before = project_layer_ids()
     target = ctx.fixtures.root / "p13 output.gpkg"
-    destinations = {
-        "TEMPORARY_OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-        "a path inside the data root": str(target),
-        "an empty destination": "",
-    }
-    for label, destination in destinations.items():
-        record = run_algorithm(
-            ctx,
-            "native:buffer",
-            {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": destination},
-        )
-        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
-        equal(error_code(record), PATH_NOT_ALLOWED, f"{label}: code")
-        require(
-            str(target) not in message_of(record),
-            f"{label}: the message repeats the path: {message_of(record)!r}",
-        )
-    require(not target.exists(), f"the refused run wrote {target.name}")
-    equal(project_layer_ids(), before, "the layers after the three refusals")
+
+    # A real file destination is the caller's decision: QGIS writes it where it was told.
+    # ``gdal:convertformat`` copies the layer, so the written file has to carry the same
+    # features *and* their geometry: a five-row table whose every geometry is NULL passes
+    # a row-count check, and that is what ``gdal:buffervectors`` leaves behind when its
+    # geometry column name does not match this fixture (review r2 B1).
+    written = run_algorithm(
+        ctx,
+        "gdal:convertformat",
+        {"INPUT": layer_id, "OUTPUT": str(target)},
+    )
+    equal(written.status, ExecutionStatus.SUCCEEDED, f"convertformat to a file: {written.error}")
+    equal(outputs_of(written), {"OUTPUT": str(target)}, "the value of the output key")
+    require(target.is_file(), f"{target.name} was not written")
+    product = QgsVectorLayer(str(target), "p13 written", "ogr")
+    require(product.isValid(), f"the written dataset {target.name} is not a readable layer")
+    source = project_layer(layer_id)
+    equal(product.featureCount(), source.featureCount(), "the features the written dataset holds")
+    with_geometry = sum(
+        1
+        for feature in product.getFeatures()
+        if feature.hasGeometry() and not feature.geometry().isNull()
+    )
+    equal(with_geometry, source.featureCount(), "the written features that really carry a geometry")
+    equal(product.wkbType(), source.wkbType(), "the geometry type the written dataset keeps")
+
+    # QGIS's own temporary output: the plugin takes the layer it produced.
+    temporary = run_algorithm(
+        ctx,
+        "native:buffer",
+        {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT},
+    )
+    equal(temporary.status, ExecutionStatus.SUCCEEDED, f"TEMPORARY_OUTPUT: {temporary.error}")
+    require(output_layer(ctx, temporary, "OUTPUT").isValid(), "the temporary output layer")
+
+    # A provider with no non-file-based output answers SUCCEEDED with the literal
+    # "memory:" and adds no layer; that shape is refused instead of repeated upward.
+    made_up = run_algorithm(
+        ctx, "gdal:buffervectors", {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": "memory:"}
+    )
+    equal(made_up.status, ExecutionStatus.FAILED, "a memory destination on the gdal provider")
+    equal(error_code(made_up), INVALID_INPUT, "the code for a memory destination on gdal")
+
+    # The strict-type rule is untouched: a remote value is refused as a destination too.
+    remote = run_algorithm(
+        ctx,
+        "native:buffer",
+        {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": fixtures.REMOTE_VSICURL},
+    )
+    equal(remote.status, ExecutionStatus.FAILED, "a remote destination")
+    equal(error_code(remote), PATH_NOT_ALLOWED, "the code for a remote destination")
+
     return (
-        "TEMPORARY_OUTPUT, a path inside allowed_data_roots and an empty destination are all "
-        "FAILED(PATH_NOT_ALLOWED) before the algorithm runs: this build grants no data-file write "
-        "authorisation, and TEMPORARY_OUTPUT is not a way around it (no file was created)"
+        "a destination is handed to QGIS as it arrived: gdal:convertformat wrote a GeoPackage at "
+        f"the path the caller named ({target.stat().st_size} bytes) that opens with the source's "
+        f"{product.featureCount()} features, the source's wkb type and a non-null geometry on "
+        "every one of them, and the outputs value is that same path; native:buffer with "
+        'OUTPUT="TEMPORARY_OUTPUT" SUCCEEDED with its result layer in the project; the one '
+        'destination verdict left is about a false success, so OUTPUT="memory:" on the file-only '
+        "gdal provider is FAILED(INVALID_INPUT) before it runs, while a /vsicurl value as a "
+        "destination is still FAILED(PATH_NOT_ALLOWED) by the strict-type rule"
     )
 
 
@@ -4010,7 +4047,7 @@ CASES = (
     ("P10", p10_json_values),
     ("P11", p11_cannot_execute),
     ("P12", p12_input_path_policy),
-    ("P13", p13_destination_refused),
+    ("P13", p13_destination_policy),
     ("P14", p14_output_ownership),
     ("P15", p15_non_json_output),
     ("P16", p16_submit_cancel_queued),

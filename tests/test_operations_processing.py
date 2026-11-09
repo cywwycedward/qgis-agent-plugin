@@ -2,10 +2,10 @@
 
 The real registry, providers and algorithms are exercised by the QGIS acceptance
 run; here the question is whether the contract holds -- which keys reach the
-native parameter check, which files and destinations are refused, what happens to
-a result layer, and which values can leave as JSON.  The fakes are deliberately
-narrow: one algorithm prototype, one fresh instance per run, and a context whose
-temporary store is visible from the test.
+native parameter check, which files are refused and which destination values are
+handed on, what happens to a result layer, and which values can leave as JSON.  The
+fakes are deliberately narrow: one algorithm prototype, one fresh instance per run,
+and a context whose temporary store is visible from the test.
 """
 
 from __future__ import annotations
@@ -173,6 +173,16 @@ class FakeOutput:
         return self._description
 
 
+class FakeProvider:
+    """The one provider answer the plugin asks for: can it produce a non-file result?"""
+
+    def __init__(self, non_file_based_output: bool) -> None:
+        self._non_file_based_output = non_file_based_output
+
+    def supportsNonFileBasedOutput(self) -> bool:
+        return self._non_file_based_output
+
+
 class FakeAlgorithm:
     """One ``QgsProcessingAlgorithm`` instance, with a log of what was asked of it."""
 
@@ -191,6 +201,7 @@ class FakeAlgorithm:
         completed: bool = True,
         layers: tuple[Any, ...] = (),
         errors: tuple[str, ...] = (),
+        non_file_based_output: bool = True,
     ) -> None:
         self.algorithm_id = algorithm_id
         self._name = name
@@ -204,6 +215,7 @@ class FakeAlgorithm:
         self._completed = completed
         self._layers = layers
         self._errors = errors
+        self._provider = FakeProvider(non_file_based_output)
         self.calls: list[Any] = []
 
     def id(self) -> str:
@@ -229,6 +241,9 @@ class FakeAlgorithm:
         # QGIS 3.44.13 binds this as ``(bool, message)``; verified on the real build.
         self.calls.append("canExecute")
         return (self._executable, "" if self._executable else "not available here")
+
+    def provider(self) -> FakeProvider:
+        return self._provider
 
     def checkParameterValues(self, parameters: Any, context: Any) -> tuple[bool, str]:
         self.calls.append(("checkParameterValues", parameters, context))
@@ -260,6 +275,7 @@ class FakePrototype(FakeAlgorithm):
             completed=self._completed,
             layers=self._layers,
             errors=self._errors,
+            non_file_based_output=self._provider.supportsNonFileBasedOutput(),
         )
 
     def run(self, parameters: Any, context: Any, feedback: Any) -> tuple[Any, bool]:
@@ -407,6 +423,7 @@ def install(
     refusal: tuple[bool, str] | None = None,
     layers: tuple[Any, ...] = (),
     errors: tuple[str, ...] = (),
+    non_file_based_output: bool = True,
 ) -> FakePrototype:
     prototype = FakePrototype(
         algorithm_id,
@@ -421,6 +438,7 @@ def install(
         completed=completed,
         layers=layers,
         errors=errors,
+        non_file_based_output=non_file_based_output,
     )
     fake.registry.prototypes[algorithm_id] = prototype
     return prototype
@@ -1173,10 +1191,22 @@ def test_a_nested_layer_reference_is_refused_even_when_it_names_a_project_layer(
 
 @pytest.mark.parametrize(
     "value",
-    ["TEMPORARY_OUTPUT", "C:/data/out.gpkg", "", {"type": "memory"}, 5],
-    ids=["temporary", "path", "empty", "object", "number"],
+    ["TEMPORARY_OUTPUT", "C:/data/out.gpkg", ""],
+    ids=["temporary", "path", "empty"],
 )
-def test_a_destination_other_than_memory_is_refused(
+def test_a_string_destination_reaches_the_algorithm_unchanged(
+    fake_qgis: FakeQgis, data_root: Path, value: str
+) -> None:
+    """Where a result is written is the caller's decision and QGIS's to judge."""
+    install(fake_qgis, FakeDefinition("OUTPUT", "sink", destination=True), results={})
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"OUTPUT": value})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"OUTPUT": value}
+
+
+@pytest.mark.parametrize("value", [{"type": "memory"}, 5], ids=["object", "number"])
+def test_a_destination_that_is_not_a_string_is_refused(
     fake_qgis: FakeQgis, data_root: Path, value: Any
 ) -> None:
     install(fake_qgis, FakeDefinition("OUTPUT", "sink", destination=True), results={})
@@ -1184,6 +1214,49 @@ def test_a_destination_other_than_memory_is_refused(
         ops.ProcessingRunAlgorithm(),
         make_context(FakeProject(), data_root),
         run_params({"OUTPUT": value}),
+    )
+    assert code == INVALID_INPUT
+    assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
+
+
+def test_a_memory_destination_needs_a_provider_that_can_keep_a_result_in_memory(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """``gdal:buffervectors`` answers SUCCEEDED with the literal string and no layer."""
+    install(
+        fake_qgis,
+        FakeDefinition("OUTPUT", "sink", destination=True),
+        results={},
+        non_file_based_output=False,
+    )
+    code = refuse(
+        ops.ProcessingRunAlgorithm(),
+        make_context(FakeProject(), data_root),
+        run_params({"OUTPUT": "memory:"}),
+    )
+    assert code == INVALID_INPUT
+    assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
+
+
+def test_a_memory_destination_reaches_a_provider_that_supports_it(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    install(fake_qgis, FakeDefinition("OUTPUT", "sink", destination=True), results={})
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject(), data_root), run_params({"OUTPUT": "memory:"})
+    )
+    assert fake_qgis.registry.instances[0].calls[2][1] == {"OUTPUT": "memory:"}
+
+
+def test_a_remote_value_as_a_destination_is_still_refused(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """The strict-type rule is untouched: only ``memory:`` escapes the remote refusal."""
+    install(fake_qgis, FakeDefinition("OUTPUT", "vectorDestination", destination=True), results={})
+    code = refuse(
+        ops.ProcessingRunAlgorithm(),
+        make_context(FakeProject(), data_root),
+        run_params({"OUTPUT": "/vsicurl/http://127.0.0.1:9/never.gpkg"}),
     )
     assert code == PATH_NOT_ALLOWED
     assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]

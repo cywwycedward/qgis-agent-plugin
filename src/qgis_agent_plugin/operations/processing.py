@@ -13,15 +13,21 @@ disappearing from the discovery side (PRD §3.2.4).
 The boundary this module owns is the JSON one.  ``parameters`` is a finite JSON
 tree keyed by native parameter names; a non-string key, a NaN, an infinity, bytes
 or a QGIS/Qt object is refused before QGIS sees it, and a result that has no
-lossless JSON form is refused rather than ``str()``-ed.  A run may touch a file
-only through a parameter whose native definition says it is a file input (checked
-with ``resolve_path``) or a layer reference -- a project layer id, or an existing
-file inside the allowed roots.  A result **file** is the one write refused: every
-destination is refused unless it names QGIS's in-memory provider, because the
-settings of this build grant no data-file write access (PRD §3.2.2, §8.3.3).
-``None`` always means "not provided": it is handed on for the native check to
-judge, so an absent or null destination ends as ``INVALID_INPUT`` from QGIS
-instead of a path verdict this module has no basis for.
+lossless JSON form is refused rather than ``str()``-ed.  A run may read a file only
+through a parameter whose native definition says it is a file input (checked with
+``resolve_path``) or a layer reference -- a project layer id, or an existing file
+inside the allowed roots.  A destination is not judged as a write: its string value
+reaches QGIS as it arrived, so a plain path, ``memory:``, ``TEMPORARY_OUTPUT`` and
+the empty string are all decided by the native ``checkParameterValues()`` and
+``run()``.  Where a result is written is the caller's and QGIS's decision, and the
+write-authorisation model is a separate design.  The one destination verdict left
+here guards against a false success rather than a write: a value beginning with
+``memory:`` is refused unless the algorithm's provider reports
+``supportsNonFileBasedOutput()``, because 3.44.13's ``gdal`` provider answers
+``SUCCEEDED`` with the literal string and no layer while its tool fails (measured on
+``gdal:buffervectors``; PRD §3.2.3).  ``None`` always means "not provided": it is
+handed on for the native check to judge, so an absent or null destination ends as
+``INVALID_INPUT`` from QGIS instead of a path verdict this module has no basis for.
 
 A database target that arrives in ordinary parameters is not judged as a write: a
 host, a user, a schema or a table name in ``string`` parameters, or a database file
@@ -82,9 +88,10 @@ from ..core.security import is_remote_uri, resolve_path
 
 _LOGGER = logging.getLogger(__name__)
 
-# The one destination value this build accepts: a layer that lives in memory only.
-# ``QgsProcessing.TEMPORARY_OUTPUT`` is deliberately not in this namespace -- it can
-# name a file on disk (PRD §3.2.2).
+# QGIS's sentinel for a result that lives in memory only.  A provider that reports no
+# non-file-based output cannot honour it, yet 3.44.13 hands the literal string back as
+# a successful result and adds no layer (measured on ``gdal:buffervectors``), so that
+# shape is refused instead of being reported as a result that does not exist.
 _MEMORY_OUTPUT = "memory:"
 
 # QGIS parameter type strings, as the definition classes report them.  They are the
@@ -181,9 +188,9 @@ _MEASURED_PARAMETER_TYPES = frozenset(
 )
 
 # The measured types that name I/O: a destination, one file, a layer reference, a
-# provider connection, or a value with layer references inside it.  The seven
-# destination types never reach the check -- ``isDestination()`` refuses them before
-# it -- and are listed so the two sets account for every measured type.
+# provider connection, or a value with layer references inside it.  None of them is in
+# ``_VALUE_PARAMETERS``, so a destination whose value names network or virtual-file
+# I/O is refused by the remote-value check like any other I/O value.
 _IO_PARAMETER_TYPES = (
     frozenset(
         {
@@ -380,7 +387,7 @@ def _is_optional(definition: Any) -> bool:
     return bool(definition.flags() & QgsProcessingParameterDefinition.FlagOptional)
 
 
-def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> Any:
+def _resolve_parameter(algorithm: Any, definition: Any, value: Any, ctx: OperationContext) -> Any:
     """The value to hand QGIS for one declared parameter.
 
     ``None`` is "not provided" for every family, so the native check decides whether
@@ -389,10 +396,14 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
     is one of the measured types that carries a value (``_VALUE_PARAMETERS``) -- a
     type this build has never seen is not in that set, so it keeps the refusal --
     because QGIS resolves such a value itself and would do it before the path policy
-    saw it; destinations, file inputs, layer references and the types that hide layer
-    references then get a boundary rule of their own, while anything else is passed
-    through as it arrived, because the plugin does not re-implement a second parameter
-    schema (PRD §3.2.2, §8.3.2, §12).
+    saw it -- a destination is not a value type either, so a remote destination is
+    refused by that same rule.  File inputs, layer references and the types that hide
+    layer references then get a boundary rule of their own; a destination gets two
+    verdicts and nothing more -- a non-string value, and ``memory:`` on a provider that
+    cannot keep a result in memory (``_supports_in_memory_output``, which is about a
+    false success, not about a write policy) -- and is otherwise handed on as it
+    arrived.  Anything else is passed through too, because the plugin does not
+    re-implement a second parameter schema (PRD §3.2.2, §8.3.2, §12).
     """
 
     if value is None:
@@ -400,9 +411,16 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
 
     kind = definition.type()
     if definition.isDestination():
-        if isinstance(value, str) and value.startswith(_MEMORY_OUTPUT):
+        if not isinstance(value, str):
+            raise FrameworkError(INVALID_INPUT, "a destination takes one string")
+        # ``memory:`` is QGIS's sentinel and also looks like a URI scheme, so it is
+        # decided here; every other destination is judged by the strict-type rule below.
+        if value.startswith(_MEMORY_OUTPUT):
+            if not _supports_in_memory_output(algorithm):
+                raise FrameworkError(
+                    INVALID_INPUT, "the algorithm cannot produce a result that stays in memory"
+                )
             return value
-        raise FrameworkError(PATH_NOT_ALLOWED, "only a memory output target is allowed")
     if kind not in _VALUE_PARAMETERS and isinstance(value, str) and is_remote_uri(value):
         # A URL, a UNC path or a ``/vsi`` path is I/O the path policy refuses outright,
         # and QGIS would resolve it before the policy ever saw it (PRD §8.3.2).  A type
@@ -425,6 +443,18 @@ def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext) -> An
             return [_resolve_layer_reference(item, ctx) for item in value]
         return _resolve_layer_reference(value, ctx)
     return value
+
+
+def _supports_in_memory_output(algorithm: Any) -> bool:
+    """Whether the algorithm's provider says it can produce a result that is no file.
+
+    A provider that cannot is refused rather than believed: 3.44.13's ``gdal`` provider
+    reports ``SUCCEEDED`` with the literal ``memory:`` and no layer while ogr2ogr is
+    failing, and a provider that cannot answer is not evidence of support either.
+    """
+
+    provider = algorithm.provider()
+    return provider is not None and bool(provider.supportsNonFileBasedOutput())
 
 
 def _resolve_layer_reference(value: Any, ctx: OperationContext) -> Any:
@@ -626,7 +656,7 @@ class ProcessingRunAlgorithm(
                 INVALID_INPUT, "a parameter name is not declared by this algorithm"
             )
         parameters = {
-            name: _resolve_parameter(definitions[name], value, ctx)
+            name: _resolve_parameter(algorithm, definitions[name], value, ctx)
             for name, value in request.parameters.items()
         }
 
