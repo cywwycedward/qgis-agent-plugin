@@ -197,12 +197,12 @@ JSON 输入校验只检查载荷形状和有限性。具体字段允许值应由
 | 当前工程图层引用 | 图层 ID 字符串，或列表中的图层 ID 字符串 | 按当前 `ctx.project` 的图层引用解析与验证；不得将未知字符串悄悄当作外部 URI 加载 |
 | CRS / 表达式 / extent 等 | QGIS 原生支持的 JSON 字符串等 | 尊重 QGIS 参数原生表示；不在插件中另造第二套语法 |
 | 输入文件 | 当前 `allowed_data_roots` 内的绝对本地文件路径 | 仅对原生定义明确表示文件输入时用 `resolve_path(..., must_exist=True)`；URL、UNC、VSI、未知连接 URI 拒绝 |
-| 输出 Destination | 原生目标参数（如 `OUTPUT`） | 当当前 Provider 允许非文件输出且相应 Destination 支持内存时，接受其原生内存目标；不自动把所有目的地注入 `memory:` |
-| 磁盘写入或文件型 Destination | 文件路径、数据库目标、`TEMPORARY_OUTPUT` 等 | 因既有 Settings 没有通用数据文件写入授权，拒绝 `PATH_NOT_ALLOWED`；`TEMPORARY_OUTPUT` 不保证纯内存 |
+| 输出 Destination | 原生目标参数（如 `OUTPUT`） | **原值交给 QGIS**：`memory:`、普通路径、`TEMPORARY_OUTPUT`、`""` 都照传，写不写、写哪里由调用方与原生参数定义决定；插件只拒非字符串值。唯一的例外：值为 `memory:` 而 `algorithm.provider().supportsNonFileBasedOutput()` 为假时拒（`INVALID_INPUT`），因为实测这种组合会返回“成功”但只有字面量 `memory:`、没有图层 |
+| 磁盘写入或文件型 Destination | 文件路径、数据库目标、`TEMPORARY_OUTPUT` 等 | **放行**（2026-11 用户裁决：不要「只允许 `memory:`」这条规则）；值原样交给 QGIS，由原生校验与算法决定结果。写授权模型另行设计（§12.1） |
 
 **关于通用图层字符串的歧义：**某些算法接受 `layer_id`，也可能接受数据源字符串。当前工程中能精确找到的图层 ID 优先解析为现有对象；不能命中的字符串不得无检查地交给 QGIS 作为待加载的 Provider URI。对于算法定义能够识别的普通本地输入文件，先按数据根策略验证再交给 QGIS；其他源一律拒绝。不能完全判断的参数类型应在执行前拒绝，而不是绕过安全边界。
 
-**关于默认/遗漏的 Destination：**不自动填充 `OUTPUT` 或创建临时文件。若算法声明的必填 Destination 没有提供，或该值可能触发文件型临时输出，拒绝；只允许明确无磁盘写入路径的内存目标。可选 Destination 不提供时，仍需依赖 QGIS 原生语义判断是否会隐式生成文件，不能默认视为安全。某些栅格输出算法因此会因当前授权模型而失败，这不等于该算法从查询或调用入口中被排除。
+**关于默认/遗漏的 Destination：**不自动填充 `OUTPUT` 或创建临时文件。缺省值与 `None` 一律当作「未提供」留给原生 `checkParameterValues()` 判断（必填时它会拒绝）；调用方显式给出的任何字符串目标（含 `TEMPORARY_OUTPUT`）原样传下。插件不替算法选择临时文件，也不把缺省值悄悄换成 `memory:`。
 
 示例 1：内存矢量结果（QGIS 原生参数名，示例不表示写死了 Buffer 白名单）：
 
@@ -708,7 +708,7 @@ SingleColorRasterConfig
 | 输入图层 ID 不存在 | `LAYER_NOT_FOUND` | 与错误的算法 ID 区分 |
 | 图层无效、图层类型不适用 | `INVALID_LAYER` | 使用现有层级错误语义 |
 | 分类字段不存在、字段类型不符合分级 | `INVALID_FIELD_TYPE` | 延用既有数值字段判定语义 |
-| 不允许的输入路径、输出文件目标、远程 URI、隐式文件目的地 | `PATH_NOT_ALLOWED` | 记录的 `error.message` 不含原始路径或 URI |
+| 不允许的输入路径、远程 URI、隐式加载的 Provider 连接串 | `PATH_NOT_ALLOWED` | 记录的 `error.message` 不含原始路径或 URI。**输出 Destination 不再是这个码**（2026-11 裁决后原样透传） |
 | 非法 Renderer 配置、未知 Style Category、Selector 不能接受的 Renderer 类型 | `INVALID_INPUT` | 设置失败不替换旧 Renderer |
 | QGIS 算法执行失败、非 JSON 结果、未知内部异常 | `INTERNAL_ERROR` | 当前词表无 Processing 专用运行失败码；诊断日志允许原始异常，仅内部可见 |
 | 返回值不满足声明结果模型 | `OUTPUT_VALIDATION_FAILED` | Engine 输出校验负责；不要用它掩盖已预见的非 JSON 结果 |
@@ -719,7 +719,7 @@ SingleColorRasterConfig
 
 1. **当前工程已有层**：通过 ID 解析，输入层若有本地文件来源且当前访问策略要求审查，使用 `QgsProviderRegistry.decodeUri()` 或现有项目数据源校验约定识别底层本地路径；不能简单按 `|layername` 或 `:` 拆字符串作为最终访问判据。
 2. **新增文件输入**：只有明确可识别的文件输入参数可以读取文件，先由 `resolve_path` + `allowed_data_roots` 验证；空根列表时拒绝。远端、UNC、VSI、未知 Provider 连接串不得隐式加载。
-3. **新增文件输出**：当前两个 roots 的既有语义中**没有通用数据文件写入授权**；即使路径位于 `allowed_data_roots`，也不能以此推断可写。此类请求或可能自动选择临时磁盘目的地的请求在本期拒绝；以后需要正式扩展文件写授权时先改设计，再改实现与测试。
+3. **新增文件输出**：**放行**（2026-11 用户裁决：先保证可执行，写授权模型另行设计）。Destination 的值（磁盘路径、`TEMPORARY_OUTPUT`、`memory:`）原样交给 QGIS，插件不做写路径审批；`memory:` 在 Provider 不支持非文件输出时拒（避免假成功）。需要收紧时先改设计（§12.1 第二行），再改实现与测试。
 4. **算法内部行为**：对任意第三方/自定义算法，注册表不能证明其内部只访问声明的文件参数。插件只提供**进程内受信任代码调用**，不声称恶意 Provider 不可读写任何文件；对不可信 Provider 应在 QGIS 级别禁用，而不是假装本 Operation 是隔离沙箱。
 5. **QGIS 临时目录**：处理算法可能使用内部缓存或文件作为实现细节，此类内部临时 I/O 不能仅凭参数检查完全排除；“不允许文件输出”指用户请求的结果文件 Destination，不等于保证所有内部算法完全无文件 I/O。
 6. **QML**：始终从当前工程的已加载图层导出内存 XML，未经批准不将其当脱敏资源。路径、资源引用可能出现在 XML 中。
@@ -776,13 +776,13 @@ tests/
 | P10 | 嵌套 JSON 值 | 允许 QGIS 参数定义接受的对象/数组；拒绝 QObject、Qt 枚举、NaN/Inf |
 | P11 | 无法执行 / Provider 缺失 | `canExecute=False` 返回 FAILED；不自动安装新 Provider |
 | P12 | 输入路径限制 | 数据根外、远程 URI 或不允许的连接串在调用算法前拒绝 |
-| P13 | 文件输出/临时磁盘输出 | 缺少写授权时 `FAILED(PATH_NOT_ALLOWED)`；不允许以 `TEMPORARY_OUTPUT` 绕过 |
+| P13 | 文件输出/临时磁盘输出 | 磁盘路径与 `TEMPORARY_OUTPUT` 都交给 QGIS 并真的写出数据（文件可开、要素数与几何与源一致）；`memory:` 在无内存输出的 Provider 上 `FAILED(INVALID_INPUT)`，不允许假成功 |
 | P14 | 输出所有权 | Context 临时图层转项目、Context 析构后图层仍可按 ID 查询 |
 | P15 | 不可序列化结果 | 显式失败，不返回对象 `str`/`repr`；不声称已有外部副作用已回滚 |
 | P16 | `submit` 主线程队列取消 | 在事件循环真正执行前取消为 `CANCELLED`；运行开始后不可中断 |
 | P17 | 无显式 Destination 的算法 | 不强行补 `OUTPUT`；只有满足原生定义且不隐式文件输出时才执行 |
 
-验收要求同时包含：成功的 Native 算法、非 Native Provider 在当前环境真实可用的例子、至少一种数组输入、标量输出以及文件目标拒绝。若目标机器未安装某第三方 Provider，相关用例明确 `SKIP` 并记录原因，不能把 SKIP 计为 PASS；Native 核心用例必须实际通过。
+验收要求同时包含：成功的 Native 算法、非 Native Provider 在当前环境真实可用的例子、至少一种数组输入、标量输出以及一次真实的文件目标写入。若目标机器未安装某第三方 Provider，相关用例明确 `SKIP` 并记录原因，不能把 SKIP 计为 PASS；Native 核心用例必须实际通过。
 
 ### 10.2 QML Category 与只读 XML
 
@@ -898,7 +898,7 @@ tests/
 | 边界 | 实测范围（本机 3.44.13，440 个算法） | 当前行为 | 权限设计时的方向 |
 | --- | --- | --- | --- |
 | 数据库/远程写目标写在普通参数里 | 11 个算法、20 个定义：`gdal:importvectorintopostgisdatabase{available,new}connection`、`native:importintopostgis`、`native:postgisexecutesql`、`native:spatialiteexecutesql`、`native:spatialiteexecutesqlregistered`、`qgis:importintospatialite`、`qgis:postgisexecuteandloadsql`（`DATABASE/DBNAME/HOST/PORT/USER/PASSWORD/SCHEMA/TABLE`） | 连接型参数（`providerconnection/databaseschema/databasetable`）拒绝；`vector` 型 `DATABASE` 与 `string` 型 `HOST/DBNAME/USER/PASSWORD/SCHEMA` **放行**（`native:spatialiteexecutesql`、`qgis:importintospatialite`、`gdal:…newconnection` 可执行，实测能写入） | 建「连接/写目标」授权模型；需先能区分读写再决定是否收窄 |
-| 结果文件写盘 | `gdal` 57 个、`pdal` 17 个 Provider 无内存输出；358 个算法带必填 Destination | 任何磁盘 Destination 与 `TEMPORARY_OUTPUT` 都 `PATH_NOT_ALLOWED`，只放行 `memory:`（Provider 不支持内存输出时随之失败） | 需数据文件写入授权（新 Settings 键或按次确认） |
+| 结果文件写盘 | 现在放行（2026-11 裁决）：`gdal` 57 / `pdal` 17 无内存输出，358 个算法带必填 Destination | 磁盘路径与 `TEMPORARY_OUTPUT` 原值交 QGIS；仅 `memory:` 在无内存输出的 Provider 上拒 | 已无写授权限制；需要时再设计写入审批（新 Settings 键或按次确认） |
 | 输入数据根 | 全部文件输入 | 只允许 `allowed_data_roots` 内的绝对本地文件；远程 URI / UNC / `/vsi*` 拒绝（严格类型族与未知类型） | 是否需要扩展读授权 |
 | 复合参数里的图层引用 | 5 个类型、7 个算法：`qgis:idwinterpolation`、`qgis:tininterpolation`、`native:alignrasters`、`native:dxfexport`、`native:writevectortiles_mbtiles`、`native:writevectortiles_xyz`、`native:tinmeshcreation` | 只要提供值即 `INVALID_INPUT`（插件不逐类型解析嵌套图层） | 逐类型解析后可放开 |
 | 文件夹型 `file` 参数 | `native:importphotos`、`native:atlaslayouttoimage`、`native:atlaslayouttomultiplepdf` | `must_exist=True` 只接受普通文件，目录被拒 | 读授权是否包含目录 |
