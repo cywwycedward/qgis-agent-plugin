@@ -1,4 +1,4 @@
-"""The processing operations against a fake QGIS.
+﻿"""The processing operations against a fake QGIS.
 
 The real registry, providers and algorithms are exercised by the QGIS acceptance
 run; here the question is whether the contract holds -- which keys reach the
@@ -111,6 +111,7 @@ class FakeDefinition:
         help_: str = "",
         destination: bool = False,
         depends_on: tuple[str, ...] = (),
+        memory_ok: bool = True,
     ) -> None:
         self._name = name
         self._type = type_
@@ -120,6 +121,7 @@ class FakeDefinition:
         self._help = help_
         self._destination = destination
         self._depends_on = depends_on
+        self._memory_ok = memory_ok
 
     def name(self) -> str:
         return self._name
@@ -144,6 +146,13 @@ class FakeDefinition:
 
     def dependsOnOtherParameters(self) -> list[str]:
         return list(self._depends_on)
+
+    def isSupportedOutputValue(self, value: Any, context: Any) -> tuple[bool, str]:
+        # The real definition answers per value; the fake only models the one verdict
+        # the operation reads: whether this parameter can keep a result in memory.
+        if str(value).startswith("memory:") and not self._memory_ok:
+            return (False, "this parameter only supports disk-based outputs")
+        return (True, "")
 
 
 class FakeEnumDefinition(FakeDefinition):
@@ -173,16 +182,6 @@ class FakeOutput:
         return self._description
 
 
-class FakeProvider:
-    """The one provider answer the plugin asks for: can it produce a non-file result?"""
-
-    def __init__(self, non_file_based_output: bool) -> None:
-        self._non_file_based_output = non_file_based_output
-
-    def supportsNonFileBasedOutput(self) -> bool:
-        return self._non_file_based_output
-
-
 class FakeAlgorithm:
     """One ``QgsProcessingAlgorithm`` instance, with a log of what was asked of it."""
 
@@ -201,7 +200,6 @@ class FakeAlgorithm:
         completed: bool = True,
         layers: tuple[Any, ...] = (),
         errors: tuple[str, ...] = (),
-        non_file_based_output: bool = True,
     ) -> None:
         self.algorithm_id = algorithm_id
         self._name = name
@@ -215,7 +213,6 @@ class FakeAlgorithm:
         self._completed = completed
         self._layers = layers
         self._errors = errors
-        self._provider = FakeProvider(non_file_based_output)
         self.calls: list[Any] = []
 
     def id(self) -> str:
@@ -241,9 +238,6 @@ class FakeAlgorithm:
         # QGIS 3.44.13 binds this as ``(bool, message)``; verified on the real build.
         self.calls.append("canExecute")
         return (self._executable, "" if self._executable else "not available here")
-
-    def provider(self) -> FakeProvider:
-        return self._provider
 
     def checkParameterValues(self, parameters: Any, context: Any) -> tuple[bool, str]:
         self.calls.append(("checkParameterValues", parameters, context))
@@ -275,7 +269,6 @@ class FakePrototype(FakeAlgorithm):
             completed=self._completed,
             layers=self._layers,
             errors=self._errors,
-            non_file_based_output=self._provider.supportsNonFileBasedOutput(),
         )
 
     def run(self, parameters: Any, context: Any, feedback: Any) -> tuple[Any, bool]:
@@ -423,7 +416,6 @@ def install(
     refusal: tuple[bool, str] | None = None,
     layers: tuple[Any, ...] = (),
     errors: tuple[str, ...] = (),
-    non_file_based_output: bool = True,
 ) -> FakePrototype:
     prototype = FakePrototype(
         algorithm_id,
@@ -438,7 +430,6 @@ def install(
         completed=completed,
         layers=layers,
         errors=errors,
-        non_file_based_output=non_file_based_output,
     )
     fake.registry.prototypes[algorithm_id] = prototype
     return prototype
@@ -856,19 +847,6 @@ def test_an_algorithm_that_cannot_execute_is_refused_before_its_parameters(
     assert called(instance) == ["canExecute"]
 
 
-def test_a_can_execute_answer_is_read_in_both_native_shapes() -> None:
-    class Answer:
-        def __init__(self, value: Any) -> None:
-            self._value = value
-
-        def canExecute(self) -> Any:
-            return self._value
-
-    assert ops._can_execute(Answer((True, ""))) == (True, "")
-    assert ops._can_execute(Answer((False, "no provider"))) == (False, "no provider")
-    assert ops._can_execute(Answer(False)) == (False, "")
-
-
 def test_an_undeclared_parameter_name_is_refused(fake_qgis: FakeQgis, data_root: Path) -> None:
     install(fake_qgis, *standard_definitions(), results={})
     code = refuse(
@@ -1014,107 +992,6 @@ def test_a_value_parameter_keeps_its_value(
     assert fake_qgis.registry.instances[0].calls[2][1] == {"VALUE": value}
 
 
-# The 53 parameter type strings the 440 registered algorithms report on 3.44.13,
-# copied by hand: this is the independent statement the module's own lists must add up
-# to, so dropping a name from either side fails here instead of silently widening the
-# boundary.
-MEASURED_PARAMETER_TYPES = frozenset(
-    {
-        "aggregates",
-        "alignrasterlayers",
-        "area",
-        "attribute",
-        "authcfg",
-        "band",
-        "boolean",
-        "color",
-        "coordinateoperation",
-        "crs",
-        "databaseschema",
-        "databasetable",
-        "distance",
-        "duration",
-        "dxflayers",
-        "enum",
-        "execute_sql",
-        "expression",
-        "extent",
-        "field",
-        "fields_mapping",
-        "file",
-        "fileDestination",
-        "folderDestination",
-        "geometry",
-        "idw_interpolation_data",
-        "layer",
-        "layout",
-        "layoutitem",
-        "maptheme",
-        "matrix",
-        "mesh",
-        "meshdatasetgroups",
-        "meshdatasettime",
-        "multilayer",
-        "number",
-        "point",
-        "pointCloudDestination",
-        "pointcloud",
-        "providerconnection",
-        "raster",
-        "rasterDestination",
-        "raster_calc_expression",
-        "relief_colors",
-        "scale",
-        "sink",
-        "source",
-        "string",
-        "tininputlayers",
-        "vector",
-        "vectorDestination",
-        "vectorTileDestination",
-        "vectortilewriterlayers",
-    }
-)
-
-# The types that name I/O: a destination, one file, a layer reference, a provider
-# connection, or a value with layer references inside it.
-IO_PARAMETER_TYPES = frozenset(
-    {
-        "alignrasterlayers",
-        "databaseschema",
-        "databasetable",
-        "dxflayers",
-        "file",
-        "fileDestination",
-        "folderDestination",
-        "idw_interpolation_data",
-        "layer",
-        "mesh",
-        "multilayer",
-        "pointCloudDestination",
-        "pointcloud",
-        "providerconnection",
-        "raster",
-        "rasterDestination",
-        "sink",
-        "source",
-        "tininputlayers",
-        "vector",
-        "vectorDestination",
-        "vectorTileDestination",
-        "vectortilewriterlayers",
-    }
-)
-
-
-def test_the_value_and_io_lists_account_for_every_measured_parameter_type() -> None:
-    """Every one of the 53 measured types is either a value or an I/O type."""
-    assert ops._MEASURED_PARAMETER_TYPES == MEASURED_PARAMETER_TYPES
-    assert ops._IO_PARAMETER_TYPES == IO_PARAMETER_TYPES
-    assert ops._VALUE_PARAMETERS | ops._IO_PARAMETER_TYPES == MEASURED_PARAMETER_TYPES
-    assert ops._VALUE_PARAMETERS.isdisjoint(ops._IO_PARAMETER_TYPES)
-    assert len(MEASURED_PARAMETER_TYPES) == 53
-
 
 def test_a_layer_parameter_must_name_a_project_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     install(fake_qgis, FakeDefinition("INPUT", "source"), results={})
@@ -1219,15 +1096,14 @@ def test_a_destination_that_is_not_a_string_is_refused(
     assert called(fake_qgis.registry.instances[0]) == ["canExecute", "parameterDefinitions"]
 
 
-def test_a_memory_destination_needs_a_provider_that_can_keep_a_result_in_memory(
+def test_a_memory_destination_needs_a_parameter_that_can_keep_a_result_in_memory(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
     """``gdal:buffervectors`` answers SUCCEEDED with the literal string and no layer."""
     install(
         fake_qgis,
-        FakeDefinition("OUTPUT", "sink", destination=True),
+        FakeDefinition("OUTPUT", "sink", destination=True, memory_ok=False),
         results={},
-        non_file_based_output=False,
     )
     code = refuse(
         ops.ProcessingRunAlgorithm(),

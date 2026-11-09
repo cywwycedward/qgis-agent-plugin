@@ -292,9 +292,7 @@ class LayerGetInfo(
     def execute_main(
         self, ctx: OperationContext, request: LayerGetInfoParams
     ) -> LayerGetInfoResult:
-        layer = ctx.project.mapLayer(request.layer_id)
-        if layer is None:
-            raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+        layer = project_layer(ctx.project, request.layer_id)
         summary = layer_summary(ctx.project, request.layer_id, layer)
         return LayerGetInfoResult(
             **summary.model_dump(),
@@ -317,8 +315,7 @@ class LayerSetVisibility(
     def execute_main(
         self, ctx: OperationContext, request: LayerSetVisibilityParams
     ) -> LayerSetVisibilityResult:
-        if ctx.project.mapLayer(request.layer_id) is None:
-            raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+        project_layer(ctx.project, request.layer_id)
         node = layer_tree_node(ctx.project, request.layer_id)
         if node is None:
             raise FrameworkError(LAYER_NOT_IN_TREE, "layer has no layer tree node")
@@ -391,9 +388,7 @@ class LayerSumNumericField(
     def prepare_main(self, ctx: OperationContext, request: SumNumericFieldParams) -> FieldValues:
         from qgis.core import NULL, QgsVectorLayer
 
-        layer = ctx.project.mapLayer(request.layer_id)
-        if layer is None:
-            raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+        layer = project_layer(ctx.project, request.layer_id)
         if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
             raise FrameworkError(INVALID_LAYER, "the layer is not a valid vector layer")
         fields = layer.fields()
@@ -545,6 +540,15 @@ RASTER_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
 )
 
 
+def project_layer(project: Any, layer_id: str) -> Any:
+    """The layer behind an id, or ``LAYER_NOT_FOUND``; every reader starts here."""
+
+    layer = project.mapLayer(layer_id)
+    if layer is None:
+        raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+    return layer
+
+
 def layer_for_style(project: Any, layer_id: str) -> Any:
     """The layer behind an id, when it is a valid spatial vector or raster.
 
@@ -556,9 +560,7 @@ def layer_for_style(project: Any, layer_id: str) -> Any:
 
     from qgis.core import Qgis
 
-    layer = project.mapLayer(layer_id)
-    if layer is None:
-        raise FrameworkError(LAYER_NOT_FOUND, "layer does not exist")
+    layer = project_layer(project, layer_id)
     if not layer.isValid():
         raise FrameworkError(INVALID_LAYER, "the layer is not valid")
     kind = layer_kind(layer)
