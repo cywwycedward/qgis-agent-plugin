@@ -22,11 +22,11 @@ the empty string are all decided by the native ``checkParameterValues()`` and
 ``run()``.  Where a result is written is the caller's and QGIS's decision, and the
 write-authorisation model is a separate design.  The one destination verdict left
 here guards against a false success rather than a write: a value beginning with
-``memory:`` is refused unless the algorithm's provider reports
-``supportsNonFileBasedOutput()``, because 3.44.13's ``gdal`` provider answers
-``SUCCEEDED`` with the literal string and no layer while its tool fails (measured on
-``gdal:buffervectors``; PRD §3.2.3).  ``None`` always means "not provided": it is
-handed on for the native check to judge, so an absent or null destination ends as
+``memory:`` is refused when the parameter itself reports that it cannot keep a
+result in memory, because 3.44.13's ``gdal`` provider answers ``SUCCEEDED`` with the
+literal string and no layer while its tool fails (measured on
+``gdal:buffervectors``).  ``None`` always means "not provided": it is handed on for
+the native check to judge, so an absent or null destination ends as
 ``INVALID_INPUT`` from QGIS instead of a path verdict this module has no basis for.
 
 A database target that arrives in ordinary parameters is not judged as a write: a
@@ -40,22 +40,13 @@ plugin is the in-process, trusted provider: it is not a sandbox, so a third-part
 provider's own internal I/O is outside what this module can promise (PRD §8.3.4).
 A value that names network I/O or a virtual file system is different, because QGIS
 resolves it itself: a provided string of that kind is refused before the algorithm
-is called (PRD §8.3.2).  Which parameter types that refusal applies to is fixed by
-measurement rather than by a list of names that grows one type at a time:
-``_MEASURED_PARAMETER_TYPES`` is every type string the 440 algorithms registered in
-QGIS 3.44.13 report (53 of them), and ``_VALUE_PARAMETERS`` is that surface minus
-the types that name I/O.  The strict set is exactly the destinations, ``file``, the
-seven layer-reference types (``source``, ``vector``, ``raster``, ``mesh``,
-``layer``, ``multilayer``, ``pointcloud``), the three provider-connection types and
-the five composite ones -- plus every type not among the measured 53, because a
-type this build has never seen is not known to carry a value.  A value type is not
-judged at all, so ``EPSG:32633`` in a ``crs``, a layout
-name, a theme name, a colour or a plain string reaches QGIS as it arrived: it is data
-QGIS parses, and refusing it would take away the standard spelling of more than fifty
-algorithms' ``crs`` parameters (PRD §3.2.2).  What an unknown type keeps is the remote
-refusal and nothing else -- a local path in an unknown type is still handed to QGIS
-untouched, because only ``file`` and the layer-reference types are paths this module
-has a rule for.
+is called.  The refusal applies to every type except the value types in
+``_VALUE_PARAMETERS``, whose spelling is data QGIS parses (``EPSG:32633`` in a
+``crs``, a layout or theme name, a colour, a plain string); a type this build has
+never seen is not in that set, so it keeps the refusal.  What an unknown type keeps
+is the remote refusal and nothing else -- a local path in an unknown type is still
+handed to QGIS untouched, because only ``file`` and the layer-reference types are
+paths this module has a rule for.
 
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
@@ -125,14 +116,13 @@ _COMPOSITE_LAYER_PARAMETERS = frozenset(
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
 
-# The parameter type strings the 440 algorithms registered in 3.44.13 report, measured
-# in one probe over their definitions.  The boundary below is derived from this list
-# instead of growing one name at a time: a new QGIS type shows up here first, and
-# until it does it is an unknown type and keeps the remote refusal.
-_MEASURED_PARAMETER_TYPES = frozenset(
+# The measured types whose value is data QGIS parses rather than I/O it resolves.  The
+# remote-value refusal below applies to every other type, including one this build has
+# never seen: a value type's spelling is the algorithm's business, so refusing it would
+# take away the standard form of 60 ``crs`` and 2 ``coordinateoperation`` parameters.
+_VALUE_PARAMETERS = frozenset(
     {
         "aggregates",
-        "alignrasterlayers",
         "area",
         "attribute",
         "authcfg",
@@ -141,81 +131,29 @@ _MEASURED_PARAMETER_TYPES = frozenset(
         "color",
         "coordinateoperation",
         "crs",
-        "databaseschema",
-        "databasetable",
         "distance",
         "duration",
-        "dxflayers",
         "enum",
         "execute_sql",
         "expression",
         "extent",
         "field",
         "fields_mapping",
-        "file",
-        "fileDestination",
-        "folderDestination",
         "geometry",
-        "idw_interpolation_data",
-        "layer",
         "layout",
         "layoutitem",
         "maptheme",
         "matrix",
-        "mesh",
         "meshdatasetgroups",
         "meshdatasettime",
-        "multilayer",
         "number",
         "point",
-        "pointCloudDestination",
-        "pointcloud",
-        "providerconnection",
-        "raster",
-        "rasterDestination",
         "raster_calc_expression",
         "relief_colors",
         "scale",
-        "sink",
-        "source",
         "string",
-        "tininputlayers",
-        "vector",
-        "vectorDestination",
-        "vectorTileDestination",
-        "vectortilewriterlayers",
     }
 )
-
-# The measured types that name I/O: a destination, one file, a layer reference, a
-# provider connection, or a value with layer references inside it.  None of them is in
-# ``_VALUE_PARAMETERS``, so a destination whose value names network or virtual-file
-# I/O is refused by the remote-value check like any other I/O value.
-_IO_PARAMETER_TYPES = (
-    frozenset(
-        {
-            "fileDestination",
-            "folderDestination",
-            "pointCloudDestination",
-            "rasterDestination",
-            "sink",
-            "vectorDestination",
-            "vectorTileDestination",
-        }
-    )
-    | _LAYER_PARAMETERS
-    | _CONNECTION_PARAMETERS
-    | _COMPOSITE_LAYER_PARAMETERS
-    | {_FILE_PARAMETER}
-)
-
-# The measured types that carry a value: QGIS parses them, it never resolves them as
-# I/O, so the remote-value refusal must not look at them.  ``crs`` and
-# ``coordinateoperation`` are the two whose authoritative spelling (``EPSG:32633``,
-# ``urn:ogc:def:crs:EPSG::32633``) matches the URI scheme shape; 3.44.13 has 60 ``crs``
-# and 2 ``coordinateoperation`` parameters, and QGIS accepts both.  A type outside the
-# measured set is not in here, so it keeps the refusal.
-_VALUE_PARAMETERS = _MEASURED_PARAMETER_TYPES - _IO_PARAMETER_TYPES
 
 
 def _json_image(value: Any) -> Any:
@@ -387,7 +325,7 @@ def _is_optional(definition: Any) -> bool:
     return bool(definition.flags() & QgsProcessingParameterDefinition.FlagOptional)
 
 
-def _resolve_parameter(algorithm: Any, definition: Any, value: Any, ctx: OperationContext) -> Any:
+def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext, context: Any) -> Any:
     """The value to hand QGIS for one declared parameter.
 
     ``None`` is "not provided" for every family, so the native check decides whether
@@ -399,11 +337,10 @@ def _resolve_parameter(algorithm: Any, definition: Any, value: Any, ctx: Operati
     saw it -- a destination is not a value type either, so a remote destination is
     refused by that same rule.  File inputs, layer references and the types that hide
     layer references then get a boundary rule of their own; a destination gets two
-    verdicts and nothing more -- a non-string value, and ``memory:`` on a provider that
-    cannot keep a result in memory (``_supports_in_memory_output``, which is about a
-    false success, not about a write policy) -- and is otherwise handed on as it
-    arrived.  Anything else is passed through too, because the plugin does not
-    re-implement a second parameter schema (PRD §3.2.2, §8.3.2, §12).
+    verdicts and nothing more -- a non-string value, and ``memory:`` when the parameter
+    itself says it cannot keep a result in memory (about a false success, not a write
+    policy) -- and is otherwise handed on as it arrived.  Anything else is passed
+    through too, because the plugin does not re-implement a second parameter schema.
     """
 
     if value is None:
@@ -414,9 +351,11 @@ def _resolve_parameter(algorithm: Any, definition: Any, value: Any, ctx: Operati
         if not isinstance(value, str):
             raise FrameworkError(INVALID_INPUT, "a destination takes one string")
         # ``memory:`` is QGIS's sentinel and also looks like a URI scheme, so it is
-        # decided here; every other destination is judged by the strict-type rule below.
+        # decided here; the parameter itself says whether it can keep a result in memory.
         if value.startswith(_MEMORY_OUTPUT):
-            if not _supports_in_memory_output(algorithm):
+            supported, why = definition.isSupportedOutputValue(value, context)
+            if not supported:
+                _LOGGER.warning("destination refuses a memory result: %s", why)
                 raise FrameworkError(
                     INVALID_INPUT, "the algorithm cannot produce a result that stays in memory"
                 )
@@ -445,18 +384,6 @@ def _resolve_parameter(algorithm: Any, definition: Any, value: Any, ctx: Operati
     return value
 
 
-def _supports_in_memory_output(algorithm: Any) -> bool:
-    """Whether the algorithm's provider says it can produce a result that is no file.
-
-    A provider that cannot is refused rather than believed: 3.44.13's ``gdal`` provider
-    reports ``SUCCEEDED`` with the literal ``memory:`` and no layer while ogr2ogr is
-    failing, and a provider that cannot answer is not evidence of support either.
-    """
-
-    provider = algorithm.provider()
-    return provider is not None and bool(provider.supportsNonFileBasedOutput())
-
-
 def _resolve_layer_reference(value: Any, ctx: OperationContext) -> Any:
     """A project layer id stays an id; an allowed local file is the only other source.
 
@@ -478,14 +405,10 @@ def _resolve_layer_reference(value: Any, ctx: OperationContext) -> Any:
 
 
 def _can_execute(algorithm: Any) -> tuple[bool, str]:
-    """QGIS 3.44 binds ``canExecute()`` as ``(bool, message)``; a plain bool also reads."""
+    """``canExecute()`` as 3.44.13 binds it: a ``(bool, message)`` pair."""
 
-    outcome = algorithm.canExecute()
-    if isinstance(outcome, tuple):
-        executable = bool(outcome[0]) if outcome else False
-        message = outcome[1] if len(outcome) > 1 else ""
-        return executable, "" if message is None else str(message)
-    return bool(outcome), ""
+    executable, message = algorithm.canExecute()
+    return bool(executable), "" if message is None else str(message)
 
 
 def _take_result_layer(
@@ -655,15 +578,14 @@ class ProcessingRunAlgorithm(
             raise FrameworkError(
                 INVALID_INPUT, "a parameter name is not declared by this algorithm"
             )
-        parameters = {
-            name: _resolve_parameter(algorithm, definitions[name], value, ctx)
-            for name, value in request.parameters.items()
-        }
-
         context = QgsProcessingContext()
         # Layer ids are resolved against the project the engine holds, never the
         # process-wide singleton (PRD §1.3, §3.2.3 step 5).
         context.setProject(ctx.project)
+        parameters = {
+            name: _resolve_parameter(definitions[name], value, ctx, context)
+            for name, value in request.parameters.items()
+        }
         feedback = ErrorCollectingFeedback()
 
         valid, message = algorithm.checkParameterValues(parameters, context)
