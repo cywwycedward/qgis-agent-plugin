@@ -15,27 +15,31 @@ tree keyed by native parameter names; a non-string key, a NaN, an infinity, byte
 or a QGIS/Qt object is refused before QGIS sees it, and a result that has no
 lossless JSON form is refused rather than ``str()``-ed.  A run may touch a file
 only through a parameter whose native definition says it is a file input (checked
-with ``resolve_path``) or a layer the current project already holds; every
-destination is refused unless it names QGIS's in-memory provider, because the
-settings of this build grant no data-file write access (PRD §3.2.2, §8.3).  ``None``
-always means "not provided": it is handed on for the native check to judge, so an
-absent or null destination ends as ``INVALID_INPUT`` from QGIS instead of a path
-verdict this module has no basis for.
+with ``resolve_path``) or a layer the current project already holds.  A result
+**file** is the one write refused: every destination is refused unless it names
+QGIS's in-memory provider, because the settings of this build grant no data-file
+write access (PRD §3.2.2, §8.3.3).  ``None`` always means "not provided": it is
+handed on for the native check to judge, so an absent or null destination ends as
+``INVALID_INPUT`` from QGIS instead of a path verdict this module has no basis for.
 
-A database target that arrives in ordinary ``string`` parameters -- a host, a user,
-a schema, a table name -- is not judged at all, and that is an accepted boundary,
-not an oversight: the trust boundary of this plugin is the in-process, trusted
-provider, and a value that names no local file gives the path policy nothing to
-measure (PRD §8.3.4, §12).  A value that names network I/O or a virtual file system
-is different, because QGIS resolves it itself: a provided string of that kind is
-refused before the algorithm is called (PRD §8.3.2).  Which parameter types that
-refusal applies to is fixed by measurement rather than by a list of names that grows
-one type at a time: ``_MEASURED_PARAMETER_TYPES`` is every type string the 440
-algorithms registered in QGIS 3.44.13 report (53 of them), and ``_VALUE_PARAMETERS``
-is that surface minus the types that name I/O.  The strict set is exactly the
-destinations, ``file``, the seven layer-reference types (``source``, ``vector``,
-``raster``, ``mesh``, ``layer``, ``multilayer``, ``pointcloud``), the three
-provider-connection types and the five composite ones -- plus every type not among
+A database target that arrives in ordinary parameters is not judged as a write: a
+host, a user, a schema or a table name in ``string`` parameters, or a database file
+in a ``vector``/``layer`` parameter such as ``DATABASE``, is passed on to the
+algorithm, which may then write that database.  That is an accepted boundary of this
+build, not an oversight -- result files stay refused, databases written through
+ordinary parameters do not -- and the permission model is deferred to its own design
+(PRD §8.3.4, §12.1).  The trust boundary of this plugin is the in-process, trusted
+provider: it is not a sandbox, so a third-party provider's own internal I/O is
+outside what this module can promise (PRD §8.3.4).  A value that names network I/O
+or a virtual file system is different, because QGIS resolves it itself: a provided
+string of that kind is refused before the algorithm is called (PRD §8.3.2).  Which
+parameter types that refusal applies to is fixed by measurement rather than by a
+list of names that grows one type at a time: ``_MEASURED_PARAMETER_TYPES`` is every
+type string the 440 algorithms registered in QGIS 3.44.13 report (53 of them), and
+``_VALUE_PARAMETERS`` is that surface minus the types that name I/O.  The strict set
+is exactly the destinations, ``file``, the seven layer-reference types (``source``,
+``vector``, ``raster``, ``mesh``, ``layer``, ``multilayer``, ``pointcloud``), the
+three provider-connection types and the five composite ones -- plus every type not among
 the measured 53, because a type this build has never seen is not known to carry a
 value.  A value type is not judged at all, so ``EPSG:32633`` in a ``crs``, a layout
 name, a theme name, a colour or a plain string reaches QGIS as it arrived: it is data

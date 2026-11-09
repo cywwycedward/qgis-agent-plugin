@@ -1045,11 +1045,16 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
     An integer and a float are the same numeric category.  Every other value is
     converted to the field's own type first: a value the field cannot hold is
     refused instead of becoming a category that can never match, and two spellings
-    of one value (``True`` and ``"true"``) are one category (PRD v2 6.3).
+    of one value (``True`` and ``"true"``) are one category (PRD v2 6.3).  An
+    integer field takes only whole values, and stores them as integers, so the
+    native category matches the field's own type.
     """
 
     if value is None:
         return ("null", None), None
+
+    from qgis.PyQt.QtCore import QVariant
+
     if field.isNumeric():
         if isinstance(value, (bool, str)):
             raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
@@ -1061,9 +1066,13 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
             raise FrameworkError(
                 INVALID_INPUT, "a category value does not fit the field type"
             ) from None
+        if field.type() in (QVariant.Int, QVariant.LongLong):
+            # A fraction on an integer field can never match a feature; a whole value is
+            # stored as an integer.  The key stays the shared float, so 2 and 2.0 dedupe.
+            if not number.is_integer():
+                raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+            return ("number", number), int(value)
         return ("number", number), value
-
-    from qgis.PyQt.QtCore import QVariant
 
     variant = QVariant(value)
     if not variant.convert(field.type()):

@@ -99,7 +99,8 @@ class FakeSymbol:
         self.properties = dict(properties)
 
 
-# The fake's ``QVariant.Type`` values; the real ones are Bool 1, String 10, Date 14.
+# The fake's ``QVariant.Type`` values; the real ones are Bool 1, Int 2, LongLong 4,
+# Double 6, String 10, Date 14.
 VARIANT_STRING = 10
 
 
@@ -113,6 +114,9 @@ class FakeQVariant:
     """
 
     Bool = 1
+    Int = 2
+    LongLong = 4
+    Double = 6
     String = VARIANT_STRING
     Date = 14
 
@@ -527,6 +531,14 @@ class FakeQgis:
                 self.field = field
                 self.categories = list(categories)
                 record("categorizedSymbol", self)
+
+            def categoryIndexForValue(self, value: Any) -> int:
+                # Measured on 3.44.13: the native lookup compares values numerically,
+                # so an int category matches the same number looked up as a float.
+                for index, category in enumerate(self.categories):
+                    if category.value == value:
+                        return index
+                return -1
 
         class QgsRendererRange:
             def __init__(self, lower: float, upper: float, symbol: FakeSymbol, label: str) -> None:
@@ -2121,6 +2133,89 @@ def test_a_numeric_field_normalises_one_and_one_point_zero(
                 "categories": [
                     {"value": 1, "label": "One", "symbol": FILL},
                     {"value": 1.0, "label": "One again", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert layer.renderer_sets == []
+
+
+def test_a_fractional_value_on_an_integer_field_is_refused(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """A category the field can never hold would blank the layer, so it is refused."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
+    layer.field_list = [FakeField("num", field_type=fake_qgis.QVariant.Int)]
+    old = FakeRenderer("singleSymbol")
+    layer.renderer_value = old
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "num",
+            {
+                "type": "categorizedSymbol",
+                "field": "num",
+                "categories": [{"value": 2.5, "label": "Midpoint", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert fake_qgis.built == []
+    assert layer.renderer_sets == []
+    assert layer.renderer_value is old
+
+
+def test_a_whole_value_on_an_integer_field_is_stored_as_an_integer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """``2.0`` is a value the integer field can hold, and the stored value says so."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
+    layer.field_list = [FakeField("num", field_type=fake_qgis.QVariant.Int)]
+
+    result = set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "num",
+            {
+                "type": "categorizedSymbol",
+                "field": "num",
+                "categories": [{"value": 2.0, "label": "Two", "symbol": FILL}],
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert result.renderer_type == "categorizedSymbol"
+    assert type(renderer.categories[0].value) is int
+    assert renderer.categories[0].value == 2
+    assert renderer.categoryIndexForValue(2) == 0
+
+
+def test_a_whole_float_and_an_integer_are_one_category_on_an_integer_field(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """The two spellings stay one category: the dedupe key does not depend on the type."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
+    layer.field_list = [FakeField("num", field_type=fake_qgis.QVariant.Int)]
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "num",
+            {
+                "type": "categorizedSymbol",
+                "field": "num",
+                "categories": [
+                    {"value": 2, "label": "Two", "symbol": FILL},
+                    {"value": 2.0, "label": "Two again", "symbol": FILL},
                 ],
             },
         ),
