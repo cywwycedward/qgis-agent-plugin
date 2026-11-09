@@ -2878,20 +2878,26 @@ def p12_input_path_policy(ctx: Context) -> str:
 
 def p13_destination_policy(ctx: Context) -> str:
     require_processing()
-    from qgis.core import QgsProcessing
+    from qgis.core import QgsProcessing, QgsVectorLayer
 
     layer_id = cities_layer(ctx, "p13 cities")
     target = ctx.fixtures.root / "p13 output.gpkg"
 
     # A real file destination is the caller's decision: QGIS writes it where it was told.
+    # ``gdal:buffervectors`` builds its SQL from the geometry column's name, and this
+    # fixture spells it ``geom``; without the name ogr2ogr fails on a column that does not
+    # exist and still leaves a 64 KB shell behind, so the run has to write real features.
     written = run_algorithm(
         ctx,
         "gdal:buffervectors",
-        {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": str(target)},
+        {"INPUT": layer_id, "DISTANCE": 1.0, "GEOMETRY": "geom", "OUTPUT": str(target)},
     )
     equal(written.status, ExecutionStatus.SUCCEEDED, f"buffervectors to a file: {written.error}")
     equal(outputs_of(written), {"OUTPUT": str(target)}, "the value of the output key")
-    require(target.is_file() and target.stat().st_size > 0, f"{target.name} was not written")
+    require(target.is_file(), f"{target.name} was not written")
+    product = QgsVectorLayer(str(target), "p13 written", "ogr")
+    require(product.isValid(), f"the written dataset {target.name} is not a readable layer")
+    equal(product.featureCount(), 5, "the features the written dataset really holds")
 
     # QGIS's own temporary output: the plugin takes the layer it produced.
     temporary = run_algorithm(
@@ -2920,13 +2926,14 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(error_code(remote), PATH_NOT_ALLOWED, "the code for a remote destination")
 
     return (
-        "a destination is handed to QGIS as it arrived: gdal:buffervectors wrote a real "
-        f"GeoPackage at the path the caller named ({target.stat().st_size} bytes, and the outputs "
-        'value is that same path), and native:buffer with OUTPUT="TEMPORARY_OUTPUT" SUCCEEDED '
-        "with its result layer in the project; the one destination verdict left is about a false "
-        'success, so OUTPUT="memory:" on the file-only gdal provider is '
-        "FAILED(INVALID_INPUT) before it runs, while a /vsicurl value as a destination is still "
-        "FAILED(PATH_NOT_ALLOWED) by the strict-type rule"
+        "a destination is handed to QGIS as it arrived: gdal:buffervectors wrote a GeoPackage at "
+        f"the path the caller named ({target.stat().st_size} bytes) that opens as a layer "
+        f"holding the {product.featureCount()} buffered features, and the outputs value is that "
+        'same path; native:buffer with OUTPUT="TEMPORARY_OUTPUT" SUCCEEDED with its result layer '
+        "in the project; the one destination verdict left is about a false success, so "
+        'OUTPUT="memory:" on the file-only gdal provider is FAILED(INVALID_INPUT) before it '
+        "runs, while a /vsicurl value as a destination is still FAILED(PATH_NOT_ALLOWED) by the "
+        "strict-type rule"
     )
 
 
