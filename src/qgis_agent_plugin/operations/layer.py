@@ -1046,8 +1046,10 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
     converted to the field's own type first: a value the field cannot hold is
     refused instead of becoming a category that can never match, and two spellings
     of one value (``True`` and ``"true"``) are one category (PRD v2 6.3).  An
-    integer field takes only whole values, and stores them as integers, so the
-    native category matches the field's own type.
+    integer field takes only whole values inside its own range, and stores them as
+    integers -- the same shape its own values have.  Qt compares category values
+    numerically (``2`` and ``2.0`` both match a feature value of 2), so the stored
+    shape is about the value the field can hold, not about the match.
     """
 
     if value is None:
@@ -1069,9 +1071,21 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
         if field.type() in (QVariant.Int, QVariant.LongLong):
             # A fraction on an integer field can never match a feature; a whole value is
             # stored as an integer.  The key stays the shared float, so 2 and 2.0 dedupe.
+            # UInt/ULongLong are left out: no provider in this build makes such a field.
             if not number.is_integer():
                 raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
-            return ("number", number), int(value)
+            whole = int(value)
+            # An integer outside int32/int64 is not a value the field can hold (the memory
+            # provider refuses such an attribute, and PyQt overflows for int64), so its
+            # category would never match.  QgsField.convertCompatible wraps a LongLong
+            # overflow instead of refusing it (2**63 -> -2**63, measured), hence the bounds.
+            if field.type() == QVariant.Int:
+                low, high = -(2**31), 2**31 - 1
+            else:
+                low, high = -(2**63), 2**63 - 1
+            if not low <= whole <= high:
+                raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
+            return ("number", number), whole
         return ("number", number), value
 
     variant = QVariant(value)

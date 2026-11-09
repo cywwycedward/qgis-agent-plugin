@@ -100,7 +100,7 @@ class FakeSymbol:
 
 
 # The fake's ``QVariant.Type`` values; the real ones are Bool 1, Int 2, LongLong 4,
-# Double 6, String 10, Date 14.
+# String 10, Date 14.
 VARIANT_STRING = 10
 
 
@@ -116,7 +116,6 @@ class FakeQVariant:
     Bool = 1
     Int = 2
     LongLong = 4
-    Double = 6
     String = VARIANT_STRING
     Date = 14
 
@@ -2222,6 +2221,81 @@ def test_a_whole_float_and_an_integer_are_one_category_on_an_integer_field(
     )
     assert code == INVALID_INPUT
     assert layer.renderer_sets == []
+
+
+@pytest.mark.parametrize(
+    ("variant_name", "value"),
+    [
+        ("Int", 2**31),
+        ("Int", -(2**31) - 1),
+        ("Int", 2**40),
+        ("LongLong", 2**63),
+        ("LongLong", -(2**63) - 1),
+        ("LongLong", 10**19),
+    ],
+)
+def test_an_integer_outside_the_fields_range_is_refused(
+    fake_qgis: FakeQgis, data_root: Path, variant_name: str, value: int
+) -> None:
+    """No such value can be a feature, so the category would never match (measured)."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
+    layer.field_list = [FakeField("num", field_type=getattr(fake_qgis.QVariant, variant_name))]
+    old = FakeRenderer("singleSymbol")
+    layer.renderer_value = old
+
+    code = refuse_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "num",
+            {
+                "type": "categorizedSymbol",
+                "field": "num",
+                "categories": [{"value": value, "label": "Out", "symbol": FILL}],
+            },
+        ),
+    )
+    assert code == INVALID_INPUT
+    assert fake_qgis.built == []
+    assert layer.renderer_sets == []
+    assert layer.renderer_value is old
+
+
+@pytest.mark.parametrize(
+    ("variant_name", "value"),
+    [
+        ("Int", 2**31 - 1),
+        ("Int", -(2**31)),
+        ("LongLong", 2**63 - 1),
+        ("LongLong", -(2**63)),
+    ],
+)
+def test_an_integer_at_the_fields_edge_is_stored_as_an_integer(
+    fake_qgis: FakeQgis, data_root: Path, variant_name: str, value: int
+) -> None:
+    """The outermost values the field can hold stay accepted and match natively."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
+    layer.field_list = [FakeField("num", field_type=getattr(fake_qgis.QVariant, variant_name))]
+
+    set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "num",
+            {
+                "type": "categorizedSymbol",
+                "field": "num",
+                "categories": [{"value": value, "label": "Edge", "symbol": FILL}],
+            },
+        ),
+    )
+
+    category = layer.renderer_sets[0].categories[0]
+    assert type(category.value) is int
+    assert category.value == value
+    assert layer.renderer_sets[0].categoryIndexForValue(value) == 0
 
 
 def test_a_category_value_the_field_cannot_hold_is_refused(
