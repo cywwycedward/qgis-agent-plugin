@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>QGIS Processing 方法审计（3.44.13）</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1d21; --muted: #6b7280; --line: #e5e7eb;
+    --head: #f6f7f9; --hover: #f0f4ff; --accent: #2563eb; --code: #0f172a;
+    --ok: #047857; --empty: #6b7280; --none: #9a3412; --args: #7c3aed; --err: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e5e7eb; --muted: #9aa4b2; --line: #262b33;
+      --head: #161a20; --hover: #1b2433; --accent: #60a5fa; --code: #e2e8f0;
+      --ok: #34d399; --empty: #9aa4b2; --none: #fb923c; --args: #a78bfa; --err: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.45 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg);
+           border-bottom: 1px solid var(--line); padding: 10px 16px 8px; }
+  h1 { font-size: 15px; margin: 0 0 8px; font-weight: 600; }
+  h1 span { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+  .tab { border: 1px solid var(--line); background: transparent; color: var(--fg);
+         padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .tab[aria-selected="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  input[type=search], select, button.page {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 13px;
+  }
+  input[type=search] { min-width: 260px; }
+  .stat { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+  main { padding: 0 16px 40px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 12.5px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left;
+           vertical-align: top; }
+  th { position: sticky; top: 118px; background: var(--head); z-index: 2;
+       font-weight: 600; font-size: 12px; }
+  tbody tr:hover { background: var(--hover); cursor: pointer; }
+  td.num { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  td.val { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+           color: var(--code); word-break: break-word; max-width: 720px; }
+  .k0 { color: var(--ok); } .k1 { color: var(--empty); } .k2 { color: var(--none); }
+  .k3 { color: var(--args); } .k4 { color: var(--err); }
+  .empty-state { color: var(--muted); padding: 24px 0; }
+  .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .pager span { color: var(--muted); font-size: 12px; }
+  code.hint { background: var(--head); border: 1px solid var(--line); border-radius: 4px;
+              padding: 1px 4px; font-size: 11.5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>QGIS Processing 方法与参数审计 <span id="meta"></span></h1>
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tab-a" role="tab" aria-selected="true">算法 <span id="count-a"></span></button>
+    <button class="tab" id="tab-p" role="tab" aria-selected="false">参数 <span id="count-p"></span></button>
+  </div>
+  <div class="filters">
+    <input type="search" id="q" placeholder="搜索 算法 / 参数 / 方法 / 返回值（空格分隔多个条件）">
+    <select id="kind">
+      <option value="">全部状态</option>
+      <option value="0">有值</option>
+      <option value="1">空</option>
+      <option value="2">None</option>
+      <option value="3">需参数（未调用）</option>
+      <option value="4">异常</option>
+    </select>
+    <select id="method"><option value="">全部方法</option></select>
+    <select id="provider"><option value="">全部 Provider</option></select>
+    <select id="ptype"><option value="">全部参数类型</option></select>
+    <button class="page" id="reset">重置</button>
+  </div>
+  <div class="stat" id="stat"></div>
+</header>
+<main>
+  <table>
+    <thead id="head"></thead>
+    <tbody id="body"></tbody>
+  </table>
+  <div class="pager">
+    <button class="page" id="prev">上一页</button>
+    <button class="page" id="next">下一页</button>
+    <span id="pageinfo"></span>
+  </div>
+</main>
+<script src="audit-data.js"></script>
+<script>
+"use strict";
+const DATA = window.AUDIT_DATA;
+const KIND = ["有值", "空", "None", "需参数", "异常"];
+const PAGE_SIZE = 120;
+
+const state = { tab: "a", page: 0, rows: [], view: [] };
+
+function valueText(value) {
+  if (value === null) return "null";
+  if (typeof value === "string") return value;
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function buildRows() {
+  const d = DATA;
+  const algos = d.algos, providers = d.providers, types = d.types;
+  const methodsA = d.methodsA, methodsP = d.methodsP;
+
+  state.a = d.aRows.map(([a, p, m, k, v]) => ({
+    algo: algos[a], provider: providers[p], param: "", type: "",
+    method: methodsA[m], kind: k, value: v, text: valueText(v),
+  }));
+  state.p = d.pRows.map(([a, param, t, m, k, v]) => ({
+    algo: algos[a], provider: "", param, type: types[t],
+    method: methodsP[m], kind: k, value: v, text: valueText(v),
+  }));
+
+  for (const rows of [state.a, state.p]) {
+    for (const row of rows) {
+      row.hay = (row.algo + " " + row.param + " " + row.type + " " + row.method + " " +
+                 row.text + " " + KIND[row.kind]).toLowerCase();
+    }
+  }
+
+  document.getElementById("meta").textContent =
+    "QGIS " + d.qgis + " · " + d.algorithms + " 个算法 · " + d.definitions +
+    " 个参数定义 · 数据生成后只读";
+  document.getElementById("count-a").textContent = "(" + state.a.length + " 行)";
+  document.getElementById("count-p").textContent = "(" + state.p.length + " 行)";
+}
+
+function fill(select, values) {
+  for (const value of [...new Set(values)].sort()) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  }
+}
+
+function apply() {
+  const query = document.getElementById("q").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const kind = document.getElementById("kind").value;
+  const method = document.getElementById("method").value;
+  const provider = document.getElementById("provider").value;
+  const type = document.getElementById("ptype").value;
+  const isAlgorithm = state.tab === "a";
+  const source = isAlgorithm ? state.a : state.p;
+
+  state.view = source.filter((row) => {
+    if (kind !== "" && row.kind !== Number(kind)) return false;
+    if (method !== "" && row.method !== method) return false;
+    if (isAlgorithm && provider !== "" && row.provider !== provider) return false;
+    if (!isAlgorithm && type !== "" && row.type !== type) return false;
+    for (const token of query) if (!row.hay.includes(token)) return false;
+    return true;
+  });
+  state.page = 0;
+  render();
+}
+
+function setHeader(isAlgorithm) {
+  const head = document.getElementById("head");
+  head.replaceChildren();
+  const tr = document.createElement("tr");
+  const columns = isAlgorithm
+    ? ["算法", "Provider", "方法", "类别", "返回值"]
+    : ["算法", "参数", "类型", "方法", "类别", "返回值"];
+  for (const label of columns) {
+    const cell = document.createElement("th");
+    cell.textContent = label;
+    tr.appendChild(cell);
+  }
+  head.appendChild(tr);
+}
+
+function render() {
+  const isAlgorithm = state.tab === "a";
+  setHeader(isAlgorithm);
+
+  const total = state.view.length;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  state.page = Math.min(state.page, pages - 1);
+  const start = state.page * PAGE_SIZE;
+  const slice = state.view.slice(start, start + PAGE_SIZE);
+
+  const body = document.getElementById("body");
+  body.textContent = "";
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index < slice.length; index++) {
+    const row = slice[index];
+    const tr = document.createElement("tr");
+    const cells = isAlgorithm
+      ? [row.algo, row.provider, row.method, KIND[row.kind], row.text]
+      : [row.algo, row.param, row.type, row.method, KIND[row.kind], row.text];
+    cells.forEach((cell, column) => {
+      const td = document.createElement("td");
+      if (column === 0) { td.className = "num"; td.textContent = String(start + index + 1); }
+      else if (column === cells.length - 1) {
+        td.className = "val k" + row.kind;
+        td.textContent = cell.length > 400 ? cell.slice(0, 400) + " …" : cell;
+      } else if (column === cells.length - 2) {
+        td.className = "k" + row.kind;
+        td.textContent = cell;
+      } else {
+        td.textContent = cell;
+      }
+      tr.appendChild(td);
+    });
+    tr.title = "点击查看完整返回值";
+    tr.addEventListener("click", () => {
+      const cell = tr.lastElementChild;
+      if (cell.dataset.expanded === "1") {
+        cell.textContent = row.text.length > 400 ? row.text.slice(0, 400) + " …" : row.text;
+        cell.dataset.expanded = "0";
+      } else {
+        cell.textContent = row.text;
+        cell.dataset.expanded = "1";
+      }
+    });
+    fragment.appendChild(tr);
+  }
+  body.appendChild(fragment);
+
+  document.getElementById("stat").textContent =
+    "匹配 " + total.toLocaleString() + " / " +
+    (isAlgorithm ? state.a.length : state.p.length).toLocaleString() +
+    " 行（当前筛选下）· 每页 " + PAGE_SIZE + " 行";
+  document.getElementById("pageinfo").textContent =
+    "第 " + (state.page + 1) + " / " + pages + " 页";
+  if (!slice.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = isAlgorithm ? 5 : 6;
+    td.className = "empty-state";
+    td.textContent = "没有匹配的行。放宽搜索或清空筛选。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
+function switchTab(tab) {
+  state.tab = tab;
+  document.getElementById("tab-a").setAttribute("aria-selected", tab === "a");
+  document.getElementById("tab-p").setAttribute("aria-selected", tab === "p");
+  document.getElementById("provider").style.display = tab === "a" ? "" : "none";
+  document.getElementById("ptype").style.display = tab === "a" ? "none" : "";
+  document.getElementById("method").value = "";
+  document.getElementById("method").replaceChildren(new Option("全部方法", ""));
+  fill(document.getElementById("method"), (tab === "a" ? state.a : state.p).map((row) => row.method));
+  apply();
+}
+
+if (!DATA) {
+  document.getElementById("stat").textContent =
+    "缺少 audit-data.js：该文件是本地生成的审计数据，未入库；请用 QGIS 的 Python 重新生成后刷新本页。";
+} else {
+  buildRows();
+  fill(document.getElementById("provider"), state.a.map((row) => row.provider));
+  fill(document.getElementById("ptype"), state.p.map((row) => row.type));
+  document.getElementById("tab-a").addEventListener("click", () => switchTab("a"));
+  document.getElementById("tab-p").addEventListener("click", () => switchTab("p"));
+  for (const id of ["q", "kind", "method", "provider", "ptype"]) {
+    document.getElementById(id).addEventListener("input", apply);
+  }
+  document.getElementById("prev").addEventListener("click", () => {
+    if (state.page > 0) { state.page--; render(); }
+  });
+  document.getElementById("next").addEventListener("click", () => {
+    const pages = Math.max(1, Math.ceil(state.view.length / PAGE_SIZE));
+    if (state.page + 1 < pages) { state.page++; render(); }
+  });
+  document.getElementById("reset").addEventListener("click", () => {
+    document.getElementById("q").value = "";
+    document.getElementById("kind").value = "";
+    document.getElementById("method").value = "";
+    document.getElementById("provider").value = "";
+    document.getElementById("ptype").value = "";
+    apply();
+  });
+  switchTab("a");
+}
+</script>
+</body>
+</html>

@@ -6,3 +6,6 @@ skills-lock.json
 
 # Agent handoff notes, per machine; the product never reads them.
 docs/delegate/
+
+# Generated audit data (7.6 MB); the viewer page is versioned, its data is regenerated locally.
+docs/audit/audit-data.js
