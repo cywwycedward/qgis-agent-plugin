@@ -1,4 +1,4 @@
-﻿"""The processing operations against a fake QGIS.
+"""The processing operations against a fake QGIS.
 
 The real registry, providers and algorithms are exercised by the QGIS acceptance
 run; here the question is whether the contract holds -- which keys reach the
@@ -990,7 +990,6 @@ def test_a_value_parameter_keeps_its_value(
         make_context(FakeProject(), data_root), run_params({"VALUE": value})
     )
     assert fake_qgis.registry.instances[0].calls[2][1] == {"VALUE": value}
-
 
 
 def test_a_layer_parameter_must_name_a_project_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
