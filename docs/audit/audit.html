@@ -10,7 +10,7 @@
     --head: #f4f5f7; --hover: #eef2ff; --accent: #3355ff; --accent-soft: #e8ecff;
     --code: #111827; --ok: #0f7b52; --ok-soft: #e6f6ee; --empty: #6b7280; --empty-soft: #f1f2f4;
     --none: #a1450b; --none-soft: #fdf0e4; --args: #6d28d9; --args-soft: #f1ebff;
-    --err: #b91c1c; --err-soft: #fdecec; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.1);
+    --err: #b91c1c; --err-soft: #fdecec; --cell: #fcfcfd;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -18,100 +18,96 @@
       --head: #171d27; --hover: #1a2331; --accent: #7c9bff; --accent-soft: #1c2740;
       --code: #e6e9ef; --ok: #4ade80; --ok-soft: #12251c; --empty: #9aa4b2; --empty-soft: #1a1f27;
       --none: #fbbf24; --none-soft: #2a2213; --args: #c4b5fd; --args-soft: #221b36;
-      --err: #f87171; --err-soft: #2a1618; --shadow: 0 1px 2px rgba(0,0,0,.4);
+      --err: #f87171; --err-soft: #2a1618; --cell: #121721;
     }
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    margin: 0; background: var(--bg); color: var(--fg);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-  }
-  header {
-    position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 92%, transparent);
-    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
-    padding: 14px 20px 12px;
-  }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 30; background: var(--bg);
+           border-bottom: 1px solid var(--line); padding: 14px 20px 12px; }
   .title { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-  h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; }
   .meta { color: var(--muted); font-size: 12px; }
   .tabs { display: flex; gap: 8px; margin: 12px 0 10px; }
-  .tab {
-    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
-    padding: 6px 14px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 13px;
-    display: flex; align-items: center; gap: 8px; transition: background .15s, border-color .15s;
-  }
+  .tab { border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+         padding: 6px 14px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 13px; }
   .tab:hover { background: var(--hover); }
-  .tab[aria-selected="true"] {
-    border-color: var(--accent); background: var(--accent-soft); color: var(--accent);
-    font-weight: 600;
-  }
-  .tab .count { color: var(--muted); font-variant-numeric: tabular-nums; font-weight: 400; }
-  .tab[aria-selected="true"] .count { color: var(--accent); }
+  .tab[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft);
+                               color: var(--accent); font-weight: 600; }
+  .tab .count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
   .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .search { position: relative; flex: 1 1 300px; max-width: 460px; }
-  .search input {
-    width: 100%; padding: 8px 12px 8px 32px; border: 1px solid var(--line);
-    border-radius: 8px; background: var(--panel); color: var(--fg); font: inherit; font-size: 13px;
-  }
-  .search input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  .search { position: relative; flex: 1 1 280px; max-width: 420px; }
+  .search input { width: 100%; padding: 8px 12px 8px 32px; border: 1px solid var(--line);
+                  border-radius: 8px; background: var(--panel); color: var(--fg); font: inherit; font-size: 13px; }
   .search svg { position: absolute; left: 10px; top: 9px; width: 14px; height: 14px; color: var(--muted); }
-  select, button {
-    border: 1px solid var(--line); background: var(--panel); color: var(--fg);
-    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; cursor: pointer;
-  }
+  select, button { border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+                   border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; cursor: pointer; }
   select:hover, button:hover { background: var(--hover); }
   button:disabled { opacity: .45; cursor: default; }
-  .hint { color: var(--muted); font-size: 12px; }
+  .picker { position: relative; }
+  #methodbtn { display: flex; align-items: center; gap: 6px; }
+  #methodbtn .pill { background: var(--accent); color: #fff; border-radius: 999px;
+                     padding: 0 7px; font-size: 11.5px; font-weight: 600; }
+  .panel { position: absolute; top: calc(100% + 6px); left: 0; width: 340px; z-index: 40;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           box-shadow: 0 8px 24px rgba(16,24,40,.14); padding: 10px; }
+  .panel input[type=search] { width: 100%; padding: 6px 8px; border: 1px solid var(--line);
+                              border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; }
+  .panel .opt { display: flex; align-items: center; gap: 6px; font-size: 12.5px;
+                color: var(--muted); margin: 8px 0; }
+  .panel .list { max-height: 300px; overflow: auto; border-top: 1px solid var(--line);
+                 border-bottom: 1px solid var(--line); padding: 4px 0; }
+  .panel .list label { display: flex; align-items: center; gap: 8px; padding: 3px 4px;
+                       border-radius: 5px; font-size: 13px; cursor: pointer; }
+  .panel .list label:hover { background: var(--hover); }
+  .panel .list .cnt { margin-left: auto; color: var(--muted); font-size: 11.5px; }
+  .panel .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
   main { padding: 14px 20px 48px; }
-  .summary { display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
-             color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+  .summary { color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
   .summary strong { color: var(--fg); font-weight: 600; }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
   table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
-  thead th {
-    position: sticky; top: 118px; z-index: 6; background: var(--head);
-    color: var(--muted); font-size: 11.5px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: .04em; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line);
-  }
-  tbody td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th { position: sticky; top: 122px; z-index: 5; background: var(--head); color: var(--muted);
+             font-size: 11.5px; font-weight: 600; letter-spacing: .03em; text-align: left;
+             padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr.entity { cursor: pointer; }
   tr.entity:hover td { background: var(--hover); }
   tr.entity.open td { background: var(--accent-soft); }
-  .chev { display: inline-block; width: 14px; color: var(--muted); transition: transform .15s; }
-  tr.entity.open .chev { transform: rotate(90deg); color: var(--accent); }
-  .name { font-weight: 600; }
-  .name .pname { color: var(--muted); font-weight: 400; }
+  .chev { color: var(--muted); transition: transform .15s; width: 16px; }
+  tr.entity.open .chev { color: var(--accent); transform: rotate(90deg); }
   .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
-  .badge {
-    display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px;
-    border: 1px solid transparent; margin-right: 4px; white-space: nowrap;
-  }
+  .name { font-weight: 600; white-space: nowrap; }
+  .mval { min-width: 170px; max-width: 340px; }
+  .mval .text { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+                word-break: break-word; }
+  .mval .text.open { -webkit-line-clamp: unset; }
+  .mval .k0 { color: var(--ok); } .mval .k1 { color: var(--empty); }
+  .mval .k2 { color: var(--none); } .mval .k3 { color: var(--args); }
+  .mval .k4 { color: var(--err); }
+  .mval .dash { color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px;
+           margin-right: 4px; white-space: nowrap; }
   .b0 { color: var(--ok); background: var(--ok-soft); }
   .b1 { color: var(--empty); background: var(--empty-soft); }
   .b2 { color: var(--none); background: var(--none-soft); }
   .b3 { color: var(--args); background: var(--args-soft); }
   .b4 { color: var(--err); background: var(--err-soft); }
-  td.detail { padding: 0; background: var(--panel); border-bottom: 1px solid var(--line); }
-  .methods {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 1px; background: var(--line); border-top: 1px solid var(--line);
-  }
-  .method {
-    background: var(--panel); padding: 8px 12px; min-height: 44px;
-    display: flex; flex-direction: column; gap: 2px;
-  }
-  .method .row1 { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+  tr.detail > td { padding: 0; border-bottom: 1px solid var(--line); }
+  .methods { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+             gap: 1px; background: var(--line); }
+  .method { background: var(--panel); padding: 8px 12px; }
+  .method .row1 { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
   .method .mname { font-weight: 600; font-size: 12.5px; }
-  .method .value {
-    color: var(--code); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-    font-size: 12px; word-break: break-word; white-space: pre-wrap; max-height: 7.5em; overflow: auto;
-  }
-  .method .value.clamped { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical;
-                           overflow: hidden; cursor: zoom-in; }
-  .method .value.open { -webkit-line-clamp: unset; cursor: zoom-in; }
-  .method.empty-value .value { color: var(--muted); font-style: italic; }
-  .pager { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+  .method .value { color: var(--code); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+                   font-size: 12px; white-space: pre-wrap; word-break: break-word; margin-top: 2px;
+                   max-height: 7.5em; overflow: auto; cursor: zoom-in; }
+  .method.empty .value { color: var(--muted); font-style: italic; }
+  .pager { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
   .pager .spacer { flex: 1; }
+  .hint { color: var(--muted); font-size: 12px; }
   .empty-state { color: var(--muted); padding: 28px 8px; text-align: center; }
   kbd { background: var(--head); border: 1px solid var(--line); border-bottom-width: 2px;
         border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: inherit; }
@@ -132,9 +128,22 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
         <circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5 14 14"></path>
       </svg>
-      <input id="q" type="search" placeholder="搜索 算法 / 参数 / 方法 / 返回值（空格分隔 = 同时满足）"
-             aria-label="搜索" autocomplete="off">
+      <input id="q" type="search" placeholder="搜索 算法 / 参数 / 方法 / 返回值（空格分隔 = 同时满足）" autocomplete="off">
     </label>
+    <div class="picker">
+      <button id="methodbtn" aria-haspopup="true" aria-expanded="false">
+        选择方法 <span class="pill" id="methodcount" hidden>0</span>
+      </button>
+      <div class="panel" id="methodpanel" hidden>
+        <input id="msearch" type="search" placeholder="按名称过滤方法…" autocomplete="off">
+        <label class="opt"><input type="checkbox" id="onlywith"> 只显示包含所选方法的行</label>
+        <div class="list" id="mlist"></div>
+        <div class="actions">
+          <button id="mclear">清空</button>
+          <button id="mclose">完成</button>
+        </div>
+      </div>
+    </div>
     <select id="kind" aria-label="状态">
       <option value="">全部状态</option>
       <option value="0">含「有值」</option>
@@ -143,26 +152,27 @@
       <option value="3">含「需参数」</option>
       <option value="4">含「异常」</option>
     </select>
-    <select id="method" aria-label="方法"><option value="">全部方法</option></select>
     <select id="provider" aria-label="Provider"><option value="">全部 Provider</option></select>
     <select id="ptype" aria-label="参数类型"><option value="">全部参数类型</option></select>
-    <button id="expand" title="展开当前页的所有行">展开本页</button>
+    <button id="expand">展开本页</button>
     <button id="collapse">全部收起</button>
     <button id="reset">重置</button>
   </div>
 </header>
 <main>
   <div class="summary" id="summary"></div>
-  <table>
-    <thead id="head"></thead>
-    <tbody id="body"></tbody>
-  </table>
+  <div class="tablewrap">
+    <table>
+      <thead id="head"></thead>
+      <tbody id="body"></tbody>
+    </table>
+  </div>
   <div class="pager">
     <button id="prev">上一页</button>
     <button id="next">下一页</button>
     <span class="hint" id="pageinfo"></span>
     <span class="spacer"></span>
-    <span class="hint">点任意行展开 / 收起 · 按 <kbd>/</kbd> 聚焦搜索 · <kbd>Esc</kbd> 清空</span>
+    <span class="hint">点行展开全部方法 · 点单元格值可展开长值 · <kbd>/</kbd> 搜索 · <kbd>Esc</kbd> 清空</span>
   </div>
 </main>
 <script src="audit-data.js"></script>
@@ -181,53 +191,53 @@ if (!DATA) {
 }
 
 function init() {
+  const $ = (id) => document.getElementById(id);
   const d = DATA;
-  const state = {
-    tab: "a",
-    page: 0,
-    expanded: new Set(),
-    view: [],
-    query: [],
-    kind: "",
-    method: "",
-    provider: "",
-    type: "",
-  };
 
   const algoRows = [];
   for (const [a, p, m, k, v] of d.aRows) {
     const entry = algoRows[a] || (algoRows[a] = {
-      key: "a" + a, index: a, id: d.algos[a], provider: d.providers[p], methods: [],
+      key: "a" + a, id: d.algos[a], provider: d.providers[p], methods: new Map(),
     });
-    entry.methods.push({ name: d.methodsA[m], kind: k, value: v, text: textOf(v) });
+    entry.methods.set(d.methodsA[m], { kind: k, text: textOf(v) });
   }
   const paramMap = new Map();
   for (const [a, param, t, m, k, v] of d.pRows) {
     const key = a + "\u0000" + param;
     let entry = paramMap.get(key);
     if (!entry) {
-      entry = {
-        key: "p" + key, index: a, param, id: d.algos[a], type: d.types[t], methods: [],
-      };
+      entry = { key: "p" + key, id: d.algos[a], param, type: d.types[t], methods: new Map() };
       paramMap.set(key, entry);
     }
-    entry.methods.push({ name: d.methodsP[m], kind: k, value: v, text: textOf(v) });
+    entry.methods.set(d.methodsP[m], { kind: k, text: textOf(v) });
   }
   const paramRows = [...paramMap.values()];
 
   for (const rows of [algoRows, paramRows]) {
     for (const entry of rows) {
       entry.counts = [0, 0, 0, 0, 0];
-      for (const method of entry.methods) entry.counts[method.kind]++;
-      entry.methods.sort((left, right) => left.name.localeCompare(right.name));
-      entry.hay = [entry.id, entry.provider || "", entry.param || "", entry.type || "",
-                   ...entry.methods.map((method) => method.name + " " + method.text)]
-                  .join(" ").toLowerCase();
+      entry.hayParts = [entry.id, entry.provider || "", entry.param || "", entry.type || ""];
+      for (const [name, method] of entry.methods) {
+        entry.counts[method.kind]++;
+        entry.hayParts.push(name + " " + method.text);
+      }
+      entry.hay = entry.hayParts.join(" ").toLowerCase();
+      entry.methodNames = [...entry.methods.keys()].sort();
     }
   }
 
-  const $ = (id) => document.getElementById(id);
-  const esc = (text) => String(text);
+  const state = {
+    tab: "a",
+    page: 0,
+    expanded: new Set(),
+    selected: { a: new Set(), p: new Set() },
+    onlyWith: false,
+    view: [],
+    query: [],
+    kind: "",
+    provider: "",
+    type: "",
+  };
 
   function textOf(value) {
     if (value === null) return "null";
@@ -239,105 +249,156 @@ function init() {
     return text.trim().toLowerCase().split(/\s+/).filter(Boolean);
   }
 
-  function matches(tokens_, text) {
-    for (const token of tokens_) if (!text.includes(token)) return false;
+  function matchesAll(query, text) {
+    for (const token of query) if (!text.includes(token)) return false;
     return true;
-  }
-
-  function methodMatches(method, query, kind, name) {
-    if (kind !== "" && method.kind !== Number(kind)) return false;
-    if (name !== "" && method.name !== name) return false;
-    if (!query.length) return true;
-    return matches(query, (method.name + " " + method.text).toLowerCase());
-  }
-
-  function entityMatches(entry, query, kind, name, provider, type) {
-    if (provider !== "" && entry.provider !== provider) return false;
-    if (type !== "" && entry.type !== type) return false;
-    if (kind !== "" && !entry.counts[Number(kind)]) return false;
-    if (!query.length && name === "") return true;
-    return entry.methods.some((method) => methodMatches(method, query, kind, name));
   }
 
   function currentSource() {
     return state.tab === "a" ? algoRows : paramRows;
   }
 
+  function selectedOf() {
+    return state.tab === "a" ? state.selected.a : state.selected.p;
+  }
+
+  function methodPasses(name, method, query, kind) {
+    if (kind !== "" && method.kind !== Number(kind)) return false;
+    if (!query.length) return true;
+    return matchesAll(query, (name + " " + method.text).toLowerCase());
+  }
+
+  function entityPasses(entry, query, kind, provider, type) {
+    if (provider !== "" && entry.provider !== provider) return false;
+    if (type !== "" && entry.type !== type) return false;
+    if (kind !== "" && !entry.counts[Number(kind)]) return false;
+    const chosen = selectedOf();
+    if (chosen.size && state.onlyWith) {
+      for (const name of chosen) if (!entry.methods.has(name)) return false;
+    }
+    if (!query.length) return true;
+    return matchesAll(query, entry.hay);
+  }
+
   function apply() {
     state.query = tokens($("q").value);
     state.kind = $("kind").value;
-    state.method = $("method").value;
     state.provider = state.tab === "a" ? $("provider").value : "";
     state.type = state.tab === "p" ? $("ptype").value : "";
     state.view = currentSource().filter((entry) =>
-      entityMatches(entry, state.query, state.kind, state.method, state.provider, state.type));
+      entityPasses(entry, state.query, state.kind, state.provider, state.type));
     state.page = 0;
     render();
+  }
+
+  function badge(kind, text) {
+    const span = document.createElement("span");
+    span.className = "badge b" + kind;
+    span.textContent = text;
+    return span;
   }
 
   function chips(counts) {
     const fragment = document.createDocumentFragment();
     for (let kind = 0; kind < 5; kind++) {
-      if (!counts[kind]) continue;
-      const badge = document.createElement("span");
-      badge.className = "badge b" + kind;
-      badge.textContent = KIND_LABEL[kind] + " " + counts[kind];
-      fragment.appendChild(badge);
+      if (counts[kind]) fragment.appendChild(badge(kind, KIND_LABEL[kind] + " " + counts[kind]));
     }
     return fragment;
   }
 
-  function methodCard(method, query, kind, name) {
-    const visible = methodMatches(method, query, kind, name);
+  function valueCell(entry, name) {
+    const td = document.createElement("td");
+    td.className = "mval";
+    const method = entry.methods.get(name);
+    if (!method) {
+      const dash = document.createElement("span");
+      dash.className = "dash";
+      dash.textContent = "—";
+      td.appendChild(dash);
+      return td;
+    }
+    const text = document.createElement("div");
+    text.className = "text k" + method.kind;
+    text.textContent = method.text;
+    if (method.text.length > 60) {
+      text.addEventListener("click", (event) => {
+        event.stopPropagation();
+        text.classList.toggle("open");
+      });
+    }
+    td.appendChild(text);
+    return td;
+  }
+
+  function methodCard(name, method) {
     const card = document.createElement("div");
-    card.className = "method k" + method.kind + (method.text === "" || method.text === "null" ? " empty-value" : "");
+    card.className = "method" + (method.text === "null" || method.text === "" ? " empty" : "");
     const head = document.createElement("div");
     head.className = "row1";
     const left = document.createElement("span");
     left.className = "mname mono";
-    left.textContent = method.name;
-    const right = document.createElement("span");
-    right.className = "badge b" + method.kind;
-    right.textContent = KIND_LABEL[method.kind];
-    head.append(left, right);
+    left.textContent = name;
+    head.append(left, badge(method.kind, KIND_LABEL[method.kind]));
     const value = document.createElement("div");
-    value.className = "value" + (method.text.length > 160 ? " clamped" : "");
+    value.className = "value";
     value.textContent = method.text.length > 1200 ? method.text.slice(0, 1200) + " …" : method.text;
     value.addEventListener("click", (event) => {
       event.stopPropagation();
-      value.classList.toggle("open");
-      value.classList.toggle("clamped", false);
+      value.style.maxHeight = value.style.maxHeight === "none" ? "7.5em" : "none";
     });
     card.append(head, value);
-    card.hidden = !visible;
     return card;
   }
 
-  function detailRow(entry) {
+  function detailRow(entry, names) {
     const tr = document.createElement("tr");
+    tr.className = "detail";
     const td = document.createElement("td");
-    td.className = "detail";
-    td.colSpan = state.tab === "a" ? 4 : 5;
+    td.colSpan = columnCount();
     const grid = document.createElement("div");
     grid.className = "methods";
-    const cards = entry.methods.map((method) =>
-      methodCard(method, state.query, state.kind, state.method));
-    let shown = 0;
-    for (const card of cards) { if (!card.hidden) shown++; grid.appendChild(card); }
-    if (!shown) {
+    const chosen = names.length ? names : entry.methodNames;
+    if (!chosen.length) {
       const none = document.createElement("div");
-      none.className = "method empty-value";
-      none.textContent = "当前筛选下没有匹配的方法。";
+      none.className = "method empty";
+      none.textContent = "没有可显示的方法。";
       grid.appendChild(none);
+    }
+    for (const name of chosen) {
+      const method = entry.methods.get(name);
+      if (!method) continue;
+      if (!methodPasses(name, method, state.query, state.kind)) continue;
+      grid.appendChild(methodCard(name, method));
     }
     td.appendChild(grid);
     tr.appendChild(td);
     return tr;
   }
 
+  function columnCount() {
+    const chosen = selectedOf().size;
+    const base = state.tab === "a" ? 2 : 3;
+    return 1 + base + chosen + 1;
+  }
+
+  function makeHead() {
+    const isAlgorithm = state.tab === "a";
+    const chosen = [...selectedOf()].sort();
+    const labels = isAlgorithm ? ["", "算法", "Provider"] : ["", "算法", "参数", "类型"];
+    const tr = document.createElement("tr");
+    for (const label of [...labels, ...chosen, "方法状态"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      if (chosen.includes(label)) th.classList.add("mono");
+      tr.appendChild(th);
+    }
+    return tr;
+  }
+
   function render() {
     const isAlgorithm = state.tab === "a";
-    $("head").replaceChildren(makeHead(isAlgorithm));
+    const chosen = [...selectedOf()].sort();
+    $("head").replaceChildren(makeHead());
 
     const total = state.view.length;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -347,31 +408,39 @@ function init() {
 
     const body = $("body");
     body.replaceChildren();
+
     for (const entry of slice) {
       const tr = document.createElement("tr");
       tr.className = "entity";
       const open = state.expanded.has(entry.key);
-      tr.classList.toggle("open", open);
-      tr.dataset.key = entry.key;
+      if (open) tr.classList.add("open");
 
-      const cells = isAlgorithm
-        ? [entry.id, entry.provider]
-        : [entry.id, entry.param, entry.type];
+      const chev = document.createElement("td");
+      chev.className = "chev";
+      chev.textContent = "▸";
+      tr.appendChild(chev);
 
-      const focus = document.createElement("td");
-      focus.className = "chev";
-      focus.textContent = "▸";
-      tr.appendChild(focus);
+      const name = document.createElement("td");
+      name.className = "name mono";
+      name.textContent = entry.id;
+      tr.appendChild(name);
 
-      for (const text of cells) {
-        const td = document.createElement("td");
-        if (text === entry.id) { td.className = "name mono"; td.textContent = text; }
-        else if (text === entry.param) {
-          td.className = "mono pname";
-          td.textContent = text;
-        } else td.textContent = text;
-        tr.appendChild(td);
+      if (isAlgorithm) {
+        const provider = document.createElement("td");
+        provider.textContent = entry.provider;
+        tr.appendChild(provider);
+      } else {
+        const param = document.createElement("td");
+        param.className = "mono";
+        param.textContent = entry.param;
+        tr.appendChild(param);
+        const type = document.createElement("td");
+        type.textContent = entry.type;
+        tr.appendChild(type);
       }
+
+      for (const methodName of chosen) tr.appendChild(valueCell(entry, methodName));
+
       const counts = document.createElement("td");
       counts.replaceChildren(chips(entry.counts));
       tr.appendChild(counts);
@@ -382,13 +451,13 @@ function init() {
         render();
       });
       body.appendChild(tr);
-      if (open) body.appendChild(detailRow(entry));
+      if (open) body.appendChild(detailRow(entry, chosen));
     }
 
     if (!slice.length) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = isAlgorithm ? 4 : 5;
+      td.colSpan = columnCount();
       td.className = "empty-state";
       td.textContent = "没有匹配的行。放宽搜索，或清空筛选。";
       tr.appendChild(td);
@@ -397,31 +466,19 @@ function init() {
 
     const summary = $("summary");
     summary.replaceChildren();
-    const matched = document.createElement("strong");
-    matched.textContent = total.toLocaleString();
+    const strong = document.createElement("strong");
+    strong.textContent = total.toLocaleString();
     const totals = isAlgorithm ? algoRows.length : paramRows.length;
+    const columns = chosen.length
+      ? ` · 已选 ${chosen.length} 个方法作为列`
+      : " · 点行展开全部方法";
     summary.append(
-      "匹配 ",
-      matched,
-      ` ${isAlgorithm ? "个算法" : "个参数"} / 共 ${totals.toLocaleString()} · ` +
-        `每页 ${PAGE_SIZE} 行 · 点行展开`,
+      "匹配 ", strong, ` ${isAlgorithm ? "个算法" : "个参数"} / 共 ${totals.toLocaleString()}`,
+      ` · 每页 ${PAGE_SIZE} 行${columns}`,
     );
     $("pageinfo").textContent = `第 ${state.page + 1} / ${pages} 页`;
     $("prev").disabled = state.page === 0;
     $("next").disabled = state.page + 1 >= pages;
-  }
-
-  function makeHead(isAlgorithm) {
-    const tr = document.createElement("tr");
-    const columns = isAlgorithm
-      ? ["", "算法", "Provider", "方法状态"]
-      : ["", "算法", "参数", "类型", "方法状态"];
-    for (const label of columns) {
-      const th = document.createElement("th");
-      th.textContent = label;
-      tr.appendChild(th);
-    }
-    return tr;
   }
 
   function fill(select, values) {
@@ -436,15 +493,63 @@ function init() {
     }
   }
 
+  function refreshMethodList() {
+    const source = currentSource();
+    const counts = new Map();
+    for (const entry of source) {
+      for (const name of entry.methods.keys()) counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    const filter = $("msearch").value.trim().toLowerCase();
+    const list = $("mlist");
+    list.replaceChildren();
+    const chosen = selectedOf();
+    for (const name of [...counts.keys()].sort()) {
+      if (filter && !name.toLowerCase().includes(filter)) continue;
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = chosen.has(name);
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(name);
+        else chosen.delete(name);
+        updateMethodButton();
+        apply();
+      });
+      const text = document.createElement("span");
+      text.className = "mono";
+      text.textContent = name;
+      const count = document.createElement("span");
+      count.className = "cnt";
+      count.textContent = counts.get(name);
+      label.append(box, text, count);
+      list.appendChild(label);
+    }
+    if (!list.childElementCount) {
+      const empty = document.createElement("div");
+      empty.className = "hint";
+      empty.textContent = "没有匹配的方法名。";
+      list.appendChild(empty);
+    }
+  }
+
+  function updateMethodButton() {
+    const chosen = selectedOf();
+    $("methodcount").textContent = chosen.size;
+    $("methodcount").hidden = chosen.size === 0;
+    $("methodbtn").firstChild.textContent = chosen.size ? "已选方法 " : "选择方法 ";
+  }
+
   function switchTab(tab) {
     state.tab = tab;
     state.page = 0;
+    state.expanded.clear();
     $("tab-a").setAttribute("aria-selected", tab === "a");
     $("tab-p").setAttribute("aria-selected", tab === "p");
     $("provider").style.display = tab === "a" ? "" : "none";
     $("ptype").style.display = tab === "a" ? "none" : "";
-    $("method").replaceChildren(new Option("全部方法", ""));
-    fill($("method"), currentSource().flatMap((entry) => entry.methods.map((m) => m.name)));
+    $("msearch").value = "";
+    updateMethodButton();
+    refreshMethodList();
     apply();
   }
 
@@ -454,12 +559,37 @@ function init() {
   $("count-a").textContent = algoRows.length;
   $("count-p").textContent = paramRows.length;
   fill($("provider"), algoRows.map((entry) => entry.provider));
-  fill($("ptype"), [...new Set(paramRows.map((entry) => entry.type))].sort());
+  fill($("ptype"), paramRows.map((entry) => entry.type));
 
   $("tab-a").addEventListener("click", () => switchTab("a"));
   $("tab-p").addEventListener("click", () => switchTab("p"));
   $("q").addEventListener("input", apply);
-  for (const id of ["kind", "method", "provider", "ptype"]) $(id).addEventListener("input", apply);
+  for (const id of ["kind", "provider", "ptype"]) $(id).addEventListener("input", apply);
+  $("onlywith").addEventListener("change", () => { state.onlyWith = $("onlywith").checked; apply(); });
+  $("msearch").addEventListener("input", refreshMethodList);
+  $("methodbtn").addEventListener("click", () => {
+    const panel = $("methodpanel");
+    panel.hidden = !panel.hidden;
+    $("methodbtn").setAttribute("aria-expanded", String(!panel.hidden));
+    if (!panel.hidden) refreshMethodList();
+  });
+  $("mclose").addEventListener("click", () => {
+    $("methodpanel").hidden = true;
+    $("methodbtn").setAttribute("aria-expanded", "false");
+  });
+  $("mclear").addEventListener("click", () => {
+    selectedOf().clear();
+    updateMethodButton();
+    refreshMethodList();
+    apply();
+  });
+  document.addEventListener("click", (event) => {
+    const picker = event.target.closest(".picker");
+    if (!picker) {
+      $("methodpanel").hidden = true;
+      $("methodbtn").setAttribute("aria-expanded", "false");
+    }
+  });
   $("prev").addEventListener("click", () => { if (state.page > 0) { state.page--; render(); } });
   $("next").addEventListener("click", () => {
     const pages = Math.max(1, Math.ceil(state.view.length / PAGE_SIZE));
@@ -474,10 +604,14 @@ function init() {
   $("reset").addEventListener("click", () => {
     $("q").value = "";
     $("kind").value = "";
-    $("method").value = "";
     $("provider").value = "";
     $("ptype").value = "";
+    state.onlyWith = false;
+    $("onlywith").checked = false;
+    selectedOf().clear();
     state.expanded.clear();
+    updateMethodButton();
+    refreshMethodList();
     apply();
   });
   document.addEventListener("keydown", (event) => {
@@ -487,6 +621,7 @@ function init() {
     }
     if (event.key === "Escape") {
       $("q").value = "";
+      $("methodpanel").hidden = true;
       apply();
     }
   });
