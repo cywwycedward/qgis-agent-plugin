@@ -2228,20 +2228,18 @@ RASTER_RENDERER_TYPES = [
 ]
 
 # The acceptance registers its own Processing provider: it is the only way to reach the
-# third-party paths PRD 10.1 asks for, because no algorithm QGIS ships here refuses
-# canExecute() or returns a value with no JSON image (measured: 440/440 answer true).
-# A provider added through ``QgsProcessingRegistry.addProvider`` is a third-party
-# provider in the only sense this plugin can see, and its algorithms go through the
-# ordinary path (discovery, createAlgorithmById, canExecute, checkParameterValues, run).
+# third-party path PRD 10.1 asks for, because no algorithm QGIS ships here returns a
+# value with no JSON image (measured).  A provider added through
+# ``QgsProcessingRegistry.addProvider`` is a third-party provider in the only sense this
+# plugin can see, and its algorithms go through the ordinary path: discovery, then
+# ``qgis.processing.run()`` like every other algorithm.
 PROBE_PROVIDER = "p5probe"
 PROBE_ALGORITHMS = (
-    f"{PROBE_PROVIDER}:cant_execute",
     f"{PROBE_PROVIDER}:non_json",
     f"{PROBE_PROVIDER}:runs",
 )
-# What the registered probe algorithms were asked to do, so a case can show the plugin
-# stopped at canExecute() rather than running the algorithm, and that P15's transfer
-# really happened before the result was refused.
+# What the registered probe algorithms were asked to do, so a case can show that P15's
+# transfer really happened before the result was refused.
 PROBE_CALLS: list[str] = []
 # The native registry takes ownership of a provider; the Python wrapper stays alive here
 # for the same reason ``_REGISTERED_RENDERER_METADATA`` does.
@@ -2267,30 +2265,6 @@ def processing_probe_provider() -> None:
         QgsProcessingProvider,
         QgsVectorLayer,
     )
-
-    class CannotExecute(QgsProcessingAlgorithm):
-        """A third-party algorithm that answers ``canExecute()`` false (P11)."""
-
-        def name(self) -> str:
-            return "cant_execute"
-
-        def displayName(self) -> str:
-            return "P5 probe: cannot execute"
-
-        def createInstance(self):  # noqa: N802 - the native spelling
-            return CannotExecute()
-
-        def initAlgorithm(self, config=None):  # noqa: N802 - the native spelling
-            pass
-
-        def canExecute(self):  # noqa: N802 - the native spelling
-            PROBE_CALLS.append(f"{PROBE_PROVIDER}:cant_execute.canExecute")
-            # 3.44 binds this as (bool, message); the plugin has to read the tuple.
-            return False, "the p5 acceptance probe is unavailable on this machine"
-
-        def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
-            PROBE_CALLS.append(f"{PROBE_PROVIDER}:cant_execute.processAlgorithm")
-            raise AssertionError("an algorithm whose canExecute() is false must never run")
 
     class NonJsonResult(QgsProcessingAlgorithm):
         """Hands over a real result layer, then a value with no JSON image (P15)."""
@@ -2342,14 +2316,14 @@ def processing_probe_provider() -> None:
             return "P5 acceptance probes"
 
         def loadAlgorithms(self) -> None:  # noqa: N802 - the native spelling
-            for algorithm in (CannotExecute(), NonJsonResult(), Runs()):
+            for algorithm in (NonJsonResult(), Runs()):
                 self.addAlgorithm(algorithm)
 
     provider = AcceptanceProvider()
     if not QgsApplication.processingRegistry().addProvider(provider):
         raise Skip(
             "the processing registry refused the acceptance's own provider (addProvider() "
-            "returned false), so the third-party paths of P01/P02/P11/P15 cannot be measured here"
+            "returned false), so the third-party paths of P01/P02/P15 cannot be measured here"
         )
     _registered_provider.append(provider)
 
@@ -2438,17 +2412,7 @@ def p03_algorithm_info_fields(ctx: Context) -> str:
     )
 
     registry = QgsApplication.processingRegistry()
-    nine_fields = [
-        "default",
-        "depends_on",
-        "description",
-        "help",
-        "is_destination",
-        "name",
-        "optional",
-        "options",
-        "type",
-    ]
+    six_fields = ["accepted_types", "description", "help", "name", "options", "type"]
     parameters_seen = 0
     outputs_seen = 0
     for algorithm_id in (
@@ -2457,92 +2421,107 @@ def p03_algorithm_info_fields(ctx: Context) -> str:
         "native:basicstatisticsforfields",
     ):
         algorithm = registry.algorithmById(algorithm_id)
-        definitions = algorithm.parameterDefinitions()
+        require(algorithm is not None, f"{algorithm_id} is not registered here")
+        visible = [
+            definition
+            for definition in algorithm.parameterDefinitions()
+            if not definition.flags() & QgsProcessingParameterDefinition.FlagHidden
+        ]
         info = algorithm_info(ctx, algorithm_id)
         equal(
             sorted(info),
-            ["algorithm", "description", "outputs", "parameters"],
+            ["algorithm", "outputs", "parameters"],
             f"{algorithm_id}: the result fields",
         )
+        details = info["algorithm"]
         equal(
-            info["description"],
-            algorithm.shortHelpString() or "",
-            f"{algorithm_id}: description",
+            sorted(details),
+            ["help", "id", "name", "short_description"],
+            f"{algorithm_id}: the algorithm fields",
         )
+        equal(details["id"], algorithm.id(), f"{algorithm_id}: id")
+        equal(details["name"], algorithm.displayName(), f"{algorithm_id}: name")
+        equal(
+            details["short_description"],
+            algorithm.shortDescription() or "",
+            f"{algorithm_id}: short_description",
+        )
+        equal(details["help"], algorithm.shortHelpString() or "", f"{algorithm_id}: help")
         equal(
             [parameter["name"] for parameter in info["parameters"]],
-            [definition.name() for definition in definitions],
-            f"{algorithm_id}: the native parameter order",
+            [definition.name() for definition in visible],
+            f"{algorithm_id}: the native parameter order with the hidden ones skipped",
         )
-        for parameter, definition in zip(info["parameters"], definitions, strict=True):
+        for parameter, definition in zip(info["parameters"], visible, strict=True):
             name = f"{algorithm_id}.{definition.name()}"
-            equal(sorted(parameter), nine_fields, f"{name}: the nine fields")
-            equal(parameter["type"], definition.type(), f"{name}: type")
+            equal(sorted(parameter), six_fields, f"{name}: the six fields")
+            equal(parameter["type"], definition.__class__.__name__, f"{name}: type")
             equal(parameter["description"], definition.description() or "", f"{name}: description")
             equal(parameter["help"], definition.help() or "", f"{name}: help")
-            equal(
-                parameter["optional"],
-                bool(definition.flags() & QgsProcessingParameterDefinition.FlagOptional),
-                f"{name}: the optional flag",
-            )
-            equal(parameter["is_destination"], bool(definition.isDestination()), f"{name}: dest")
-            equal(
-                parameter["depends_on"],
-                list(definition.dependsOnOtherParameters()),
-                f"{name}: depends_on",
-            )
             if isinstance(definition, QgsProcessingParameterEnum):
                 equal(parameter["options"], list(definition.options()), f"{name}: option order")
             else:
                 equal(parameter["options"], None, f"{name}: options on a non-enum parameter")
+            parameter_type = registry.parameterType(definition.type())
+            equal(
+                parameter["accepted_types"],
+                [] if parameter_type is None else list(parameter_type.acceptedPythonTypes()),
+                f"{name}: accepted_types",
+            )
             parameters_seen += 1
         equal(
-            [(output["name"], output["type"]) for output in info["outputs"]],
-            [(output.name(), output.type()) for output in algorithm.outputDefinitions()],
-            f"{algorithm_id}: the native output order",
+            [(output["name"], output["type"], output["description"]) for output in info["outputs"]],
+            [
+                (output.name(), output.__class__.__name__, output.description() or "")
+                for output in algorithm.outputDefinitions()
+            ],
+            f"{algorithm_id}: the native output order, the class name as the type",
         )
         outputs_seen += len(info["outputs"])
 
-    buffer = parameters_by_name(algorithm_info(ctx, "native:buffer"))
-    equal(buffer["SEGMENTS"]["default"], 5, "a native numeric default")
-    equal(buffer["DISSOLVE"]["default"], False, "a native boolean default")
-    equal(buffer["OUTPUT"]["default"], None, "an unset destination default")
-    equal(buffer["OUTPUT"]["is_destination"], True, "OUTPUT is a destination")
-    equal(buffer["OUTPUT"]["optional"], False, "a required destination is not optional")
-    equal(buffer["INPUT"]["help"], "", "an empty native help stays an empty string")
+    # A hidden parameter really is left out: this run finds an algorithm that hides one.
+    hidden_algorithm = next(
+        (
+            algorithm
+            for algorithm in processing_algorithms()
+            if any(
+                definition.flags() & QgsProcessingParameterDefinition.FlagHidden
+                for definition in algorithm.parameterDefinitions()
+            )
+        ),
+        None,
+    )
+    if hidden_algorithm is None:
+        raise Skip(
+            "no registered algorithm hides a parameter here, so nothing would prove the skip"
+        )
+    hidden = [
+        definition.name()
+        for definition in hidden_algorithm.parameterDefinitions()
+        if definition.flags() & QgsProcessingParameterDefinition.FlagHidden
+    ]
+    listed = [
+        parameter["name"] for parameter in algorithm_info(ctx, hidden_algorithm.id())["parameters"]
+    ]
+    require(
+        not set(hidden) & set(listed),
+        f"{hidden_algorithm.id()}: a hidden parameter was reported anyway: {listed}",
+    )
 
     zonal = parameters_by_name(algorithm_info(ctx, "native:zonalstatisticsfb"))
-    equal(
-        zonal["STATISTICS"]["options"],
-        [
-            "Count",
-            "Sum",
-            "Mean",
-            "Median",
-            "St dev",
-            "Minimum",
-            "Maximum",
-            "Range",
-            "Minority",
-            "Majority",
-            "Variety",
-            "Variance",
-        ],
-        "an enum's options in native order",
+    enum_options = zonal["STATISTICS"]["options"]
+    require(
+        isinstance(enum_options, list) and len(enum_options) > 1,
+        f"an enum's options did not survive: {enum_options!r}",
     )
     equal(zonal["COLUMN_PREFIX"]["options"], None, "options are null for a string parameter")
-
-    basic = parameters_by_name(algorithm_info(ctx, "native:basicstatisticsforfields"))
-    equal(basic["FIELD_NAME"]["depends_on"], ["INPUT_LAYER"], "a dependent parameter")
-    equal(basic["OUTPUT_HTML_FILE"]["optional"], True, "an optional destination")
-
-    gdal = algorithm_info(ctx, "gdal:aspect")
-    equal(gdal["description"], "", "an algorithm with no help reports an empty description")
     return (
         f"{parameters_seen} parameters and {outputs_seen} outputs of three algorithms read back "
-        "field by field: the nine fields, native order, FlagOptional, isDestination, "
-        "dependsOnOtherParameters, an enum's option order, an empty help as '', an unset "
-        "default as null and a no-help algorithm as an empty description"
+        f"field by field against the live definitions (six fields, native order, the class name "
+        f"as the type, acceptedPythonTypes as accepted_types, an enum's option order, null "
+        f"options elsewhere, four algorithm fields); {hidden_algorithm.id()} hides "
+        f"{len(hidden)} parameter(s) ({', '.join(hidden)}) and none of them is reported; "
+        f"STATISTICS keeps its {len(enum_options)} options and COLUMN_PREFIX answers null"
     )
 
 
@@ -2553,21 +2532,27 @@ def p04_unknown_algorithm(ctx: Context) -> str:
     info = ctx.run("processing.get_algorithm_info", {"algorithm_id": missing})
     equal(info.status, ExecutionStatus.FAILED, "get_algorithm_info on an unknown id")
     equal(error_code(info), INVALID_INPUT, "the code for an unknown algorithm")
+
+    # The run no longer pre-checks the id: QGIS's own lookup raises, and the exception
+    # reaches the record the one way the engine reports an unexpected failure.
     run = run_algorithm(ctx, missing, {})
     equal(run.status, ExecutionStatus.FAILED, "run_algorithm on an unknown id")
-    equal(error_code(run), INVALID_INPUT, "the run code for an unknown algorithm")
+    equal(error_code(run), INTERNAL_ERROR, "the run code for an unknown algorithm")
+    message = message_of(run)
+    equal(message, "QgsProcessingException: unexpected failure", "the run message")
+    require(missing not in message, f"the message repeats the algorithm id: {message!r}")
     for record in (info, run):
         require(record.result is None, "a refused call carries a result")
     return (
-        "an unknown algorithm id is FAILED(INVALID_INPUT) for both operations with no result, not "
-        "OPERATION_NOT_FOUND, and nothing was executed"
+        "an unknown algorithm id is FAILED(INVALID_INPUT) from get_algorithm_info's own registry "
+        "lookup and FAILED(INTERNAL_ERROR) from run_algorithm, whose message is the engine's "
+        f"fixed {message!r}: QGIS's own exception, logged locally and never quoted into the "
+        "record; neither call carries a result and nothing was executed"
     )
 
 
 def p05_unknown_key(ctx: Context) -> str:
     require_processing()
-    from qgis.core import QgsApplication, QgsProcessingContext, QgsProject
-
     layer_id = cities_layer(ctx, "p05 cities")
     before = project_layer_ids()
     parameters = {
@@ -2578,23 +2563,21 @@ def p05_unknown_key(ctx: Context) -> str:
         "OUTPUT": "memory:",
         "P5_NOT_A_PARAMETER": 1,
     }
-    # The premise of the PRD's rule: QGIS itself accepts an undeclared key.
-    algorithm = QgsApplication.processingRegistry().createAlgorithmById("native:buffer")
-    context = QgsProcessingContext()
-    context.setProject(QgsProject.instance())
-    accepted, message = algorithm.checkParameterValues(parameters, context)
-    require(
-        accepted,
-        f"QGIS refused the undeclared key itself ({message!r}); the case needs a new premise",
-    )
 
     record = run_algorithm(ctx, "native:buffer", parameters)
-    equal(record.status, ExecutionStatus.FAILED, "a run with an undeclared parameter")
-    equal(error_code(record), INVALID_INPUT, "the code for an undeclared parameter")
-    equal(project_layer_ids(), before, "the layers after the refused call")
+    equal(
+        record.status,
+        ExecutionStatus.SUCCEEDED,
+        f"a run with an undeclared parameter: {record.error}",
+    )
+    layer = output_layer(ctx, record, "OUTPUT")
+    require(layer.isValid(), "the buffer result is not a valid layer")
+    equal(layer.featureCount(), 5, "one buffer per input point")
+    equal(len(project_layer_ids()), len(before) + 1, "the layers after the run")
     return (
-        "QGIS's own checkParameterValues accepted P5_NOT_A_PARAMETER; the plugin refused the same "
-        "parameters as FAILED(INVALID_INPUT) before running anything and added no layer"
+        "P5_NOT_A_PARAMETER reached QGIS untouched and native:buffer SUCCEEDED, adding a valid "
+        f"{layer.featureCount()}-feature layer to the project: the plugin has no parameter-name "
+        "whitelist any more, so an undeclared key is QGIS's to ignore"
     )
 
 
@@ -2769,90 +2752,35 @@ def p10_json_values(ctx: Context) -> str:
     )
 
 
-def p11_cannot_execute(ctx: Context) -> str:
-    require_processing()
-    processing_probe_provider()
-    algorithms = processing_algorithms()
-    shipped = [item for item in algorithms if item.id() not in PROBE_ALGORITHMS]
-    refusing = []
-    for algorithm in shipped:
-        outcome = algorithm.canExecute()
-        executable = bool(outcome[0]) if isinstance(outcome, tuple) else bool(outcome)
-        if not executable:
-            refusing.append(algorithm.id())
-
-    # The probe the run registered answers canExecute() with a false first element, so the
-    # plugin's own refusal branch is reachable without a fake (PRD 10.1 P11, charter 7/E1).
-    target = f"{PROBE_PROVIDER}:cant_execute"
-    require(
-        any(algorithm.id() == target for algorithm in algorithms),
-        f"the registered probe {target} is missing from the live registry",
-    )
-    PROBE_CALLS.clear()
-    record = run_algorithm(ctx, target, {})
-    equal(record.status, ExecutionStatus.FAILED, f"{target} cannot execute")
-    equal(error_code(record), INVALID_INPUT, "the code for an algorithm that cannot execute")
-    require(record.result is None, "a refused run carries a result")
-    message = message_of(record)
-    require(
-        "cannot execute" in message,
-        f"the refusal did not come from the canExecute() check: {message!r}",
-    )
-    require(
-        f"{target}.canExecute" in PROBE_CALLS,
-        f"the plugin never asked the probe whether it can execute: {PROBE_CALLS}",
-    )
-    require(
-        f"{target}.processAlgorithm" not in PROBE_CALLS,
-        f"the algorithm ran although canExecute() answered false: {PROBE_CALLS}",
-    )
-    # The numbers in the evidence are this run's own: a machine where a shipped algorithm
-    # refuses canExecute() must say so instead of repeating a fixed sentence (review r2 B1).
-    accepted = len(shipped) - len(refusing)
-    refusals = (
-        f"{len(refusing)} of them refuse ({', '.join(refusing[:3])})"
-        if refusing
-        else "none of them refuses"
-    )
-    return (
-        f"{accepted} of the {len(shipped)} algorithms QGIS ships answer canExecute() true and "
-        f"{refusals} — measured in this run, so a shipped algorithm that refuses would be "
-        f"reported rather than papered over — while {target}, registered by this run through "
-        f"QgsProcessingRegistry.addProvider, is FAILED(INVALID_INPUT) with no result: the plugin "
-        f"asked canExecute() and never called the algorithm"
-    )
-
-
 def p12_input_path_policy(ctx: Context) -> str:
     require_processing()
     layer_id = cities_layer(ctx, "p12 cities")
-    before = project_layer_ids()
     outside = ctx.fixtures.outside / "secret.gpkg"
     require(outside.is_file(), "the outside fixture is missing")
 
+    # The plugin-side path policy is gone: a local file outside allowed_data_roots now
+    # reaches QGIS as it arrived, and what happens next is QGIS's own decision.  The
+    # remote half is not measured here on purpose -- the plugin no longer refuses a
+    # network source either, so measuring it would mean a real request (no case makes one).
     outside_record = run_algorithm(
         ctx, "native:mergevectorlayers", {"LAYERS": [layer_id, str(outside)], "OUTPUT": "memory:"}
     )
-    equal(outside_record.status, ExecutionStatus.FAILED, "a layer outside the allowed roots")
-    equal(error_code(outside_record), PATH_NOT_ALLOWED, "the code for an outside layer path")
-    require(
-        str(outside) not in message_of(outside_record),
-        f"the failure message repeats the path: {message_of(outside_record)!r}",
-    )
-
-    remote_record = run_algorithm(
-        ctx,
-        "native:mergevectorlayers",
-        {"LAYERS": [layer_id, fixtures.REMOTE_VSICURL], "OUTPUT": "memory:"},
-    )
-    equal(remote_record.status, ExecutionStatus.FAILED, "a remote source in a layer list")
-    equal(error_code(remote_record), PATH_NOT_ALLOWED, "the code for a remote source")
-    for fragment in ("vsicurl", "127.0.0.1", "never.tif"):
-        require(
-            fragment not in message_of(remote_record),
-            f"the failure message repeats {fragment!r}: {message_of(remote_record)!r}",
+    if outside_record.status is ExecutionStatus.SUCCEEDED:
+        merged = output_layer(ctx, outside_record, "OUTPUT")
+        outside_evidence = (
+            f"native:mergevectorlayers read {outside.name} from outside allowed_data_roots and "
+            f"merged it into a layer with {merged.featureCount()} features (the project layer "
+            f"plus the five features of the outside file)"
         )
-    equal(project_layer_ids(), before, "the layers after the two refusals")
+    else:
+        outside_evidence = (
+            f"native:mergevectorlayers failed on {outside.name} with "
+            f"{error_code(outside_record)} from QGIS's own layer loading"
+        )
+        require(
+            error_code(outside_record) != PATH_NOT_ALLOWED,
+            "the plugin still refuses a local file outside the allowed roots",
+        )
 
     # The positive half of the same boundary: a CRS authority code has the shape of a
     # URI scheme, and it is an identifier QGIS parses, not a source (review r1 B1).
@@ -2868,11 +2796,9 @@ def p12_input_path_policy(ctx: Context) -> str:
         "the CRS of the reprojected result",
     )
     return (
-        "a file outside allowed_data_roots and a /vsicurl URI given as a layer input were both "
-        "refused as FAILED(PATH_NOT_ALLOWED) before the algorithm ran, no layer was added, and "
-        "neither error message repeats the path or the URI; TARGET_CRS='EPSG:32633' on the same "
-        "entry point SUCCEEDED and the result really is in EPSG:32633, so a CRS code is not "
-        "mistaken for a remote URI"
+        f"{outside_evidence}, so no file is refused by the plugin any more; "
+        "TARGET_CRS='EPSG:32633' on the same entry point SUCCEEDED and the result really is in "
+        "EPSG:32633, so a CRS code is still handed through as data"
     )
 
 
@@ -2918,31 +2844,43 @@ def p13_destination_policy(ctx: Context) -> str:
     require(output_layer(ctx, temporary, "OUTPUT").isValid(), "the temporary output layer")
 
     # A provider with no non-file-based output answers SUCCEEDED with the literal
-    # "memory:" and adds no layer; that shape is refused instead of repeated upward.
+    # "memory:" and adds no layer.  Destinations are QGIS's to judge now, so that shape
+    # is reported as the success QGIS says it is, with the literal value it returned.
     made_up = run_algorithm(
         ctx, "gdal:buffervectors", {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": "memory:"}
     )
-    equal(made_up.status, ExecutionStatus.FAILED, "a memory destination on the gdal provider")
-    equal(error_code(made_up), INVALID_INPUT, "the code for a memory destination on gdal")
+    equal(
+        made_up.status,
+        ExecutionStatus.SUCCEEDED,
+        f"a memory destination on the gdal provider: {made_up.error}",
+    )
+    equal(outputs_of(made_up), {"OUTPUT": "memory:"}, "the memory destination's output value")
+    require(project_layers().get("memory:") is None, "the project holds a layer named 'memory:'")
 
-    # The strict-type rule is untouched: a remote value is refused as a destination too.
+    # The plugin has no destination verdict left: a remote value reaches QGIS too.  This
+    # one names a closed local port, so the acceptance request cannot leave the machine.
     remote = run_algorithm(
         ctx,
         "native:buffer",
         {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": fixtures.REMOTE_VSICURL},
     )
     equal(remote.status, ExecutionStatus.FAILED, "a remote destination")
-    equal(error_code(remote), PATH_NOT_ALLOWED, "the code for a remote destination")
+    remote_code = error_code(remote)
+    require(
+        remote_code != PATH_NOT_ALLOWED,
+        "the plugin still refuses a remote destination before QGIS sees it",
+    )
 
     return (
         "a destination is handed to QGIS as it arrived: gdal:convertformat wrote a GeoPackage at "
         f"the path the caller named ({target.stat().st_size} bytes) that opens with the source's "
         f"{product.featureCount()} features, the source's wkb type and a non-null geometry on "
         "every one of them, and the outputs value is that same path; native:buffer with "
-        'OUTPUT="TEMPORARY_OUTPUT" SUCCEEDED with its result layer in the project; the one '
-        'destination verdict left is about a false success, so OUTPUT="memory:" on the file-only '
-        "gdal provider is FAILED(INVALID_INPUT) before it runs, while a /vsicurl value as a "
-        "destination is still FAILED(PATH_NOT_ALLOWED) by the strict-type rule"
+        'OUTPUT="TEMPORARY_OUTPUT" SUCCEEDED with its result layer in the project; '
+        'gdal:buffervectors with OUTPUT="memory:" also reports SUCCEEDED, with the literal '
+        '"memory:" as its output value and no layer in the project -- QGIS\'s own answer, which '
+        f"the plugin no longer second-guesses; and a /vsicurl destination is FAILED({remote_code}) "
+        "from QGIS, not PATH_NOT_ALLOWED from the plugin"
     )
 
 
@@ -3065,7 +3003,14 @@ def p17_no_injected_destination(ctx: Context) -> str:
 
     record = run_algorithm(ctx, "native:buffer", parameters)
     equal(record.status, ExecutionStatus.FAILED, "a run without the required destination")
-    equal(error_code(record), INVALID_INPUT, "the code for a missing destination")
+    # QGIS's own checkParameterValues refuses the missing destination; the exception is
+    # the engine's unexpected failure, not a plugin code invented for this case.
+    equal(error_code(record), INTERNAL_ERROR, "the code for a missing destination")
+    equal(
+        message_of(record),
+        "QgsProcessingException: unexpected failure",
+        "the message for a missing destination",
+    )
     equal(project_layer_ids(), before, "the layers after the refusal")
 
     # The plugin never fills the key in: had it injected ``memory:`` this very call would
@@ -3077,9 +3022,10 @@ def p17_no_injected_destination(ctx: Context) -> str:
         f"the same parameters with OUTPUT: {with_destination.error}",
     )
     return (
-        "native:buffer without OUTPUT is FAILED(INVALID_INPUT) from the native check and adds no "
-        'layer, while the same parameters plus OUTPUT="memory:" succeed: the plugin injects no '
-        "destination (and an algorithm with no destination keeps its own result keys, P08/P09)"
+        "native:buffer without OUTPUT is FAILED(INTERNAL_ERROR) with the fixed message "
+        f"{message_of(record)!r} (QGIS's own QgsProcessingException) and adds no layer, while the "
+        'same parameters plus OUTPUT="memory:" SUCCEED: the plugin injects no destination (and an '
+        "algorithm with no destination keeps its own result keys, P08/P09)"
     )
 
 
@@ -4045,7 +3991,6 @@ CASES = (
     ("P08", p08_scalar_output),
     ("P09", p09_multiple_outputs),
     ("P10", p10_json_values),
-    ("P11", p11_cannot_execute),
     ("P12", p12_input_path_policy),
     ("P13", p13_destination_policy),
     ("P14", p14_output_ownership),
