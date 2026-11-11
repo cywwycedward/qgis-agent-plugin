@@ -1,52 +1,35 @@
-"""The three ``processing.*`` operations (PRD v2 §3).
+"""The three ``processing.*`` operations (design §1).
 
 All three run on the main thread: QGIS's processing framework works on the project
-and the layers it holds, and a run may hand result layers to that project, so it
-cannot move to a worker (PRD §2, D5).
+and the layers it holds, and a run hands result layers to that project, so it cannot
+move to a worker (PRD §2, D5).
 
-There is no algorithm allow-list and no ``runnable`` field.  ``list_algorithms``
+There is no algorithm allow-list and no ``runnable`` field: ``list_algorithms``
 reports every registered algorithm, ``get_algorithm_info`` reads the native
-definitions, and ``run_algorithm`` is the one entry point for all of them; a call
-that cannot succeed ends as a ``FAILED`` record instead of the algorithm
-disappearing from the discovery side (PRD §3.2.4).
+definitions -- the fields ``algorithmHelp()`` prints, as JSON -- and
+``run_algorithm`` is the one entry point for all of them.
 
-The boundary this module owns is the JSON one.  ``parameters`` is a finite JSON
-tree keyed by native parameter names; a non-string key, a NaN, an infinity, bytes
-or a QGIS/Qt object is refused before QGIS sees it, and a result that has no
-lossless JSON form is refused rather than ``str()``-ed.  A run may read a file only
-through a parameter whose native definition says it is a file input (checked with
-``resolve_path``) or a layer reference -- a project layer id, or an existing file
-inside the allowed roots.  A destination is not judged as a write: its string value
-reaches QGIS as it arrived, so a plain path, ``memory:``, ``TEMPORARY_OUTPUT`` and
-the empty string are all decided by the native ``checkParameterValues()`` and
-``run()``.  Where a result is written is the caller's and QGIS's decision, and the
-write-authorisation model is a separate design.  The one destination verdict left
-here guards against a false success rather than a write: a value beginning with
-``memory:`` is refused when the parameter itself reports that it cannot keep a
-result in memory, because 3.44.13's ``gdal`` provider answers ``SUCCEEDED`` with the
-literal string and no layer while its tool fails (measured on
-``gdal:buffervectors``).  ``None`` always means "not provided": it is handed on for
-the native check to judge, so an absent or null destination ends as
-``INVALID_INPUT`` from QGIS instead of a path verdict this module has no basis for.
+``run_algorithm`` does not re-implement QGIS.  It hands the call to
+``qgis.processing.run()`` with nothing but a feedback that keeps the run's messages,
+so whether the algorithm exists, whether its parameter values are acceptable, how
+the processing context is built and how the algorithm executes are all decided by
+QGIS (design §5.2-§5.5).  An undeclared parameter key is QGIS's to ignore, a path or
+a remote URI is QGIS's to resolve, and a parameter this module never classifies
+reaches the algorithm exactly as it arrived.  A failure is an exception from
+``qgis.processing.run()``: the feedback records and the exception go to the local
+log and the exception is raised unchanged, so the engine reports it the one way it
+reports an unexpected failure (design §5.6).  Nothing here classifies an exception
+text into a plugin error code.
 
-A database target that arrives in ordinary parameters is not judged as a write: a
-host, a user, a schema or a table name in ``string`` parameters, or a database file
-in a ``vector``/``layer`` parameter such as ``DATABASE``, reaches the algorithm once
-the layer rule above accepts it, and the algorithm may then write that database.
-That is an accepted boundary of this build, not an oversight -- result files stay
-refused, databases written through ordinary parameters do not -- and the permission
-model is deferred to its own design (PRD §8.3.4, §12.1).  The trust boundary of this
-plugin is the in-process, trusted provider: it is not a sandbox, so a third-party
-provider's own internal I/O is outside what this module can promise (PRD §8.3.4).
-A value that names network I/O or a virtual file system is different, because QGIS
-resolves it itself: a provided string of that kind is refused before the algorithm
-is called.  The refusal applies to every type except the value types in
-``_VALUE_PARAMETERS``, whose spelling is data QGIS parses (``EPSG:32633`` in a
-``crs``, a layout or theme name, a colour, a plain string); a type this build has
-never seen is not in that set, so it keeps the refusal.  What an unknown type keeps
-is the remote refusal and nothing else -- a local path in an unknown type is still
-handed to QGIS untouched, because only ``file`` and the layer-reference types are
-paths this module has a rule for.
+The boundary this module still owns is the JSON one.  ``parameters`` is a finite
+JSON tree keyed by native parameter names; a non-string key, a NaN, an infinity,
+bytes or a QGIS/Qt object is refused before QGIS sees it, and a result that has no
+lossless JSON form is refused rather than ``str()``-ed.  A result layer is the one
+value translated: ``qgis.processing.run()`` hands back real ``QgsMapLayer`` objects
+that belong to no project, so each is added to the engine's project and reported by
+its id; the layers this call added are removed again when its result cannot be
+returned, and nothing claims the algorithm's own side effects were undone (design
+§5.7).
 
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
@@ -56,7 +39,6 @@ from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
@@ -67,93 +49,12 @@ from ..core.contracts import (
     MainThreadOperationMixin,
     OperationContext,
 )
-from ..core.models import (
-    INTERNAL_ERROR,
-    INVALID_INPUT,
-    LAYER_NOT_FOUND,
-    PATH_NOT_ALLOWED,
-    FrameworkError,
-    Params,
-)
-from ..core.security import is_remote_uri, resolve_path
+from ..core.models import INTERNAL_ERROR, INVALID_INPUT, FrameworkError, Params
 
 _LOGGER = logging.getLogger(__name__)
 
-# QGIS's sentinel for a result that lives in memory only.  A provider that reports no
-# non-file-based output cannot honour it, yet 3.44.13 hands the literal string back as
-# a successful result and adds no layer (measured on ``gdal:buffervectors``), so that
-# shape is refused instead of being reported as a result that does not exist.
-_MEMORY_OUTPUT = "memory:"
-
-# QGIS parameter type strings, as the definition classes report them.  They are the
-# public spelling shared by the model serialiser and ``qgis_process``, which is why
-# this module can tell a file input from a layer reference without importing the
-# definition classes.  A parameter type not named here is passed through untouched;
-# the families below are the ones the PRD gives a boundary rule.
-_FILE_PARAMETER = "file"
-_LAYER_PARAMETERS = frozenset(
-    {"source", "vector", "raster", "mesh", "layer", "multilayer", "pointcloud"}
-)
-_CONNECTION_PARAMETERS = frozenset({"providerconnection", "databaseschema", "databasetable"})
-
-# These types carry layer ids *inside* their values, each in its own shape (measured on
-# 3.44.13: ``native:alignrasters``, ``native:dxfexport``, ``native:tinmeshcreation``,
-# ``native:writevectortiles_*`` and the old ``qgis:*interpolation`` family).  QGIS
-# resolves those inner strings itself, so passing one through would load a source the
-# path policy never saw (PRD §3.2.2, §8.3).  The plugin refuses the family until it
-# learns each shape; ``relief_colors``, ``aggregates`` and ``meshdatasetgroups`` carry
-# values only and still pass through.
-_COMPOSITE_LAYER_PARAMETERS = frozenset(
-    {
-        "idw_interpolation_data",
-        "tininputlayers",
-        "alignrasterlayers",
-        "dxflayers",
-        "vectortilewriterlayers",
-    }
-)
-
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
-
-# The measured types whose value is data QGIS parses rather than I/O it resolves.  The
-# remote-value refusal below applies to every other type, including one this build has
-# never seen: a value type's spelling is the algorithm's business, so refusing it would
-# take away the standard form of 60 ``crs`` and 2 ``coordinateoperation`` parameters.
-_VALUE_PARAMETERS = frozenset(
-    {
-        "aggregates",
-        "area",
-        "attribute",
-        "authcfg",
-        "band",
-        "boolean",
-        "color",
-        "coordinateoperation",
-        "crs",
-        "distance",
-        "duration",
-        "enum",
-        "execute_sql",
-        "expression",
-        "extent",
-        "field",
-        "fields_mapping",
-        "geometry",
-        "layout",
-        "layoutitem",
-        "maptheme",
-        "matrix",
-        "meshdatasetgroups",
-        "meshdatasettime",
-        "number",
-        "point",
-        "raster_calc_expression",
-        "relief_colors",
-        "scale",
-        "string",
-    }
-)
 
 
 def _json_image(value: Any) -> Any:
@@ -206,39 +107,55 @@ class AlgorithmSummary(BaseModel):
     group: StrictStr
 
 
+class AlgorithmDetails(BaseModel):
+    """The algorithm itself, as its own definition states it (design §3.2, §3.5)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: StrictStr
+    name: StrictStr
+    short_description: StrictStr
+    help: StrictStr
+
+
 class AlgorithmParameter(BaseModel):
-    """One native parameter definition, with nothing invented (PRD §3.1.2, §8.1)."""
+    """One visible native parameter definition (design §3.3, §3.5).
+
+    ``options`` is only an enum's display list; the base definition has no
+    ``options()`` at all, so ``None`` states that instead of a fabricated empty list.
+    ``accepted_types`` is what the parameter type object says can be passed in, and
+    an empty list when the registry has no type object for it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: StrictStr
-    type: StrictStr
     description: StrictStr
-    optional: StrictBool
-    # ``default`` is the JSON image of ``defaultValue()``; ``null`` means "no default
-    # QGIS could state", because a QGIS/Qt object or a non-finite number has none.
-    default: Any
     help: StrictStr
-    is_destination: StrictBool
-    depends_on: list[StrictStr]
-    # Only an enum parameter has display options; the base definition has no
-    # ``options()`` at all, so ``null`` states that instead of a fabricated empty list.
+    type: StrictStr
     options: list[StrictStr] | None
-
-    @field_validator("default")
-    @classmethod
-    def _default_is_json(cls, value: Any) -> Any:
-        return _require_json(value)
+    accepted_types: list[StrictStr]
 
 
 class AlgorithmOutput(BaseModel):
-    """One declared output; not a value a run produced (PRD §3.1.2)."""
+    """One declared output; not a value a run produced (design §3.4, §3.5)."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: StrictStr
     type: StrictStr
     description: StrictStr
+
+
+class ProcessingMessage(BaseModel):
+    """One message a run kept, at the level of the feedback method that took it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # info/debug/command/console/formatted/warning/error: the seven feedback methods.
+    level: StrictStr
+    text: StrictStr
+    fatal: StrictBool = False
 
 
 class ProcessingListAlgorithmsParams(Params):
@@ -258,14 +175,13 @@ class ProcessingGetAlgorithmInfoParams(Params):
 class ProcessingGetAlgorithmInfoResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    algorithm: AlgorithmSummary
-    description: StrictStr
+    algorithm: AlgorithmDetails
     parameters: list[AlgorithmParameter]
     outputs: list[AlgorithmOutput]
 
 
 class ProcessingRunAlgorithmParams(Params):
-    """A native algorithm id and its native parameter map (PRD §3.2.1)."""
+    """A native algorithm id and its native parameter map (design §5.2)."""
 
     algorithm_id: StrictStr = Field(min_length=1)
     parameters: dict[str, Any]
@@ -277,12 +193,13 @@ class ProcessingRunAlgorithmParams(Params):
 
 
 class ProcessingRunAlgorithmResult(BaseModel):
-    """The id that actually ran and every output under its native key (PRD §3.2.1)."""
+    """The id that ran, every output under its native key, and the run's messages."""
 
     model_config = ConfigDict(extra="forbid")
 
     algorithm_id: StrictStr
     outputs: dict[str, Any]
+    messages: list[ProcessingMessage]
 
     @field_validator("outputs")
     @classmethod
@@ -291,7 +208,7 @@ class ProcessingRunAlgorithmResult(BaseModel):
 
 
 def algorithm_summary(algorithm: Any) -> AlgorithmSummary:
-    """The shared id/name/group summary, so list and info cannot disagree."""
+    """The list's one summary shape: what the registry says about an algorithm."""
 
     return AlgorithmSummary(
         id=algorithm.id(),
@@ -300,162 +217,53 @@ def algorithm_summary(algorithm: Any) -> AlgorithmSummary:
     )
 
 
-def parameter_summary(definition: Any) -> AlgorithmParameter:
-    """One definition as the nine PRD fields, in its native order and wording."""
+def _parameter_info(definition: Any, registry: Any) -> AlgorithmParameter:
+    """One visible definition as the six design fields, in its native wording."""
 
-    image = _json_image(definition.defaultValue())
+    from qgis.core import QgsProcessingParameterEnum
+
+    parameter_type = registry.parameterType(definition.type())
     return AlgorithmParameter(
         name=definition.name(),
-        type=definition.type(),
         description=definition.description() or "",
-        optional=_is_optional(definition),
-        default=None if image is _NO_JSON else image,
         help=definition.help() or "",
-        is_destination=bool(definition.isDestination()),
-        depends_on=list(definition.dependsOnOtherParameters()),
-        options=list(definition.options()) if hasattr(definition, "options") else None,
+        type=definition.__class__.__name__,
+        options=list(definition.options())
+        if isinstance(definition, QgsProcessingParameterEnum)
+        else None,
+        accepted_types=(
+            [] if parameter_type is None else list(parameter_type.acceptedPythonTypes())
+        ),
     )
 
 
-def _is_optional(definition: Any) -> bool:
-    """``FlagOptional`` is the definition's own statement, not a value judgement."""
+def _json_result(project: Any, value: Any, added: set[str]) -> Any:
+    """One result value as JSON, with every result layer added to ``project``.
 
-    from qgis.core import QgsProcessingParameterDefinition
-
-    return bool(definition.flags() & QgsProcessingParameterDefinition.FlagOptional)
-
-
-def _resolve_parameter(definition: Any, value: Any, ctx: OperationContext, context: Any) -> Any:
-    """The value to hand QGIS for one declared parameter.
-
-    ``None`` is "not provided" for every family, so the native check decides whether
-    it is acceptable; every provided value is judged here.  A provided string that
-    names network I/O or a virtual file system is refused unless the parameter's type
-    is one of the measured types that carries a value (``_VALUE_PARAMETERS``) -- a
-    type this build has never seen is not in that set, so it keeps the refusal --
-    because QGIS resolves such a value itself and would do it before the path policy
-    saw it -- a destination is not a value type either, so a remote destination is
-    refused by that same rule.  File inputs, layer references and the types that hide
-    layer references then get a boundary rule of their own; a destination gets two
-    verdicts and nothing more -- a non-string value, and ``memory:`` when the parameter
-    itself says it cannot keep a result in memory (about a false success, not a write
-    policy) -- and is otherwise handed on as it arrived.  Anything else is passed
-    through too, because the plugin does not re-implement a second parameter schema.
+    ``qgis.processing.run()`` hands the layers it produced over with their ownership
+    and no project, so each one is added once and reported by its id; a layer this
+    call already added resolves to the same id.  Anything else is JSON or a failure:
+    a value with no lossless image is refused, never described by ``str()``.
     """
 
-    if value is None:
-        return value
+    from qgis.core import QgsMapLayer
 
-    kind = definition.type()
-    if definition.isDestination():
-        if not isinstance(value, str):
-            raise FrameworkError(INVALID_INPUT, "a destination takes one string")
-        # ``memory:`` is QGIS's sentinel and also looks like a URI scheme, so it is
-        # decided here; the parameter itself says whether it can keep a result in memory.
-        if value.startswith(_MEMORY_OUTPUT):
-            supported, why = definition.isSupportedOutputValue(value, context)
-            if not supported:
-                _LOGGER.warning("destination refuses a memory result: %s", why)
-                raise FrameworkError(
-                    INVALID_INPUT, "the algorithm cannot produce a result that stays in memory"
-                )
-            return value
-    if kind not in _VALUE_PARAMETERS and isinstance(value, str) and is_remote_uri(value):
-        # A URL, a UNC path or a ``/vsi`` path is I/O the path policy refuses outright,
-        # and QGIS would resolve it before the policy ever saw it (PRD §8.3.2).  A type
-        # that carries a value is exempt: its spelling is the algorithm's business, not
-        # a path this module could judge.
-        raise FrameworkError(PATH_NOT_ALLOWED, "a remote value is not an allowed input")
-
-    if kind in _CONNECTION_PARAMETERS:
-        raise FrameworkError(PATH_NOT_ALLOWED, "a provider connection is not an allowed input")
-    if kind in _COMPOSITE_LAYER_PARAMETERS:
-        raise FrameworkError(
-            INVALID_INPUT, "a parameter with layer references inside its value is not supported"
-        )
-    if kind == _FILE_PARAMETER:
-        if not isinstance(value, str):
-            raise FrameworkError(INVALID_INPUT, "a file parameter takes one path")
-        return str(resolve_path(value, ctx.policy.allowed_data_roots, must_exist=True))
-    if kind in _LAYER_PARAMETERS:
-        if isinstance(value, list):
-            return [_resolve_layer_reference(item, ctx) for item in value]
-        return _resolve_layer_reference(value, ctx)
-    return value
-
-
-def _resolve_layer_reference(value: Any, ctx: OperationContext) -> Any:
-    """A project layer id stays an id; an allowed local file is the only other source.
-
-    A string that names neither is refused: handing it to QGIS would let it load a
-    provider URI the plugin never checked (PRD §3.2.2).
-    """
-
-    if value is None or value == "":
-        return value
-    if not isinstance(value, str):
-        raise FrameworkError(INVALID_INPUT, "a layer parameter takes a layer id")
-    if ctx.project.mapLayer(value) is not None:
-        return value
-    if is_remote_uri(value) or Path(value).is_absolute():
-        # Either an existing file inside the roots or a refusal from the policy;
-        # a relative path has no meaning here and stays a missing layer id.
-        return str(resolve_path(value, ctx.policy.allowed_data_roots, must_exist=True))
-    raise FrameworkError(LAYER_NOT_FOUND, "the layer does not exist in the project")
-
-
-def _can_execute(algorithm: Any) -> tuple[bool, str]:
-    """``canExecute()`` as 3.44.13 binds it: a ``(bool, message)`` pair."""
-
-    executable, message = algorithm.canExecute()
-    return bool(executable), "" if message is None else str(message)
-
-
-def _take_result_layer(
-    context: Any, project: Any, layer_id: str, transferred: dict[str, str]
-) -> str:
-    """The project's stable id for a result layer, taking it out of the context.
-
-    A result that names a layer already in the project keeps its id; a result that
-    names a layer in the context's temporary store is added to the project once and
-    reported by the id the project gave it (PRD §3.2.3 step 8).
-    """
-
-    stable = transferred.get(layer_id)
-    if stable is not None:
-        return stable
-    store = context.temporaryLayerStore()
-    if store is None or store.mapLayer(layer_id) is None:
+    if isinstance(value, QgsMapLayer):
+        layer_id = value.id()
+        if layer_id not in added:
+            if project.addMapLayer(value) is None:
+                raise FrameworkError(INTERNAL_ERROR, "a result layer was not added to the project")
+            added.add(layer_id)
         return layer_id
-    layer = context.takeResultLayer(layer_id)
-    if layer is None:
-        raise FrameworkError(INTERNAL_ERROR, "a result layer could not be taken from the run")
-    if project.addMapLayer(layer) is None:
-        raise FrameworkError(INTERNAL_ERROR, "a result layer was not added to the project")
-    transferred[layer_id] = layer.id()
-    return layer.id()
-
-
-def _normalise_result(context: Any, project: Any, value: Any, transferred: dict[str, str]) -> Any:
-    """One result value as JSON, with any result layer moved into the project.
-
-    The walk is recursive because a provider may return a list or a mapping of
-    layers, and ``transferred`` makes a repeated id resolve to the same project
-    layer instead of a stale one.  A value with no JSON image fails the run rather
-    than being described by ``str()`` (PRD §3.2.3, §8.2).
-    """
-
-    if isinstance(value, str):
-        return _take_result_layer(context, project, value, transferred)
     if isinstance(value, (list, tuple)):
-        return [_normalise_result(context, project, item, transferred) for item in value]
+        return [_json_result(project, item, added) for item in value]
     if isinstance(value, dict):
-        normalised: dict[str, Any] = {}
+        result: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise FrameworkError(INTERNAL_ERROR, "an algorithm result key is not a string")
-            normalised[key] = _normalise_result(context, project, item, transferred)
-        return normalised
+            result[key] = _json_result(project, item, added)
+        return result
     image = _json_image(value)
     if image is _NO_JSON:
         raise FrameworkError(INTERNAL_ERROR, "an algorithm result cannot be expressed as JSON")
@@ -500,24 +308,33 @@ class ProcessingGetAlgorithmInfo(
     def execute_main(
         self, ctx: OperationContext, request: ProcessingGetAlgorithmInfoParams
     ) -> ProcessingGetAlgorithmInfoResult:
-        from qgis.core import QgsApplication
+        from qgis.core import QgsApplication, QgsProcessingParameterDefinition
 
-        algorithm = QgsApplication.processingRegistry().algorithmById(request.algorithm_id)
+        registry = QgsApplication.processingRegistry()
+        algorithm = registry.algorithmById(request.algorithm_id)
         if algorithm is None:
             # A valid call naming an unknown algorithm is a caller input mistake; it
-            # is not an unknown plugin operation (PRD §8.2).
+            # is not an unknown plugin operation (design §3.5).
             raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
 
+        # ``algorithmHelp()`` skips a hidden parameter, and so does this (design §3.3).
+        hidden = QgsProcessingParameterDefinition.FlagHidden
         return ProcessingGetAlgorithmInfoResult(
-            algorithm=algorithm_summary(algorithm),
-            description=algorithm.shortHelpString() or "",
+            algorithm=AlgorithmDetails(
+                id=algorithm.id(),
+                name=algorithm.displayName(),
+                short_description=algorithm.shortDescription() or "",
+                help=algorithm.shortHelpString() or "",
+            ),
             parameters=[
-                parameter_summary(definition) for definition in algorithm.parameterDefinitions()
+                _parameter_info(definition, registry)
+                for definition in algorithm.parameterDefinitions()
+                if not definition.flags() & hidden
             ],
             outputs=[
                 AlgorithmOutput(
                     name=output.name(),
-                    type=output.type(),
+                    type=output.__class__.__name__,
                     description=output.description() or "",
                 )
                 for output in algorithm.outputDefinitions()
@@ -529,7 +346,7 @@ class ProcessingRunAlgorithm(
     BaseCommand[ProcessingRunAlgorithmParams, ProcessingRunAlgorithmResult],
     MainThreadOperationMixin[ProcessingRunAlgorithmParams, ProcessingRunAlgorithmResult],
 ):
-    """Run one registered algorithm through the checks of PRD §3.2.3, in order."""
+    """Run one registered algorithm through QGIS, and keep what it reported."""
 
     name = "processing.run_algorithm"
     description = "Run any algorithm currently registered with QGIS Processing"
@@ -542,82 +359,83 @@ class ProcessingRunAlgorithm(
     def execute_main(
         self, ctx: OperationContext, request: ProcessingRunAlgorithmParams
     ) -> ProcessingRunAlgorithmResult:
-        from qgis.core import QgsApplication, QgsProcessingContext, QgsProcessingFeedback
+        from qgis import processing
+        from qgis.core import QgsProcessingFeedback
 
-        class ErrorCollectingFeedback(QgsProcessingFeedback):
-            """A run reports a failure through the feedback, not through ``ok`` alone."""
+        class ProcessingRunFeedback(QgsProcessingFeedback):
+            """The base class's own logging, plus one record per message (design §4)."""
 
             def __init__(self) -> None:
                 super().__init__()
-                self.errors: list[str] = []
+                self.records: list[ProcessingMessage] = []
+
+            def _record(self, level: str, text: str, fatal: bool = False) -> None:
+                self.records.append(ProcessingMessage(level=level, text=text, fatal=fatal))
+
+            def pushInfo(self, info: str) -> None:
+                super().pushInfo(info)
+                self._record("info", info)
+
+            def pushDebugInfo(self, info: str) -> None:
+                super().pushDebugInfo(info)
+                self._record("debug", info)
+
+            def pushCommandInfo(self, info: str) -> None:
+                super().pushCommandInfo(info)
+                self._record("command", info)
+
+            def pushConsoleInfo(self, info: str) -> None:
+                super().pushConsoleInfo(info)
+                self._record("console", info)
+
+            def pushFormattedMessage(self, html: str, text: str) -> None:
+                super().pushFormattedMessage(html, text)
+                self._record("formatted", text)
+
+            def pushWarning(self, warning: str) -> None:
+                super().pushWarning(warning)
+                self._record("warning", warning)
 
             def reportError(self, message: str, fatalError: bool = False) -> None:
-                self.errors.append(message)
                 super().reportError(message, fatalError)
+                self._record("error", message, bool(fatalError))
 
-        registry = QgsApplication.processingRegistry()
-        if registry.algorithmById(request.algorithm_id) is None:
-            raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
-        # The registry's own object is a prototype shared by every caller; a run gets
-        # its own instance (PRD §3.2.3 step 2).
-        algorithm = registry.createAlgorithmById(request.algorithm_id)
-        if algorithm is None:
-            raise FrameworkError(INTERNAL_ERROR, "QGIS could not create the algorithm")
+            @property
+            def errors(self) -> list[str]:
+                return [record.text for record in self.records if record.level == "error"]
 
-        executable, why = _can_execute(algorithm)
-        if not executable:
-            _LOGGER.warning("processing algorithm cannot execute: %s", why)
-            raise FrameworkError(INVALID_INPUT, "the algorithm cannot execute in this environment")
+            @property
+            def has_errors(self) -> bool:
+                return any(record.level == "error" for record in self.records)
 
-        definitions = {
-            definition.name(): definition for definition in algorithm.parameterDefinitions()
-        }
-        if not set(request.parameters) <= set(definitions):
-            # ``checkParameterValues`` does not reject unknown keys, so the plugin
-            # has to (PRD §3.2.3 step 4).
-            raise FrameworkError(
-                INVALID_INPUT, "a parameter name is not declared by this algorithm"
-            )
-        context = QgsProcessingContext()
-        # Layer ids are resolved against the project the engine holds, never the
-        # process-wide singleton (PRD §1.3, §3.2.3 step 5).
-        context.setProject(ctx.project)
-        parameters = {
-            name: _resolve_parameter(definitions[name], value, ctx, context)
-            for name, value in request.parameters.items()
-        }
-        feedback = ErrorCollectingFeedback()
-
-        valid, message = algorithm.checkParameterValues(parameters, context)
-        if not valid:
-            # The native message may quote a path or a value, so it only reaches the
-            # local log (PRD §3.2.3 step 6).
-            _LOGGER.warning("processing algorithm refused its parameters: %s", message)
-            raise FrameworkError(INVALID_INPUT, "the algorithm refused the given parameter values")
-
-        results, completed = algorithm.run(parameters, context, feedback)
-        if not completed:
-            raise FrameworkError(INTERNAL_ERROR, "the algorithm did not complete")
-        if feedback.errors:
-            # The native text may quote a host or a path, so it only reaches the
-            # local log; a run that produced nothing after reporting an error is a
-            # failed run, whatever ``ok`` said (PRD §8.2, §3.2.3 step 7).
-            _LOGGER.warning("processing algorithm reported errors: %s", feedback.errors)
-            if not results:
-                raise FrameworkError(
-                    INTERNAL_ERROR, "the algorithm reported an error and returned no result"
-                )
-        if not isinstance(results, dict):
-            raise FrameworkError(INTERNAL_ERROR, "the algorithm returned no result mapping")
-
-        transferred: dict[str, str] = {}
+        feedback = ProcessingRunFeedback()
         try:
-            outputs = _normalise_result(context, ctx.project, results, transferred)
-            return ProcessingRunAlgorithmResult(algorithm_id=request.algorithm_id, outputs=outputs)
+            # Only the feedback: QGIS creates the context, checks the parameters and
+            # runs the algorithm itself (design §5.2-§5.5).
+            results = processing.run(request.algorithm_id, request.parameters, feedback=feedback)
+        except Exception:
+            # The native messages and the exception may quote a path or a host, so
+            # they reach the local log and not the record; the caller gets the
+            # engine's own unexpected-failure verdict (design §5.6).
+            for record in feedback.records:
+                _LOGGER.warning(
+                    "processing %s reported %s: %s", request.algorithm_id, record.level, record.text
+                )
+            _LOGGER.exception("processing.run(%s) raised", request.algorithm_id)
+            raise
+
+        added: set[str] = set()
+        try:
+            return ProcessingRunAlgorithmResult(
+                algorithm_id=request.algorithm_id,
+                # ``None`` is QGIS's "no result", which is an empty one here.
+                outputs=_json_result(ctx.project, {} if results is None else results, added),
+                messages=feedback.records,
+            )
         except Exception:  # noqa: BLE001 - the layers this call added must go again
-            # Only what this run added is undone: the algorithm's own external side
-            # effects are not claimed to be rolled back (PRD §3.2.3).
-            for layer_id in transferred.values():
+            # Only what this call added is undone: the algorithm's own external side
+            # effects are not claimed to be rolled back (design §5.7).
+            for layer_id in added:
                 ctx.project.removeMapLayer(layer_id)
             raise
 
