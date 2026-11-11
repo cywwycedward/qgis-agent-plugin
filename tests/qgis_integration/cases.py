@@ -2919,7 +2919,7 @@ def p15_non_json_output(ctx: Context) -> str:
     removed: list[str] = []
 
     # The result layer the probe hands over first must be taken into the project and then
-    # removed again: PRD 3.2.3 undoes only what this run added.
+    # removed again: the layer step undoes only what this run added (design §5.7).
     def note_added(layer: Any) -> None:
         added.append(layer.id())
 

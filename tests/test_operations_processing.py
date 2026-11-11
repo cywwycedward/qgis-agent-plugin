@@ -256,7 +256,8 @@ class Call(NamedTuple):
     kwargs: dict[str, Any]
 
     @property
-    def feedback(self) -> FakeFeedback:
+    def feedback(self) -> Any:
+        """The feedback the operation built; its surface is the run's own business."""
         return self.kwargs["feedback"]
 
 
@@ -954,7 +955,7 @@ def test_the_three_operations_register_as_main_thread_processing_capabilities() 
 
 def test_the_feedback_is_built_inside_the_run_and_the_message_is_module_level() -> None:
     """Which names the module exports is the import rule: only the message is shared."""
-    assert issubclass(ops.ProcessingMessage, object)
+    assert "ProcessingMessage" in vars(ops)
     assert not hasattr(ops, "ProcessingRunFeedback")
 
 

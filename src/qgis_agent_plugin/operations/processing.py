@@ -1,4 +1,4 @@
-"""The three ``processing.*`` operations (PRD v2 §3).
+"""The three ``processing.*`` operations (design §1).
 
 All three run on the main thread: QGIS's processing framework works on the project
 and the layers it holds, and a run hands result layers to that project, so it cannot
@@ -181,7 +181,7 @@ class ProcessingGetAlgorithmInfoResult(BaseModel):
 
 
 class ProcessingRunAlgorithmParams(Params):
-    """A native algorithm id and its native parameter map (PRD §3.2.1)."""
+    """A native algorithm id and its native parameter map (design §5.2)."""
 
     algorithm_id: StrictStr = Field(min_length=1)
     parameters: dict[str, Any]
