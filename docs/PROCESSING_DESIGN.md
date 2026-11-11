@@ -222,6 +222,7 @@ algorithm.outputDefinitions()
 
 ```python
 class ProcessingRunFeedback(QgsProcessingFeedback):
+
     def __init__(self):
         super().__init__()
         self.records = []
@@ -232,7 +233,7 @@ class ProcessingRunFeedback(QgsProcessingFeedback):
 QGIS 3.44 的构造函数默认：
 
 ```python
-logFeedback = True
+logFeedback=True
 ```
 
 因此，基类原有的日志功能继续生效。
