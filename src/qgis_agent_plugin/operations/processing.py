@@ -74,8 +74,8 @@ from ..core.models import INTERNAL_ERROR, INVALID_INPUT, FrameworkError, Params,
 
 _LOGGER = logging.getLogger(__name__)
 
-# 没能产出的 JSON 映像 / A JSON image that could not be produced,
-# 用来和合法的 ``None`` 区分开 / kept apart from a legitimate ``None``.
+# 没能产出的 JSON 映像，用来和合法的 ``None`` 区分开。
+# A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
 
 
@@ -123,10 +123,10 @@ def _require_json(value: Any) -> Any:
     try:
         image = _json_image(value)
     except RecursionError:
-        # 环状或过深的树是调用方的错 / a cyclic or absurdly deep tree is the caller's mistake,
-        # 不是插件的错 / not a plugin one.
-        # 不接住它就会以 INTERNAL_ERROR 逃出去 / left alone it escapes as an INTERNAL_ERROR,
-        # 而不是 INVALID_INPUT / instead of INVALID_INPUT.
+        # 环状或过深的树是调用方的错，不是插件的错：不接住它就会以 INTERNAL_ERROR 逃出去，
+        # 而不是 INVALID_INPUT。
+        # A cyclic or absurdly deep tree is the caller's mistake, not a plugin one:
+        # left alone it escapes as an INTERNAL_ERROR instead of INVALID_INPUT.
         image = _NO_JSON
     if image is _NO_JSON:
         raise ValueError("only finite JSON values are allowed")
@@ -204,8 +204,10 @@ class ProcessingMessage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # 级别取 feedback 的方法名 / the level is a feedback method's name:
-    # info/debug/command/console/formatted/warning/error / 这七个方法，不多不少。
+    # 级别取 feedback 的方法名：info/debug/command/console/formatted/warning/error，七个方法，
+    # 不多不少。
+    # The level is one of the feedback's seven methods:
+    # info/debug/command/console/formatted/warning/error.
     level: StrictStr
     text: StrictStr
     fatal: StrictBool = False
@@ -239,9 +241,10 @@ class ProcessingRunAlgorithmParams(Params):
     """
 
     algorithm_id: StrictStr = Field(min_length=1)
-    # 键类型必须严格：顶层是 pydantic 的 dict / strict keys: the top level is pydantic's
-    # dict, 所以这是「不许非字符串键」唯一能到的位置 / so this is the only place the
-    # no-non-string-key rule can reach; 其余交给那趟遍历 / the walk checks the rest.
+    # 键类型必须严格：顶层是 pydantic 的 dict，所以这是「不许非字符串键」唯一能到的位置，
+    # 其余交给那趟遍历。
+    # Strict keys: the top level is pydantic's dict, so this is the only place the
+    # no-non-string-key rule can reach; the walk checks the rest.
     parameters: dict[StrictStr, Any]
 
     @field_validator("parameters")
@@ -388,12 +391,13 @@ class ProcessingGetAlgorithmInfo(
         registry = QgsApplication.processingRegistry()
         algorithm = registry.algorithmById(request.algorithm_id)
         if algorithm is None:
-            # 合法调用说出未知算法是调用方的输入错误 / a valid call naming an unknown algorithm
-            # is a caller input mistake / 不是未知的插件操作 / not an unknown plugin operation.
+            # 合法调用说出未知算法是调用方的输入错误，不是未知的插件操作。
+            # A valid call naming an unknown algorithm is a caller input mistake; it is not
+            # an unknown plugin operation.
             raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
 
-        # ``algorithmHelp()`` 跳过隐藏参数 / skips a hidden parameter,
-        # 这里也一样 / and so does this.
+        # ``algorithmHelp()`` 会跳过隐藏参数，这里也一样。
+        # ``algorithmHelp()`` skips a hidden parameter, and so does this.
         hidden = QgsProcessingParameterDefinition.FlagHidden
         return ProcessingGetAlgorithmInfoResult(
             algorithm=AlgorithmDetails(
@@ -431,9 +435,9 @@ class ProcessingRunAlgorithm(
     description = "Run any algorithm currently registered with QGIS Processing"
     input_model = ProcessingRunAlgorithmParams
     output_model = ProcessingRunAlgorithmResult
-    # 名字代表的是一组算法 / the name stands for a group of algorithms
-    # 它们可能改动数据或工程 / that may change data or the project,
-    # 所以风险标签要整个名字一起定 / so it cannot depend on the particular call.
+    # 名字代表的是一组算法，它们可能改动数据或工程，所以风险标签要整个名字一起定。
+    # The name stands for a group of algorithms that may change data or the project, so the
+    # risk label cannot depend on the particular call.
     destructive = True
 
     def execute_main(
@@ -493,14 +497,16 @@ class ProcessingRunAlgorithm(
 
         feedback = ProcessingRunFeedback()
         try:
-            # 只给 feedback / only the feedback:
-            # 上下文和参数校验归 QGIS / QGIS creates the context and checks the parameters,
-            # 执行也归 QGIS / and runs the algorithm itself.
+            # 只给 feedback：上下文由 QGIS 建、参数由 QGIS 校验、算法由 QGIS 自己跑。
+            # Only the feedback: QGIS creates the context, checks the parameters and runs the
+            # algorithm itself.
             results = processing.run(request.algorithm_id, request.parameters, feedback=feedback)
         except Exception:
-            # 原生消息和异常可能带上路径或主机名 / they may quote a path or a host,
-            # 所以只进本地日志不进记录 / so they reach the local log and not the record;
-            # 调用方拿到引擎对意外失败的判定 / the caller gets the engine's failure verdict.
+            # 原生消息和异常可能带上路径或主机名，所以只进本地日志、不进记录；调用方拿到的是
+            # 引擎对意外失败的判定。
+            # The native messages and the exception may quote a path or a host, so they reach
+            # the local log and not the record; the caller gets the engine's own
+            # unexpected-failure verdict.
             for record in feedback.records:
                 _LOGGER.warning(
                     "processing %s reported %s: %s", request.algorithm_id, record.level, record.text
@@ -512,8 +518,8 @@ class ProcessingRunAlgorithm(
         try:
             return ProcessingRunAlgorithmResult(
                 algorithm_id=request.algorithm_id,
-                # ``None`` 是 QGIS 的「没有结果」 / ``None`` is QGIS's "no result",
-                # 在这里当成一个空结果 / which is an empty one here.
+                # ``None`` 是 QGIS 的「没有结果」，在这里当成一个空结果。
+                # ``None`` is QGIS's "no result", which is an empty one here.
                 outputs=_json_result(ctx.project, {} if results is None else results, added),
                 messages=feedback.records,
             )
@@ -525,9 +531,9 @@ class ProcessingRunAlgorithm(
             raise
 
 
-# 本模块唯一的元组 / the module's one tuple:
-# ``operations/__init__.py`` import 它 / ``operations/__init__.py`` imports it,
-# 不许再写第二份 / and must not define a second copy.
+# 本模块唯一的元组：``operations/__init__.py`` import 它，不许再写一份。
+# The module's one tuple: ``operations/__init__.py`` imports it and must not define a
+# second copy.
 PROCESSING_OPERATIONS = (
     ProcessingListAlgorithms,
     ProcessingGetAlgorithmInfo,

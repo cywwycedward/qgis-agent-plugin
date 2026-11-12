@@ -26,13 +26,13 @@ from dataclasses import dataclass
 from string import Template
 from typing import Any
 
-# WCAG 2.1 的两个底线：正文与次要文字 / the WCAG 2.1 floors: body and secondary text,
-# 然后是大字号和状态胶囊 / then large text and the status capsule.
+# WCAG 2.1 的两个底线：正文与次要文字，然后是大字号和状态胶囊。
+# WCAG 2.1 floors: body and secondary text, then large text and the status capsule.
 BODY = 4.5
 LARGE = 3.0
 
-# 状态胶囊说的话 / what the status capsule says. ``empty`` 是注册表里什么都没有 /
-# 空注册表 / ``empty`` is the registry with nothing in it.
+# 状态胶囊说的话；``empty`` 是注册表里什么都没有。
+# What the status capsule says.  ``empty`` is the registry with nothing in it.
 STATE_LABELS = {
     "empty": "无操作",
     "idle": "就绪",
@@ -42,13 +42,13 @@ STATE_LABELS = {
     "cancelled": "已取消",
 }
 
-# 每个语义色调的色相，单位是度 / the hue of each semantic tone, in degrees.
-# 色相带着含义，明度由调色板定 / the hue carries the meaning, the palette decides the
-# lightness, 这才让深色主题成立 / which is what makes a dark theme work.
+# 每个语义色调的色相，单位是度。色相带着含义，明度由调色板定，这才让深色主题成立。
+# The hue of each semantic tone, in degrees.  The hue carries the meaning; the palette
+# decides the lightness, which is what makes a dark theme work.
 _HUES = {"ok": 145.0, "warn": 38.0, "danger": 358.0}
 
-# 整个坞窗的样式 / the whole dock's styling. ``$tokens`` 由 Theme 填写 /
-# ``$tokens`` are filled from a Theme, 花括号留给 Qt / braces stay Qt's.
+# 整个坞窗的样式；``$tokens`` 由 Theme 填写，花括号留给 Qt。
+# The whole dock's styling.  ``$tokens`` are filled from a Theme; braces stay Qt's.
 _SHEET = Template(
     """
 QDockWidget, QWidget#dockBody { background: $surface; }
@@ -369,10 +369,11 @@ def build(palette: Any) -> Theme:
     accent = readable(palette.color(QPalette.Highlight), surface, LARGE)
     on_accent = QColor(palette.color(QPalette.HighlightedText))
     accent = accent_for(on_accent, accent)
-    # 两个按钮状态背离标签颜色，所以对比度只会升不会降 / the two button states step away
-    # from the label colour, so their contrast can only rise. （把填充推向文字，正是浅色主题
-    # hover 填充落到 4.31:1、静止填充停在 5.39 的原因 / what put the hover fill at 4.31:1
-    # 而静止填充是 5.39 / while the resting fill sat at 5.39.
+    # 两个按钮状态背离标签颜色，所以对比度只会升不会降。（把填充推向文字，正是浅色主题 hover
+    # 填充落到 4.31:1、静止填充停在 5.39 的原因。）
+    # The two button states step away from the label colour, so their contrast can only
+    # rise.  (Moving the fill *towards* the text is what put the light theme's hover fill
+    # at 4.31:1 while the resting fill sat at 5.39.)
     toward_dark = relative_luminance(on_accent) > 0.5
     accent_hover = accent.darker(112) if toward_dark else accent.lighter(112)
     accent_pressed = accent.darker(125) if toward_dark else accent.lighter(125)
