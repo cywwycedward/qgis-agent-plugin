@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
-from pydantic import StrictBool, ValidationError
+from pydantic import BaseModel, StrictBool, ValidationError
 
 from qgis_agent_plugin.core.models import (
     ERROR_CODES,
@@ -211,6 +212,73 @@ def test_cancel_receipt_has_the_prd_fields_and_no_reason_by_default() -> None:
         "status",
         "reason",
     }
+
+
+def test_cancel_receipt_reason_is_the_prd_set() -> None:
+    for reason in ("ALREADY_TERMINAL", "NOT_INTERRUPTIBLE", "FINALIZING"):
+        receipt = CancelReceipt(
+            execution_id="exec-1",
+            accepted=False,
+            status=ExecutionStatus.CANCELLED,
+            reason=reason,
+        )
+        assert receipt.reason == reason
+    # A typo is the whole point: no consumer branches on a fourth value.
+    with pytest.raises(ValidationError):
+        CancelReceipt(
+            execution_id="exec-1",
+            accepted=False,
+            status=ExecutionStatus.CANCELLED,
+            reason="NOT_INTERUPTIBLE",
+        )
+
+
+def test_error_details_must_be_json() -> None:
+    with pytest.raises(ValidationError):
+        ErrorDetail(code=INTERNAL_ERROR, message="boom", details={"path": Path("x")})
+    detail = ErrorDetail(code=INTERNAL_ERROR, message="boom", details={"field": "value"})
+    assert detail.model_dump(mode="json")["details"] == {"field": "value"}
+
+
+@pytest.mark.parametrize(
+    ("model", "values"),
+    [
+        (ErrorDetail, {"code": INTERNAL_ERROR, "message": "boom"}),
+        (
+            CancelReceipt,
+            {"execution_id": "exec-1", "accepted": False, "status": ExecutionStatus.QUEUED},
+        ),
+        (
+            ExecutionRecord,
+            {
+                "execution_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+                "operation": "layer.list",
+                "kind": OperationKind.QUERY,
+                "strategy": ExecutionStrategy.MAIN_THREAD,
+                "status": ExecutionStatus.QUEUED,
+                "created_at": utc_now(),
+                "project_epoch": 3,
+            },
+        ),
+        (
+            OperationSpec,
+            {
+                "name": "layer.list",
+                "description": "list the layers of the current project",
+                "kind": OperationKind.QUERY,
+                "strategy": ExecutionStrategy.MAIN_THREAD,
+                "destructive": False,
+                "input_schema": {},
+                "output_schema": {},
+            },
+        ),
+    ],
+)
+def test_a_non_input_dto_refuses_an_undeclared_field(
+    model: type[BaseModel], values: dict[str, object]
+) -> None:
+    with pytest.raises(ValidationError):
+        model(**values, surprise=1)
 
 
 def test_unknown_input_field_is_refused() -> None:

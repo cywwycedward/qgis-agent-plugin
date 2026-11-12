@@ -318,6 +318,19 @@ def test_invalid_input_ends_as_a_failed_record_and_does_not_run(call_name: str) 
     assert harness.queue.callbacks == []
 
 
+@pytest.mark.parametrize("call_name", ["run_sync", "submit"])
+def test_a_prebuilt_input_model_is_revalidated_before_the_operation_runs(call_name: str) -> None:
+    harness = Harness(Echo())
+    # A caller that builds the input model itself is not trusted: ``value`` is a str field,
+    # and model_construct is how a wrong value reaches model_validate without a check.
+    arguments = cast(Any, ValueParams.model_construct(value=123))
+    record = getattr(harness.engine, call_name)("test.echo", arguments)
+    assert record.status is FAILED
+    assert record.error is not None
+    assert record.error.code == INVALID_INPUT
+    assert CALLED == []
+
+
 def test_a_validator_that_refuses_with_a_business_code_keeps_it() -> None:
     harness = Harness(RefusingInput())
     record = harness.engine.submit("test.refuse_input", {"value": "x"})
