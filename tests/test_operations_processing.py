@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import types
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -530,6 +531,47 @@ def test_a_nested_non_string_key_is_refused() -> None:
         ops.ProcessingRunAlgorithmParams(
             algorithm_id="a", parameters={"FIELD_MAPPING": {1: "target"}}
         )
+
+
+def test_a_parameter_key_must_be_a_string() -> None:
+    # The top level is pydantic's dict rather than the walk's, so the key rule has
+    # to be part of the field type too.
+    with pytest.raises(ValidationError):
+        ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={b"OFFSET": 1})
+
+    class Colour(StrEnum):
+        RED = "red"
+
+    # A str subclass is still a str, so an enum key keeps working.
+    enum_keyed = ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={Colour.RED: 1})
+    assert enum_keyed.parameters == {"red": 1}
+
+
+def _too_deep_list() -> Any:
+    """A tree deeper than the interpreter recurses (1000 by default)."""
+
+    value: Any = None
+    for _ in range(sys.getrecursionlimit() + 1):
+        value = [value]
+    return value
+
+
+def _cyclic_list() -> Any:
+    """A list that contains itself: no finite JSON image exists for it."""
+
+    value: list[Any] = []
+    value.append(value)
+    return value
+
+
+@pytest.mark.parametrize(
+    "value", [_too_deep_list(), _cyclic_list()], ids=["deeper-than-the-stack", "cyclic"]
+)
+def test_a_parameter_tree_the_json_walk_cannot_finish_is_invalid_input(value: Any) -> None:
+    # RecursionError is not a ValidationError, and letting it escape reports a
+    # caller's parameter tree as an internal failure.
+    with pytest.raises(ValidationError):
+        ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={"VALUE": value})
 
 
 def test_outputs_are_checked_as_json_too() -> None:
