@@ -366,6 +366,11 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
         # No parameters means no parameter block, not a one-line apology row.
         assert dock.form.rowCount() == len(properties)
         assert dock.params.isHidden() is not bool(properties)
+        # The shapes the fixtures only hand-copy: an inline enum, a free object, and a
+        # union behind a ``$ref``.
+        for name, expected in {"kind": "enum", "parameters": "json", "renderer": "json"}.items():
+            if name in dock.editors:
+                assert dock.editors[name][0] == expected, f"{spec.name}.{name}"
 
 
 def test_the_dock_is_something_a_real_main_window_accepts(qapp: Any) -> None:
@@ -413,6 +418,19 @@ def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
     assert "必填" in dock.form.labelForField(editors["name"]).text()
     assert "必填" in dock.form.labelForField(editors["kind"]).text()
     assert "必填" not in dock.form.labelForField(editors["note"]).text()
+
+
+def test_a_checkbox_has_no_blank_state_to_promise(qapp: Any) -> None:
+    """A checkbox's default is its initial state, not a value left empty for it."""
+
+    registry = OperationRegistry()
+    register_all(registry)
+    real = OperationDock(registry, FakeEngine())
+    assert real.operations.currentText() == "layer.add"
+    fixture = _dock(FakeEngine(), _spec(schema=FORM))
+
+    assert "留空" not in real.editors["add_to_legend"][1].toolTip()
+    assert "留空" not in fixture.editors["flag"][1].toolTip()
 
 
 def test_a_schema_behind_a_ref_keeps_its_union_and_its_enum(qapp: Any) -> None:
@@ -1019,6 +1037,21 @@ def test_an_unexpected_failure_is_shown_not_raised(qapp: Any) -> None:
     assert "RuntimeError" in dock.error_message.toolTip()
     assert "boom" in dock.error_message.toolTip()
     assert dock.run_button.isEnabled()
+
+
+def test_an_invalid_input_names_the_field_where_it_can_be_read(qapp: Any) -> None:
+    """The schema cannot carry the models' own validators, so the engine's message is
+    the only thing that names the field that failed; it has to reach the panel."""
+
+    engine = FakeEngine(
+        run_sync=FrameworkError(INVALID_INPUT, "demo.op: invalid input at source_path, name")
+    )
+    dock = _dock(engine)
+
+    dock.run()
+
+    assert "source_path, name" in dock.error_message.text() + dock.error_hint.text()
+    assert "source_path, name" in dock.feedback.accessibleDescription()
 
 
 def test_an_error_without_a_sentence_falls_back_to_the_engine_text(qapp: Any) -> None:
