@@ -1,4 +1,8 @@
-"""The execution protocol: one strategy per operation, and the stages it needs."""
+"""执行协议：一个操作只声明一种执行策略，并实现那种策略要求的阶段。
+
+The execution protocol: an operation declares exactly one execution strategy and
+implements the stages that strategy requires.
+"""
 
 from __future__ import annotations
 
@@ -28,15 +32,25 @@ from qgis_agent_plugin.core.models import (
 
 
 class LooseParams(BaseModel):
-    """A plain model: it does not reject an undeclared key, so no operation may take one."""
+    """一个普通 pydantic 模型：它不拒绝没声明的键，所以任何操作都不能拿它当输入。
+
+    A plain model: it does not reject an undeclared key, so no operation may take it as
+    its input.
+    """
 
 
 class NoParams(Params):
-    """An operation with no parameters still refuses an unknown key."""
+    """参数为空的输入模型：多给一个没声明的键照样被拒织。
+
+    An operation with no parameters still refuses a key it does not declare.
+    """
 
 
 class EmptyResult(BaseModel):
-    """An operation with no result fields."""
+    """没有结果字段的输出模型，下面每个操作的契约都拿它当产出。
+
+    An output model with no result fields, which every operation below returns.
+    """
 
 
 class MainQuery(BaseQuery[NoParams, EmptyResult], MainThreadOperationMixin[NoParams, EmptyResult]):

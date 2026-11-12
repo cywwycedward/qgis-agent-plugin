@@ -1,4 +1,9 @@
-"""The project epoch and the thread rule the engine enforces (PRD 9.1, 8.3)."""
+"""工程代数与线程规则：只有持有引擎的线程能调用它，工程内容被换掉之后的旧工作必须能被认出来。
+
+The project epoch and the thread rule the engine enforces: a call has to come from the
+thread that owns the engine, and work accepted before the project content was replaced
+has to stay tellable from work accepted after.
+"""
 
 from __future__ import annotations
 

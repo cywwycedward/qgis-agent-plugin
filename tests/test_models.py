@@ -1,4 +1,8 @@
-"""Execution records, the error contract and the input model rules."""
+"""执行记录、错误契约与输入模型必须遵守的规则；三者都是纯 JSON，可以原样交给调用方。
+
+Execution records, the error contract and the rules every operation input obeys; all
+three are plain JSON, so they can be handed to a caller as they are.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +28,10 @@ from qgis_agent_plugin.core.models import (
     utc_now,
 )
 
-# PRD 11.2, one entry per row; the set is the whole vocabulary.
+# 错误码全集：多一个或少一个都是缺陷。
+# 它是调用方唯一能分支的词汇表。
+# The whole error vocabulary: one more is a defect.
+# It is the only vocabulary the callers can branch on.
 PRD_ERROR_CODES = {
     "OPERATION_NOT_FOUND",
     "INVALID_OPERATION_DEFINITION",
@@ -55,7 +62,11 @@ PRD_ERROR_CODES = {
 
 
 class StrictParams(Params):
-    """The model shape every operation input has to accept."""
+    """一个合法的操作输入模型：两个键都可省，多给一个键仍然被拒绝，布尔只收真布尔。
+
+    A legal operation input model: both keys are optional, an extra key is still refused,
+    and only a real boolean passes for a boolean.
+    """
 
     limit: int = 0
     enabled: StrictBool = False
@@ -190,8 +201,10 @@ def test_progress_stays_between_zero_and_hundred(progress: float) -> None:
 
 
 def test_operation_spec_has_exactly_the_documented_fields() -> None:
-    # No ``pydantic_major``: v2 is the only major this build supports and
-    # ``plugin.require_supported_pydantic`` refuses any other at import (OPERATIONS.md §12).
+    # 规格里没有 ``pydantic_major``：只支持 pydantic 2。
+    # 别的大版本在导入时被拒，字段因此不存在。
+    # The spec has no ``pydantic_major`` field.
+    # Refused at import, so the field never appears.
     assert set(OperationSpec.model_fields) == {
         "name",
         "description",
@@ -223,7 +236,10 @@ def test_cancel_receipt_reason_is_the_prd_set() -> None:
             reason=reason,
         )
         assert receipt.reason == reason
-    # A typo is the whole point: no consumer branches on a fourth value.
+    # 拼错正是这条断言的意义。
+    # 没有消费者会去分支第四种 reason。
+    # A typo is the whole point.
+    # No consumer branches on a fourth reason value.
     with pytest.raises(ValidationError):
         CancelReceipt(
             execution_id="exec-1",
