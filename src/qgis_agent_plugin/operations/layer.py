@@ -336,7 +336,12 @@ class SumNumericFieldParams(Params):
 
 
 class SumNumericFieldResult(BaseModel):
-    """The sum of a snapshot, which is not the layer's value when the task ends."""
+    """The sum of a snapshot, which is not the layer's value when the task ends.
+
+    shortcut: the values are summed as float64, so a QInt64 field with values above
+    2**53 loses precision in ``total``; add an integer path when an exact integer
+    sum is needed.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -605,7 +610,7 @@ class LayerListStyleCategoriesResult(BaseModel):
 
 class LayerGetQmlParams(Params):
     layer_id: StrictStr = Field(min_length=1)
-    categories: list[StyleCategoryName] | None = None
+    categories: Annotated[list[StyleCategoryName] | None, Field(min_length=1)] = None
 
 
 class LayerGetQmlResult(BaseModel):
@@ -678,8 +683,6 @@ class LayerGetQml(
             chosen = applicable
         else:
             chosen = tuple(request.categories)
-            if not chosen:
-                raise FrameworkError(INVALID_INPUT, "categories must not be empty")
             if len(set(chosen)) != len(chosen):
                 raise FrameworkError(INVALID_INPUT, "categories must not repeat")
             if any(name not in applicable for name in chosen):
@@ -838,7 +841,7 @@ class RangeConfig(BaseModel):
 
     lower: FiniteFloat
     upper: FiniteFloat
-    label: StrictStr = Field(min_length=1)
+    label: StrictStr
     symbol: SimpleSymbolConfig
 
     @model_validator(mode="after")
@@ -1072,7 +1075,8 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
             ) from None
         if field.type() in (QVariant.Int, QVariant.LongLong):
             # A fraction on an integer field can never match a feature; a whole value is
-            # stored as an integer.  The key stays the shared float, so 2 and 2.0 dedupe.
+            # stored and deduped as an integer, so 2 and 2.0 are one category while the
+            # two int64 values a float cannot tell apart stay two.
             # UInt/ULongLong are left out: no provider in this build makes such a field.
             if not number.is_integer():
                 raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
@@ -1087,7 +1091,7 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
                 low, high = -(2**63), 2**63 - 1
             if not low <= whole <= high:
                 raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
-            return ("number", number), whole
+            return ("number", whole), whole
         return ("number", number), value
 
     variant = QVariant(value)
