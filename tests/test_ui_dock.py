@@ -1,18 +1,26 @@
 # ruff: noqa: E402 - the platform and the Qt import have to precede the dock import.
 
-"""The operation dock: the selector, the form, the six states, and one record on screen.
+"""操作坞窗：选择器、表单、六个状态，以及屏幕上的一条记录。
 
-The dock is the manual test entry (F10) and an Operate surface (F11), so what is
-asserted here is what an operator sees and can do: the operation each schema
-becomes, which fields become arguments, the capsule and the controls in every
-state (idle / running / ok / failed / cancelled / empty), the keyboard path, the
-colour pairs the theme derives from a light and a dark palette, and the two
-engine paths (``run_sync`` for a main-thread call, ``submit`` plus polling for a
-background one).  Failures must become text, never reach the Qt slot.
+坞窗既是手工测试入口，也是操作界面，所以这里断言的是操作者看到什么、能做什么：每个 schema
+变成哪个操作、哪些字段变成参数、胶囊与控件在六个状态（就继/运行中/完成/失败/已取消/无操作）
+下各是什么样、键盘路径、主题从浅色与深色两种调色板算出的配色对，以及两条引擎路径
+（主线程调用走 ``run_sync``，后台调用走 ``submit`` 加轮询）。失败必须变成文字，绝不抛进 Qt 槽。
 
-Qt is real and offscreen; QGIS is only faked where ``initGui`` needs it.  The dock
-is the one module that imports Qt at module level, so this whole module skips
-rather than fails in the bare interpreter (``tests/test_package.py`` guards that).
+Qt 是真的，但离屏渲染；QGIS 只在 ``initGui`` 需要它的地方被伪造。坞窗是唯一在模块级 import
+Qt 的模块，所以整个文件在裸解释器里是 skip 而不是失败。
+
+The operation dock: the selector, the form, the six states, and one record on screen. The
+dock is both the manual test entry and an operate surface, so what is asserted here is what
+an operator sees and can do: the operation each schema becomes, which fields become
+arguments, the capsule and the controls in every state (idle / running / ok / failed /
+cancelled / empty), the keyboard path, the colour pairs the theme derives from a light and a
+dark palette, and the two engine paths (``run_sync`` for a main-thread call, ``submit`` plus
+polling for a background one). Failures must become text, never reach the Qt slot.
+
+Qt is real and offscreen; QGIS is only faked where ``initGui`` needs it. The dock is the one
+module that imports Qt at module level, so this whole module skips rather than fails in the
+bare interpreter.
 """
 
 import json
@@ -27,8 +35,9 @@ from typing import Any
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-# The offscreen platform has no font database of its own: without one no glyph is
-# painted, and the pixel probes below would be measuring blank widgets.
+# 离屏平台自己没有字体库，没有它就一个字形都画不出来，下面的像素探针就只是在量空白控件
+# the offscreen platform has no font database of its own: without one no glyph is painted at
+# all, and the pixel probes would measure blank widgets.
 for _fonts in (r"C:\Windows\Fonts", "/usr/share/fonts"):
     if os.path.isdir(_fonts):
         os.environ.setdefault("QT_QPA_FONTDIR", _fonts)
@@ -69,8 +78,10 @@ from qgis_agent_plugin.operations import register_all
 from qgis_agent_plugin.ui import theme
 from qgis_agent_plugin.ui.dock import _DESTRUCTIVE_ROLE, _META_ROLE, OperationDock, _Field
 
-# Every editor kind in one schema: text, bool, integer, number, enum, a nullable
-# string and a nullable array, with two required fields and defaults on the rest.
+# 一个 schema 里放齐所有编辑器类型：文本、布尔、整数、小数、枚举，可空字符串与
+# 可空数组，两个必填，其余带默认值
+# every editor kind in one schema: text, bool, integer, number, enum, a nullable string and a
+# nullable array, two required, defaults on the rest.
 FORM = {
     "type": "object",
     "properties": {
@@ -95,8 +106,9 @@ FORM = {
 }
 
 
-# What pydantic emits for a named enum and for a discriminated union: the property is
-# a ``$ref``, and the enum or the branches sit behind the definition table.
+# pydantic 为具名枚举与判别联合发出的形状，属性是一个 ``$ref``，枚举与各分支落在定义表后面
+# what pydantic emits for a named enum and a discriminated union: the property is a ``$ref``,
+# and the enum or the branches sit behind the definition table.
 REFERRED = {
     "type": "object",
     "properties": {
@@ -128,20 +140,29 @@ REFERRED = {
 
 @pytest.fixture(scope="session")
 def qapp() -> Any:
-    """One Qt application for this module; offscreen, with no QGIS involved."""
+    """本模块共用的一个 Qt 应用；离屏，与 QGIS 无关。
+
+    One Qt application for this module; offscreen, with no QGIS involved.
+    """
 
     return QApplication.instance() or QApplication([])
 
 
 @pytest.fixture(autouse=True)
 def _qt(qapp: Any) -> Any:
-    """Every test here builds widgets, so the application has to exist first."""
+    """这里的每条用例都建控件，所以应用得先存在。
+
+    Every test here builds widgets, so the application has to exist first.
+    """
 
     return qapp
 
 
 class FakeRegistry:
-    """``list_specs`` only: the dock never asks the registry anything else."""
+    """只有 ``list_specs``：坞窗不问注册表别的。
+
+    ``list_specs`` only: the dock never asks the registry anything else.
+    """
 
     def __init__(self, *specs: OperationSpec) -> None:
         self._specs = list(specs)
@@ -151,11 +172,14 @@ class FakeRegistry:
 
 
 class FakeEngine:
-    """The four engine methods the dock may call, answering from a script.
+    """坞窗可能调用的那四个引擎方法，按剧本作答。
 
-    A list answer is one reply per call with the last one repeating, so a poll
-    sequence is spelled out and an exhausted script fails the test instead of
-    spinning the event loop forever.
+    列表答案按调用逐条取，最后一条重复使用，所以轮询序列是写死的；剧本用完就判失败，
+    而不是让事件循环空转。
+
+    The four engine methods the dock may call, answering from a script. A list answer is
+    one reply per call with the last one repeating, so a poll sequence is spelled out and an
+    exhausted script fails the test instead of spinning the event loop forever.
     """
 
     def __init__(self, **answers: Any) -> None:
@@ -214,7 +238,10 @@ def _record(
     result: dict[str, Any] | None = None,
     error: ErrorDetail | None = None,
 ) -> ExecutionRecord:
-    """A record in one of the states the dock has to show."""
+    """处在坞窗必须显示的某个状态上的一条记录。
+
+    A record in one of the states the dock has to show.
+    """
 
     fields: dict[str, Any] = {
         "execution_id": execution_id,
@@ -248,7 +275,10 @@ def _dock(engine: FakeEngine, *specs: OperationSpec) -> OperationDock:
 
 
 def _wait_until(predicate: Any, timeout_ms: int = 2000) -> bool:
-    """Pump the event loop until the predicate holds, so the poll timer can fire."""
+    """一直抽事件循环直到条件成立，好让轮询定时器有机会触发。
+
+    Pump the event loop until the predicate holds, so the poll timer can fire.
+    """
 
     deadline = time.monotonic() + timeout_ms / 1000
     while time.monotonic() < deadline:
@@ -259,17 +289,23 @@ def _wait_until(predicate: Any, timeout_ms: int = 2000) -> bool:
 
 
 def _fields(form: QFormLayout) -> list[Any]:
-    """The editor widgets the form shows right now, in row order."""
+    """表单此刻显示的编辑器控件，按行序。
+
+    The editor widgets the form shows right now, in row order.
+    """
 
     return [form.itemAt(row, QFormLayout.FieldRole).widget() for row in range(form.rowCount())]
 
 
 def _painted_contrast(widget: Any) -> float:
-    """WCAG ratio between the glyphs a widget actually painted and its own background.
+    """控件实际画出的字形与它自己背景的 WCAG 比值。
 
-    The pixels, not the theme: Qt draws a styled ``QLineEdit`` placeholder at half
-    strength no matter what the palette says, and a table of intended colours is
-    exactly what let that pass review.
+    量的是像素而不是主题：不论调色板怎么说，Qt 画带样式的 ``QLineEdit`` 占位文字时都只给
+    一半强度，所以只有量到的像素能证明它读得清。
+
+    WCAG ratio between the glyphs a widget actually painted and its own background. The
+    pixels, not the theme: Qt draws a styled ``QLineEdit`` placeholder at half strength no
+    matter what the palette says, so only the painted pixels can show that it reads.
     """
 
     image = widget.grab().toImage()
@@ -322,7 +358,7 @@ def _dark_palette() -> QPalette:
     return palette
 
 
-# --- the selector ------------------------------------------------------------
+# --- 选择器 / the selector ------------------------------------------------------
 
 
 def test_the_selector_is_sorted_and_carries_kind_and_strategy(qapp: Any) -> None:
@@ -353,7 +389,10 @@ def test_the_summary_shows_the_description_of_the_selection(qapp: Any) -> None:
 
 
 def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -> None:
-    """The schemas actually registered: enums, bools and nullable unions among them."""
+    """真的注册进去的那些 schema；其中有枚举、布尔与可空联合。
+
+    The schemas actually registered: enums, bools and nullable unions among them.
+    """
 
     registry = OperationRegistry()
     register_all(registry)
@@ -363,34 +402,43 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
         dock.operations.setCurrentIndex(row)
         properties = spec.input_schema["properties"]
         assert set(dock.editors) == set(properties)
-        # No parameters means no parameter block, not a one-line apology row.
+        # 没有参数就没有参数块，而不是留一行致歉的说明
+        # no parameters means no parameter block, not a one-line apology row
         assert dock.form.rowCount() == len(properties)
         assert dock.params.isHidden() is not bool(properties)
-        # The shapes the fixtures only hand-copy: an inline enum, a free object, and a
-        # union behind a ``$ref``.
+        # 夹具只能手抄的那几种形状，内联枚举、自由对象、``$ref`` 后面的联合
+        # the shapes the fixtures only hand-copy: an inline enum, a free object, and a union
+        # behind a ``$ref``
         for name, expected in {"kind": "enum", "parameters": "json", "renderer": "json"}.items():
             if name in dock.editors:
                 assert dock.editors[name][0] == expected, f"{spec.name}.{name}"
 
 
 def test_the_dock_is_something_a_real_main_window_accepts(qapp: Any) -> None:
-    """The F10 r1 finding: a plain ``QWidget`` is refused by ``addDockWidget``."""
+    """真的主窗口必须接受它：普通 ``QWidget`` 会被 ``addDockWidget`` 拒绝。
+
+    A real main window has to accept it: a plain ``QWidget`` is refused by
+    ``addDockWidget``.
+    """
 
     window = QMainWindow()
     dock = _dock(FakeEngine())
 
-    window.addDockWidget(Qt.RightDockWidgetArea, dock)  # the real sip type check
+    window.addDockWidget(Qt.RightDockWidgetArea, dock)  # 真的 sip 类型检查 / the real check
     assert window.dockWidgetArea(dock) == Qt.RightDockWidgetArea
 
     window.removeDockWidget(dock)
     assert window.dockWidgetArea(dock) == Qt.NoDockWidgetArea
 
 
-# --- the form ----------------------------------------------------------------
+# --- 表单 / the form ------------------------------------------------------------
 
 
 def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
-    """Bools keep their state; every field that can be empty shows its default."""
+    """布尔保留自己的状态；每个可以为空的字段都显示默认值。
+
+    Bools keep their state; every field that can be empty shows its default.
+    """
 
     dock = _dock(FakeEngine(), _spec(schema=FORM))
     editors = {name: widget for name, (_, widget) in dock.editors.items()}
@@ -410,18 +458,23 @@ def test_a_property_becomes_the_editor_its_type_asks_for(qapp: Any) -> None:
     ]
     assert editors["kind"].currentIndex() == 0
     assert isinstance(editors["name"], QLineEdit)
-    # A required field with no default says so once, in its label -- not twice.
+    # 必填又没有默认值的字段只在标签上说一次，而不是两处都说
+    # a required field with no default says so once, in its label, not twice
     assert editors["name"].hint == ""
     assert isinstance(editors["items"], QLineEdit)
     assert editors["items"].hint == "[1, 2]"
-    # The field labels are the dock's words where it has them, and are marked when required.
+    # 字段标签用坞窗自己的词，必填的会被标出来
+    # the field labels are the dock's words where it has them, and are marked when required
     assert "必填" in dock.form.labelForField(editors["name"]).text()
     assert "必填" in dock.form.labelForField(editors["kind"]).text()
     assert "必填" not in dock.form.labelForField(editors["note"]).text()
 
 
 def test_a_checkbox_has_no_blank_state_to_promise(qapp: Any) -> None:
-    """A checkbox's default is its initial state, not a value left empty for it."""
+    """复选框的默认值就是它的初始状态，不是一个留给它的空值。
+
+    A checkbox's default is its initial state, not a value left empty for it.
+    """
 
     registry = OperationRegistry()
     register_all(registry)
@@ -434,12 +487,16 @@ def test_a_checkbox_has_no_blank_state_to_promise(qapp: Any) -> None:
 
 
 def test_a_schema_behind_a_ref_keeps_its_union_and_its_enum(qapp: Any) -> None:
-    """``layer.set_renderer`` publishes its renderer as a ``$ref``, not as a ``oneOf``."""
+    """``layer.set_renderer`` 把 renderer 发成 ``$ref``，不是 ``oneOf``。
+
+    ``layer.set_renderer`` publishes its renderer as a ``$ref``, not as a ``oneOf``.
+    """
 
     engine = FakeEngine(run_sync=_record())
     dock = _dock(engine, _spec(schema=REFERRED))
 
-    # The union is one definition away, so the property is a JSON field, not text.
+    # 联合隔着一层定义，所以这个属性是 JSON 字段，而不是文本
+    # the union is one definition away, so the property is a JSON field, not text
     assert dock.editors["renderer"][0] == "json"
     mode = dock.editors["mode"][1]
     assert isinstance(mode, QComboBox)
@@ -458,7 +515,7 @@ def test_an_empty_field_is_left_to_the_model_default(qapp: Any) -> None:
 
     dock.run()
 
-    # Only the checkbox submits without being asked: it has no empty state.
+    # 只有复选框不用填就提交：它没有空状态 / only the checkbox submits unasked: no empty state
     assert engine.calls == [("run_sync", "demo.op", {"flag": True})]
 
 
@@ -495,7 +552,10 @@ def test_a_field_that_is_not_json_stops_before_the_engine(qapp: Any) -> None:
 
 
 def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
-    """A switch replaces the rows and wipes what belonged to the previous operation."""
+    """切换会换掉所有行，并清掉属于上一个操作的东西。
+
+    A switch replaces the rows and wipes what belonged to the previous operation.
+    """
 
     two = {
         "type": "object",
@@ -527,17 +587,22 @@ def test_switching_operation_rebuilds_the_whole_form(qapp: Any) -> None:
 
 
 def test_switching_to_a_smaller_form_shrinks_the_parameter_block(qapp: Any) -> None:
-    """The block is as tall as the current operation's rows, not the last one's.
+    """参数块的高度跟着当前操作的行数，而不是上一个操作的行数。
 
-    The path matters: open on ``layer.add`` (five rows), let the dock lay out, then
-    switch to a two-row operation.  Picking the small operation before the first
-    layout hides the bug, because the first size hint is already the right one.
+    路径是关键：先在 ``layer.add``（五行）上打开，让坞窗排好版，再切到两行的操作。在第一次
+    排版前就选好小的那个会盖住这个 bug，因为第一次的尺寸提示已经是对的了。
+
+    The block is as tall as the current operation's rows, not the last one's. The path
+    matters: open on ``layer.add`` (five rows), let the dock lay out, then switch to a
+    two-row operation. Picking the small operation before the first layout hides the bug,
+    because the first size hint is already the right one.
     """
 
     registry = OperationRegistry()
     register_all(registry)
     dock = OperationDock(registry, FakeEngine())
-    # Big enough for the five rows, so the first layout is not squeezed by the window.
+    # 高到能容下五行，第一次排版才不会被窗口挤
+    # tall enough for the five rows, so the first layout is not squeezed by the window
     dock.resize(420, 760)
     dock.show()
     QTest.qWait(80)
@@ -562,7 +627,7 @@ def test_switching_to_a_smaller_form_shrinks_the_parameter_block(qapp: Any) -> N
     dock.close()
 
 
-# --- the six states ----------------------------------------------------------
+# --- 六个状态 / the six states ----------------------------------------------------
 
 
 def test_the_idle_state_offers_a_run_and_nothing_to_cancel(qapp: Any) -> None:
@@ -574,9 +639,11 @@ def test_the_idle_state_offers_a_run_and_nothing_to_cancel(qapp: Any) -> None:
     assert not dock.copy_button.isEnabled()
     assert dock.progress.isHidden()
     assert dock.feedback.isHidden()
-    # No record, nothing to measure: the capsule alone names the state.
+    # 没有记录就没有可量的东西，只有胶囊在说状态
+    # no record, nothing to measure: the capsule alone names the state
     assert dock.result_summary.isHidden()
-    # Every control says what it is, and the state says what it means.
+    # 每个控件都说自己是什么，状态说自己意味着什么
+    # every control says what it is, and the state says what it means
     for control in (dock.operations, dock.run_button, dock.cancel_button, dock.copy_button):
         assert control.accessibleName().strip()
         assert control.toolTip().strip()
@@ -598,7 +665,8 @@ def test_a_running_background_call_locks_the_form_and_offers_cancel(qapp: Any) -
     assert not dock.run_button.isEnabled()
     assert dock.cancel_button.isEnabled()
     assert not dock.progress.isHidden()
-    # No number yet, so the bar is indeterminate rather than frozen at zero.
+    # 还没有数，进度条就是不确定的，而不是冻在零
+    # no number yet, so the bar is indeterminate, not frozen at zero
     assert (dock.progress.minimum(), dock.progress.maximum()) == (0, 0)
     assert dock.result_summary.isHidden()
 
@@ -633,7 +701,7 @@ def test_a_successful_call_ends_ok_with_copyable_json(qapp: Any) -> None:
     assert dock.feedback.isHidden()
     assert dock.copy_button.isEnabled()
     assert dock.run_button.isEnabled()
-    # The summary carries what the capsule cannot: how long it took.
+    # 摘要说胶囊说不出的东西：花了多久 / the summary carries what the capsule cannot: the time
     assert dock.result_summary.text() == "耗时 1.0 s"
     assert "完成" not in dock.result_summary.text()
     shown = json.loads(dock.result.toPlainText())
@@ -656,13 +724,13 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     assert not dock.feedback.isHidden()
     assert dock.error_code.text() == PATH_NOT_ALLOWED
     assert dock.error_message.text() == "这个路径不在允许的目录里。"
-    # The engine's own message is kept, but only as the tooltip.
+    # 引擎自己的消息留着，但只作提示 / the engine's own message is kept, as the tooltip only
     assert "outside the allowed roots" in dock.error_message.toolTip()
     assert "allowed_data_roots" in dock.error_hint.text()
     assert PATH_NOT_ALLOWED in dock.feedback.accessibleDescription()
     assert dock.result_summary.text() == "耗时 1.0 s"
     assert "失败" not in dock.result_summary.text()
-    # The record itself is still there to copy.
+    # 记录本身还在，仍可以复制 / the record itself is still there to copy
     assert json.loads(dock.result.toPlainText())["status"] == "FAILED"
 
 
@@ -697,7 +765,7 @@ def test_an_empty_registry_teaches_instead_of_showing_nothing(qapp: Any) -> None
     assert not dock.copy_button.isEnabled()
 
 
-# --- the keyboard ------------------------------------------------------------
+# --- 键盘 / the keyboard --------------------------------------------------------
 
 
 def test_ctrl_return_runs_the_selected_operation(qapp: Any) -> None:
@@ -716,10 +784,13 @@ def test_ctrl_return_runs_the_selected_operation(qapp: Any) -> None:
 
 
 def test_the_failed_state_survives_the_dock_minimum(qapp: Any) -> None:
-    """At its own minimum the dock keeps every banner line and the record inside the body.
+    """在坞窗自己的最小尺寸上，每条横幅行与记录都还留在主体里。
 
-    A layout's minimum counts a wrapped label as one line; the banner is asked for
-    its height at the current width, so the floor is the real one.
+    布局把换行标签按一行算；横幅要按当前宽度问它需要多高，这样得到的地板才是真的。
+
+    At its own minimum the dock keeps every banner line and the record inside the body. A
+    layout's minimum counts a wrapped label as one line; the banner is asked for its height
+    at the current width, so the floor is the real one.
     """
 
     engine = FakeEngine(
@@ -759,7 +830,10 @@ def test_the_failed_state_survives_the_dock_minimum(qapp: Any) -> None:
 
 
 def test_a_failure_without_a_record_does_not_show_the_idle_hint(qapp: Any) -> None:
-    """The record area says what happened: a failed submit produced no record."""
+    """记录区要说清发生了什么：失败的提交没有产生记录。
+
+    The record area says what happened: a failed submit produced no record.
+    """
 
     engine = FakeEngine(run_sync=FrameworkError(ENGINE_CLOSING, "the engine is shutting down"))
     dock = OperationDock(FakeRegistry(_spec("a.op"), _spec("b.op")), engine)
@@ -778,7 +852,10 @@ def test_a_failure_without_a_record_does_not_show_the_idle_hint(qapp: Any) -> No
 
 
 def test_a_run_hands_the_keyboard_back(qapp: Any) -> None:
-    """Disabling the form during a call must not leave focus parked on the record view."""
+    """调用期间禁用表单，不能把焦点落在记录视图上。
+
+    Disabling the form during a call must not leave focus parked on the record view.
+    """
 
     dock = _dock(FakeEngine(run_sync=_record()))
     dock.show()
@@ -810,11 +887,14 @@ def test_the_tab_order_goes_selector_then_fields_then_run(qapp: Any) -> None:
     assert len(set(steps)) == len(steps)
 
 
-# --- the theme ---------------------------------------------------------------
+# --- 主题 / the theme ----------------------------------------------------------
 
 
 def test_every_text_pair_clears_its_contrast_floor(qapp: Any) -> None:
-    """Light and dark both: body and secondary text 4.5:1, capsules 3:1."""
+    """浅色深色都要：正文与次要文字 4.5:1，胶囊 3:1。
+
+    Light and dark both: body and secondary text 4.5:1, capsules 3:1.
+    """
 
     for factory in (_light_palette, _dark_palette):
         look = theme.build(factory())
@@ -836,13 +916,16 @@ def test_the_dock_follows_the_application_palette(qapp: Any) -> None:
     assert light.look.surface.name() != dark.look.surface.name()
     assert light.look.text.name() != dark.look.text.name()
     assert light.look.capsule("ok") != dark.look.capsule("ok")
-    # Each dock painted itself with its own palette.
+    # 每个坞窗都用自己的调色板画了自己 / each dock painted itself with its own palette
     assert light.look.surface.name() in light.styleSheet()
     assert dark.look.surface.name() in dark.styleSheet()
 
 
 def test_no_module_but_the_theme_names_a_colour(qapp: Any) -> None:
-    """The dock's colour comes from the palette: only ``theme.py`` may hold a literal."""
+    """坞窗的颜色来自调色板：只有 ``theme.py`` 可以写死颜色值。
+
+    The dock's colour comes from the palette: only ``theme.py`` may hold a literal.
+    """
 
     ui_dir = os.path.dirname(theme.__file__)
     for name in sorted(os.listdir(ui_dir)):
@@ -853,11 +936,14 @@ def test_no_module_but_the_theme_names_a_colour(qapp: Any) -> None:
 
 
 def test_the_painted_hint_clears_the_contrast_floor(qapp: Any) -> None:
-    """The default value in an empty field is text, so it must read as text.
+    """空字段里的默认值是文字，所以它必须读起来像文字。
 
-    Measured on the pixels the widget paints, in both palettes: the previous
-    guard asserted a palette role Qt never used, so it stayed green while the
-    hint rendered at 3.3:1.
+    在两种调色板下按控件实际画出的像素量：上一版守卫断言的调色板角色 Qt 根本没用，所以它
+    一直绿着，而提示实际只有 3.3:1。
+
+    The default value in an empty field is text, so it must read as text. Measured on the
+    pixels the widget paints, in both palettes: an earlier guard asserted a palette role Qt
+    never used, so it stayed green while the hint rendered at 3.3:1.
     """
 
     original = QApplication.palette()
@@ -875,7 +961,10 @@ def test_the_painted_hint_clears_the_contrast_floor(qapp: Any) -> None:
 
 
 def test_the_hint_probe_notices_a_weak_hint(qapp: Any) -> None:
-    """The guard can fail: a hint at a third strength measures below the floor."""
+    """这个守卫是能失败的：三分之一强度的提示量出来低于地板。
+
+    The guard can fail: a hint at a third strength measures below the floor.
+    """
 
     palette = QApplication.palette()
     field = _Field()
@@ -890,7 +979,10 @@ def test_the_hint_probe_notices_a_weak_hint(qapp: Any) -> None:
 
 
 def test_a_submitted_value_stays_readable_while_it_runs(qapp: Any) -> None:
-    """Disabling the form stops edits, not reading: the value being run stays legible."""
+    """禁用表单是停止编辑，不是停止阅读：正在跑的值仍要看得清。
+
+    Disabling the form stops edits, not reading: the value being run stays legible.
+    """
 
     engine = FakeEngine(
         submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
@@ -912,7 +1004,7 @@ def test_a_submitted_value_stays_readable_while_it_runs(qapp: Any) -> None:
     dock.close()
 
 
-# --- running, polling and cancel ---------------------------------------------
+# --- 运行、轮询与取消 / running, polling and cancel ------------------------------
 
 
 def test_a_background_operation_is_submitted_and_polled_until_it_ends(qapp: Any) -> None:
@@ -937,7 +1029,10 @@ def test_a_background_operation_is_submitted_and_polled_until_it_ends(qapp: Any)
 
 
 def test_a_live_background_call_owns_the_run_button(qapp: Any) -> None:
-    """While one call polls, a second run would steal its record and its cancel button."""
+    """一次调用还在轮询时，第二次运行会抢走它的记录与取消按钮。
+
+    While one call polls, a second run would steal its record and its cancel button.
+    """
 
     engine = FakeEngine(
         submit=_record(ExecutionStatus.QUEUED, ExecutionStrategy.BACKGROUND),
@@ -1006,7 +1101,7 @@ def test_copy_json_puts_the_record_on_the_clipboard(qapp: Any) -> None:
     assert dock.copy_button.text() == "已复制"
 
 
-# --- failures never reach the slot -------------------------------------------
+# --- 失败绝不进 Qt 槽 / failures never reach the slot ----------------------------
 
 
 def test_a_refused_call_is_shown_in_the_dock_not_raised(qapp: Any) -> None:
@@ -1040,8 +1135,11 @@ def test_an_unexpected_failure_is_shown_not_raised(qapp: Any) -> None:
 
 
 def test_an_invalid_input_names_the_field_where_it_can_be_read(qapp: Any) -> None:
-    """The schema cannot carry the models' own validators, so the engine's message is
-    the only thing that names the field that failed; it has to reach the panel."""
+    """schema 载不下模型自己的校验器，所以引擎的消息是唯一点名失败字段的东西，它必须到达面板。
+
+    The schema cannot carry the models' own validators, so the engine's message is the only
+    thing that names the field that failed; it has to reach the panel.
+    """
 
     engine = FakeEngine(
         run_sync=FrameworkError(INVALID_INPUT, "demo.op: invalid input at source_path, name")
@@ -1055,7 +1153,10 @@ def test_an_invalid_input_names_the_field_where_it_can_be_read(qapp: Any) -> Non
 
 
 def test_an_error_without_a_sentence_falls_back_to_the_engine_text(qapp: Any) -> None:
-    """A code this build has no words for shows what the engine said, marked as such."""
+    """本构建没有对应句子的错误码，照引擎原话显示，并标明来源。
+
+    A code this build has no words for shows what the engine said, marked as such.
+    """
 
     dock = _dock(FakeEngine())
     dock._show_engine_error("FUTURE_CODE", "something new happened")
@@ -1078,15 +1179,19 @@ def test_a_failure_while_polling_ends_the_poll_and_is_shown(qapp: Any) -> None:
     assert not dock.timer.isActive()
 
 
-# --- the plugin's half of the lifecycle --------------------------------------
+# --- 插件那一半生命周期 / the plugin's half of the lifecycle ----------------------
 
-# ``initGui`` also builds the engine and its QgsTask adapter, so this half of the
-# module fakes ``qgis.core``: the real Qt is what the dock is built with, and it is
-# the one thing the dock needs from QGIS.
+# ``initGui`` 还会建引擎与它的 QgsTask 适配器，所以这半段伪造 ``qgis.core``，真 Qt
+# 才是坞窗的基底，也是坞窗唯一向 QGIS 要的东西
+# ``initGui`` also builds the engine and its QgsTask adapter, so this half of the module fakes
+# it, because the real Qt is what the dock is built with, and the one thing it needs from QGIS
 
 
 class _Signal:
-    """A Qt signal as the plugin uses it: connect, disconnect, emit."""
+    """插件用到的 Qt 信号：连接、断开、发出。
+
+    A Qt signal as the plugin uses it: connect, disconnect, emit.
+    """
 
     def __init__(self) -> None:
         self.slots: list[Any] = []
@@ -1105,7 +1210,10 @@ class _Signal:
 
 
 class _FakeTask:
-    """Enough of ``QgsTask`` for the adapter to build its subclass; nothing runs."""
+    """``QgsTask`` 只留适配器建子类所需的部分；什么都不会跑。
+
+    Enough of ``QgsTask`` for the adapter to build its subclass; nothing runs.
+    """
 
     CanCancel = 1
 
@@ -1115,11 +1223,14 @@ class _FakeTask:
 
 
 class FakeIface:
-    """The interface calls the dock lifecycle makes, backed by a real main window.
+    """坞窗生命周期用到的那几个接口方法，背后是真的主窗口。
 
-    ``addDockWidget`` is the window's own, so a dock of the wrong Qt type is refused
-    here exactly as ``QgisInterface`` refuses it.  A fake that accepted any object is
-    what let a plain ``QWidget`` pass review r1.
+    ``addDockWidget`` 用的是窗口自己的，所以 Qt 类型不对的坞窗在这里也会被拒，跟
+    ``QgisInterface`` 一样；接受任何对象的伪造对象测不出这一点。
+
+    The interface calls the dock lifecycle makes, backed by a real main window.
+    ``addDockWidget`` is the window's own, so a dock of the wrong Qt type is refused here
+    exactly as ``QgisInterface`` refuses it; a fake that accepted any object would not.
     """
 
     def __init__(self, window: QMainWindow) -> None:
@@ -1136,7 +1247,10 @@ class FakeIface:
 
     @property
     def docks(self) -> list[Any]:
-        """What is docked right now: a removed dock keeps its parent but leaves the layout."""
+        """此刻挂在窗口上的东西：移掉的坞窗留住父对象，但离开布局。
+
+        What is docked right now: a removed dock keeps its parent but leaves the layout.
+        """
 
         return [
             dock
@@ -1146,7 +1260,10 @@ class FakeIface:
 
 
 class WindowOnlyIface:
-    """An interface that can dock only through ``mainWindow()``: the F10 fallback."""
+    """只能经 ``mainWindow()`` 挂坞窗的接口：回退路径。
+
+    An interface that can dock only through ``mainWindow()``: the fallback path.
+    """
 
     def __init__(self, window: QMainWindow) -> None:
         self.window = window
@@ -1157,7 +1274,10 @@ class WindowOnlyIface:
 
 @pytest.fixture
 def fake_qgis(qapp: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
-    """``qgis.core`` faked, ``qgis.PyQt`` the real one, so ``initGui`` can run here."""
+    """``qgis.core`` 伪造、``qgis.PyQt`` 用真的，这样 ``initGui`` 能跑。
+
+    ``qgis.core`` faked, ``qgis.PyQt`` the real one, so ``initGui`` can run here.
+    """
 
     project = types.SimpleNamespace(
         aboutToBeCleared=_Signal(),
@@ -1180,7 +1300,8 @@ def fake_qgis(qapp: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         QgsTask=_FakeTask,
     )
     qgis = types.ModuleType("qgis")
-    # The faked package's surface: the real Qt face and the faked core.
+    # 伪造包的面：真 Qt 那一面加伪造的 core
+    # the faked package's surface: the real Qt face and the faked core
     qgis.__dict__.update(core=core, PyQt=sys.modules["qgis.PyQt"])
     monkeypatch.setitem(sys.modules, "qgis", qgis)
     monkeypatch.setitem(sys.modules, "qgis.core", core)
@@ -1205,7 +1326,7 @@ def test_a_second_load_leaves_one_dock_and_unload_stops_its_timer(
     assert second is not first
     assert iface.docks == [second]
 
-    # A live poll is what a running background call leaves behind.
+    # 活着的轮询就是一次后台调用留下的现场 / a live poll is what a background call leaves
     second.timer.start()
     instance.unload()
 
@@ -1231,7 +1352,8 @@ def test_two_loads_and_unloads_leave_nothing_docked(fake_qgis: Any, qapp: Any) -
         assert instance.dock is None
         assert not dock.timer.isActive()
 
-    # ``unload`` twice is what QGIS does when a plugin is disabled while unloaded.
+    # 插件在未加载时被禁用，QGIS 就会 ``unload`` 两次
+    # ``unload`` twice is what QGIS does when a plugin is disabled while it is unloaded
     plugin.Plugin(iface).unload()
     assert iface.docks == []
 
@@ -1239,7 +1361,10 @@ def test_two_loads_and_unloads_leave_nothing_docked(fake_qgis: Any, qapp: Any) -
 def test_the_main_window_fallback_docks_and_undocks_through_that_window(
     fake_qgis: Any, qapp: Any
 ) -> None:
-    """r1 finding 5: the ``mainWindow()`` fallback has to be symmetric."""
+    """``mainWindow()`` 回退路径必须对称：能挂上，也能摘掉。
+
+    The ``mainWindow()`` fallback has to be symmetric: it docks and it undocks.
+    """
 
     window = QMainWindow()
     iface = WindowOnlyIface(window)

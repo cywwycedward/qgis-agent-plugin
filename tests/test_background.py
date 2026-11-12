@@ -1,12 +1,17 @@
-"""Background work end to end: the engine, the QgsTask adapter, and the one real task.
+"""后台执行走完整条链路：引擎、QgsTask 适配器，以及真正跑起来的那个任务。
 
-The adapter's own accounting is checked in ``test_qgs_task``; here the question is
-what a caller sees: a field sum that really goes through a snapshot, a cancel that
-is only reported once QGIS confirms it, a result that never lands in a replaced
-project, and a shutdown that stops what this plugin started (PRD 8.4, 8.5, 9.1-9.3).
+适配器自己的账目在 ``test_qgs_task`` 里查；这里问的是调用者看到什么：一次真的经过快照的
+字段求和、只有 QGIS 确认后才报出的取消、落到被替换工程里就作废的结果，以及关停时只停掉
+本插件自己启动的东西。图层是伪造的，跟 ``test_operations_layer`` 一样：真的 provider 与
+真的 ``QgsTaskManager`` 留给验收测试。
 
-The layer is a fake, the way ``test_operations_layer`` fakes it: the real provider
-and the real ``QgsTaskManager`` are the acceptance run's business.
+Background work end to end: the engine, the QgsTask adapter, and the one real task. The
+adapter's own accounting is checked in ``test_qgs_task``; here the question is what a
+caller sees: a field sum that really goes through a snapshot, a cancel that is only
+reported once QGIS confirms it, a result that never lands in a replaced project, and a
+shutdown that stops what this plugin started. The layer is a fake, the way
+``test_operations_layer`` fakes it: the real provider and the real ``QgsTaskManager`` are
+the acceptance run's business.
 """
 
 from __future__ import annotations
@@ -58,11 +63,11 @@ CANCELLED = ExecutionStatus.CANCELLED
 SUM = LayerSumNumericField.name
 FIELD = "population"
 
-# The qgis.core.NULL singleton, reduced to a value the fake layer can hand out.
+# qgis.core.NULL 缩成伪造图层能交出的值 / the qgis.core.NULL singleton as a plain value
 NULL = object()
 
 
-# --- the fake QGIS -----------------------------------------------------------
+# --- 伪造的 QGIS / the fake QGIS ----------------------------------------------
 
 
 class FakeField:
@@ -97,7 +102,10 @@ class FakeFeature:
 
 
 class FakeVectorLayer:
-    """Enough of ``QgsVectorLayer`` for one field read."""
+    """``QgsVectorLayer`` 只留一次字段读取所需的部分。
+
+    Enough of ``QgsVectorLayer`` for one field read.
+    """
 
     def __init__(
         self,
@@ -121,7 +129,10 @@ class FakeVectorLayer:
 
 @pytest.fixture(autouse=True)
 def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
-    """A ``qgis.core`` that carries only what the sum operation imports."""
+    """只带求和操作会 import 的那几个名字的 ``qgis.core``。
+
+    A ``qgis.core`` that carries only what the sum operation imports.
+    """
 
     core = types.ModuleType("qgis.core")
     core.QgsVectorLayer = FakeVectorLayer  # type: ignore[attr-defined]
@@ -132,7 +143,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return core
 
 
-# --- helpers -----------------------------------------------------------------
+# --- 辅助 / helpers ------------------------------------------------------------
 
 
 def make_layer(rows: list[tuple[Any, ...]], **overrides: Any) -> FakeVectorLayer:
@@ -151,10 +162,13 @@ def submit_sum(harness: Harness, layer_id: str = "layer-1") -> ExecutionRecord:
 
 
 def settled(harness: Harness, submitted: ExecutionRecord) -> ExecutionRecord:
-    """Run the worker and its completion, the way QGIS would.
+    """像 QGIS 那样把后台线程与它的收尾跑完。
 
-    A call whose snapshot preparation failed never got a task, so there is nothing
-    to run: its record already says why.
+    快照准备就失败的调用根本没拿到任务，因此没有可跑的东西：它的记录已经说清了原因。
+
+    Run the worker and its completion, the way QGIS would. A call whose snapshot
+    preparation failed never got a task, so there is nothing to run: its record already
+    says why.
     """
 
     task = harness.tasks[-1] if harness.tasks else None
@@ -163,14 +177,14 @@ def settled(harness: Harness, submitted: ExecutionRecord) -> ExecutionRecord:
     return harness.record(submitted)
 
 
-# --- what the caller sees ----------------------------------------------------
+# --- 调用者看到什么 / what the caller sees -------------------------------------
 
 
 def test_a_field_sum_is_computed_from_a_copied_snapshot() -> None:
     harness = harness_with(make_layer([(10,), (None,), (5,)]))
     submitted = submit_sum(harness)
 
-    # PRD 6.5: submit only accepts and queues; the snapshot is built a turn later.
+    # submit 只接收并排队，快照下一回合才建 / submit only queues; the snapshot comes a turn later
     assert submitted.status is QUEUED
     assert harness.record(submitted).status is SCHEDULED
     snapshot = harness.tasks[0].snapshot
@@ -197,7 +211,7 @@ def test_a_null_that_arrives_as_the_qgis_null_value_is_skipped() -> None:
 
     record = settled(harness, submit_sum(harness))
 
-    # PRD 7.10: a null is counted as skipped, not summed as zero.
+    # 空值计入跳过的数，不当 0 求进和 / a null is counted as skipped, not summed as zero
     assert record.status is SUCCEEDED
     assert record.result is not None
     assert record.result["count"] == 2
@@ -223,14 +237,15 @@ def test_the_task_depends_on_the_layer_it_reads() -> None:
 
     submit_sum(harness)
 
-    # PRD 8.4 / AT-12: QGIS cancels the task when its dependent layer goes away.
+    # 任务声明它依赖哪个图层，QGIS 才能在图层消失时取消它
+    # the task declares the layer it reads, which is what lets QGIS cancel it
     assert harness.tasks[0].dependent_layers == [layer]
     assert LayerSumNumericField().dependent_layer_ids(
         SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
     ) == ["layer-1"]
 
 
-# --- refusals that happen before any task exists -----------------------------
+# --- 还没有任务时就发生的拒绝 / refusals before any task exists ------------------
 
 
 def test_a_synchronous_field_sum_is_unsupported_and_leaves_no_record() -> None:
@@ -239,8 +254,9 @@ def test_a_synchronous_field_sum_is_unsupported_and_leaves_no_record() -> None:
     with pytest.raises(FrameworkError) as caught:
         harness.engine.run_sync(SUM, {"layer_id": "layer-1", "field_name": FIELD})
 
-    # AT-05: a background operation cannot be run synchronously, and the refused
-    # call never became an execution.
+    # 后台操作不能同步跑，被拒的调用也没变成一次执行
+    # a background operation cannot be run synchronously, and the refused call never became an
+    # execution
     assert caught.value.code == UNSUPPORTED_EXECUTION_MODE
     assert harness.engine._store.ids(set(ExecutionStatus)) == []
     assert harness.tasks == []
@@ -270,7 +286,7 @@ def test_the_operation_registers_as_a_background_query() -> None:
     assert LayerSumNumericField.strategy.value == "background"
 
 
-# --- snapshot refusals -------------------------------------------------------
+# --- 快照阶段的拒绝 / snapshot refusals -----------------------------------------
 
 
 def test_an_unknown_layer_is_layer_not_found() -> None:
@@ -326,9 +342,11 @@ def test_a_field_that_is_not_numeric_is_invalid_field_type() -> None:
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_a_non_finite_value_is_refused_rather_than_put_in_the_record(value: float) -> None:
-    # A GeoPackage/SQLite DOUBLE can hold NaN and Infinity and QGIS hands it back as
-    # a float.  The sum then is NaN, the result model accepts it, and the record is
-    # no longer JSON an RFC 8259 parser reads (measured: allow_nan=False raises).
+    # DOUBLE 能存 NaN/Infinity，QGIS 原样交回，于是和是 NaN，结果模型照收，
+    # 而记录不再是可解析的 JSON（实测 ``allow_nan=False`` 会抛）
+    # a DOUBLE can hold NaN and Infinity, which QGIS hands back as a float: the sum is NaN, the
+    # model accepts it, and the record is no longer JSON an RFC 8259 parser reads (measured:
+    # ``allow_nan=False`` raises)
     harness = harness_with(make_layer([(1.0,), (value,), (2.0,)]))
 
     record = settled(harness, submit_sum(harness))
@@ -342,9 +360,9 @@ def test_a_non_finite_value_is_refused_rather_than_put_in_the_record(value: floa
 
 
 def test_a_sum_of_finite_values_that_overflows_is_refused() -> None:
-    # Each value is finite, but 1e308 + 1e308 is Infinity: the old check asked every
-    # value, not the total, and wrote a SUCCEEDED record whose total=inf is not JSON
-    # an RFC 8259 parser reads (measured: json.dumps(..., allow_nan=False) raises).
+    # 每个值都有限，1e308+1e308 却溢出成 Infinity，所以总和本身也要查是否有限
+    # every value is finite, yet 1e308 + 1e308 overflows to Infinity, so the total itself has
+    # to be checked for finiteness; total=inf would not be JSON an RFC 8259 parser reads
     harness = harness_with(make_layer([(1e308,), (1e308,), (5.0,)]))
 
     record = settled(harness, submit_sum(harness))
@@ -358,7 +376,8 @@ def test_a_sum_of_finite_values_that_overflows_is_refused() -> None:
 
 
 def test_a_sum_of_finite_values_is_still_written_and_parsed_strictly() -> None:
-    # The sibling of the case above: the refusal may not cost a normal sum its record.
+    # 上一条的姊妹例：拒绝不该连正常求和也一起没收
+    # the sibling of that case: a refusal may not cost a normal sum its record
     harness = harness_with(make_layer([(1.5,), (2.5,)]))
 
     record = settled(harness, submit_sum(harness))
@@ -375,7 +394,7 @@ def test_more_features_than_the_limit_is_refused_not_truncated() -> None:
 
     record = settled(harness, submit_sum(harness))
 
-    # PRD 7.10: a partial sum that looks complete is worse than a refusal.
+    # 看起来完整的残缺和不如直接拒绝 / a partial sum that looks complete is worse than a refusal
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == SNAPSHOT_LIMIT_EXCEEDED
@@ -383,7 +402,7 @@ def test_more_features_than_the_limit_is_refused_not_truncated() -> None:
     assert harness.tasks == []
 
 
-# --- cancellation ------------------------------------------------------------
+# --- 取消 / cancellation ------------------------------------------------------
 
 
 def test_cancelling_a_scheduled_task_waits_for_qgis_to_confirm() -> None:
@@ -392,14 +411,15 @@ def test_cancelling_a_scheduled_task_waits_for_qgis_to_confirm() -> None:
 
     receipt = harness.engine.cancel(submitted.execution_id)
 
-    # AT-08B: the request is recorded and the task is asked to stop, but nothing
-    # claims it has terminated yet.
+    # 请求被记下、任务被叫停，但还没有任何一方声称它已终止
+    # the request is recorded and the task is asked to stop, but nothing claims it has
+    # terminated yet
     assert receipt.accepted is True
     assert receipt.status is CANCEL_REQUESTED
     assert harness.tasks[0].isCanceled() is True
     assert harness.record(submitted).status is CANCEL_REQUESTED
 
-    harness.tasks[0].finished(False)  # QGIS confirms the termination
+    harness.tasks[0].finished(False)  # QGIS 确认终止 / QGIS confirms the termination
 
     assert harness.record(submitted).status is CANCELLED
     assert harness.record(submitted).result is None
@@ -410,7 +430,8 @@ def test_a_worker_that_finishes_after_a_cancel_reports_cancelled_without_a_resul
     submitted = submit_sum(harness)
     harness.engine.cancel(submitted.execution_id)
 
-    # PRD 8.2: ``run`` may still return True after the request; the result is dropped.
+    # 请求之后 ``run`` 仍可能返回 True，此时结果直接丢弃
+    # ``run`` may still return True after the request and the result is dropped
     harness.run(harness.tasks[0])
 
     record = harness.record(submitted)
@@ -429,7 +450,8 @@ def test_a_real_worker_failure_outranks_a_cancel_request() -> None:
     harness.run(harness.tasks[0])
 
     record = harness.record(submitted)
-    # PRD 8.2: CANCEL_REQUESTED -> FAILED, keeping the diagnostic.
+    # CANCEL_REQUESTED 仍可到 FAILED，诊断保留下来
+    # CANCEL_REQUESTED still goes on to FAILED and the diagnostic is kept
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INTERNAL_ERROR
@@ -439,8 +461,9 @@ def test_a_cancel_while_finalizing_is_refused() -> None:
     harness = harness_with(make_layer([(1,)]))
     submitted = submit_sum(harness)
 
-    # Walk the record into FINALIZING through the store: the adapter's own step into
-    # that state lasts one call and is not reachable from outside.
+    # 借存储把记录推进到 FINALIZING，适配器自己进这一步只持续一次调用，外部够不到它
+    # walk the record into FINALIZING through the store: the adapter's own step into that state
+    # lasts one call, so it is not reachable from outside
     store = harness.engine._store
     store.transition(submitted.execution_id, ExecutionStatus.RUNNING)
     store.transition(submitted.execution_id, FINALIZING)
@@ -450,17 +473,17 @@ def test_a_cancel_while_finalizing_is_refused() -> None:
     assert receipt.reason == "FINALIZING"
 
 
-# --- the project generation --------------------------------------------------
+# --- 工程代数 / the project generation -----------------------------------------
 
 
 def test_a_result_from_a_replaced_project_is_stale_project() -> None:
     harness = harness_with(make_layer([(1,)]))
     submitted = submit_sum(harness)
 
-    harness.lifecycle.bump()  # what F6 does on aboutToBeCleared
+    harness.lifecycle.bump()  # aboutToBeCleared 上的代数递增 / what the bump does there
 
     record = settled(harness, submitted)
-    # PRD 9.1, AT-11: the old generation's numbers never reach the new project.
+    # 旧代数的数字绝不进新工程 / the old generation's numbers never reach the new project
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == STALE_PROJECT
@@ -488,12 +511,12 @@ def test_replacing_the_project_leaves_new_work_alone() -> None:
 
     submitted = submit_sum(harness)
 
-    # The engine stays open: only the old generation was dropped (PRD 9.2).
+    # 引擎仍开着：只丢了旧代数 / the engine stays open: only the old generation was dropped
     assert harness.record(submitted).status is SCHEDULED
     assert harness.tasks[0].isCanceled() is False
 
 
-# --- shutdown ----------------------------------------------------------------
+# --- 关停 / shutdown ----------------------------------------------------------
 
 
 def test_shutdown_stops_what_this_plugin_started_and_refuses_new_work() -> None:
@@ -504,7 +527,8 @@ def test_shutdown_stops_what_this_plugin_started_and_refuses_new_work() -> None:
 
     harness.engine.shutdown()
 
-    # PRD 9.3.2: everything queued is cancelled, every live task is asked to stop.
+    # 排队的全部取消，每个活着的任务都被叫停
+    # everything queued is cancelled and every live task is asked to stop
     assert harness.record(waiting).status is CANCELLED
     assert harness.record(first).status is CANCEL_REQUESTED
     assert harness.record(second).status is CANCEL_REQUESTED
@@ -524,11 +548,14 @@ def test_shutdown_is_idempotent() -> None:
     assert harness.tasks[0].isCanceled() is True
 
 
-# --- the finalize stage ------------------------------------------------------
+# --- 收尾阶段 / the finalize stage ---------------------------------------------
 
 
 class BadFinalize(Counting):
-    """A worker that succeeds and a finalize that breaks."""
+    """后台线程成功、但收尾会炸的操作。
+
+    A worker that succeeds and a finalize that breaks.
+    """
 
     name = "test.bad_finalize"
     description = "raise while the result is being applied"
@@ -538,7 +565,10 @@ class BadFinalize(Counting):
 
 
 class LyingFinalize(Counting):
-    """A finalize that returns something other than its declared output model."""
+    """返回的不是它声明的输出模型的那种收尾。
+
+    A finalize that returns something other than its declared output model.
+    """
 
     name = "test.lying_finalize"
     description = "return an object instead of its output model"
@@ -554,7 +584,7 @@ def test_a_finalize_that_raises_is_a_failed_record() -> None:
     harness.run(harness.tasks[0])
 
     record = harness.record(submitted)
-    # AT-23: a broken finalise may never look like a success.
+    # 坏掉的收尾绝不能被当成成功 / a broken finalize may never look like a success
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INTERNAL_ERROR
@@ -574,7 +604,7 @@ def test_an_output_that_does_not_match_the_model_is_refused() -> None:
     assert record.result is None
 
 
-# --- the worker's own contract ------------------------------------------------
+# --- 后台线程自己的契约 / the worker's own contract -----------------------------
 
 
 def test_the_worker_gets_a_tuple_and_a_control_and_nothing_else() -> None:
@@ -586,13 +616,17 @@ def test_the_worker_gets_a_tuple_and_a_control_and_nothing_else() -> None:
     assert snapshot.values == (3.5, 1.5)
     assert not hasattr(snapshot, "mapLayer")
     result = LayerSumNumericField().execute_worker(snapshot, _NoCancel())
-    # The declared worker result, before the main thread turns it into the output.
+    # 后台线程声明的结果，主线程还没把它变成输出
+    # the declared worker result, before the main thread turns it into the output
     assert isinstance(result, FieldSum)
     assert (result.count, result.total, result.skipped_null) == (2, 5.0, 0)
 
 
 class _NoCancel:
-    """A TaskControl that never cancels and records the progress it was given."""
+    """从不取消、只记下收到多少进度的 TaskControl。
+
+    A TaskControl that never cancels and records the progress it was given.
+    """
 
     def __init__(self) -> None:
         self.progress: list[float] = []
@@ -619,7 +653,8 @@ def test_the_worker_stops_when_the_control_reports_a_cancel() -> None:
 
     result = LayerSumNumericField().execute_worker(snapshot, Cancelling())
 
-    # The partial numbers are handed back untouched; the adapter drops them.
+    # 残缺的数字原样交回，由适配器丢弃
+    # the partial numbers are handed back untouched, and the adapter drops them
     assert result.count == 9
     assert result.total == sum(range(9))
 
@@ -654,7 +689,7 @@ def test_the_finalize_refuses_a_snapshot_from_an_older_generation() -> None:
     with pytest.raises(FrameworkError) as caught:
         operation.finalize_main(harness.engine._context(), request, result)
 
-    # PRD 7.10: the operation checks the generation itself, not only the adapter.
+    # 操作自己也查代数，不只靠适配器 / the operation checks the epoch itself, not only the adapter
     assert caught.value.code == STALE_PROJECT
 
 
@@ -674,7 +709,8 @@ def test_the_field_sum_runs_state_by_state_with_a_running_record() -> None:
     harness = harness_with(make_layer([(1,)]))
     submitted = submit_sum(harness)
 
-    # A progress report is what moves SCHEDULED to RUNNING on the main thread.
+    # 进度回报才把 SCHEDULED 推到 RUNNING，这一步在主线程上
+    # a progress report is what moves SCHEDULED to RUNNING on the main thread
     harness.manager.report(harness.tasks[0], 50.0)
 
     assert harness.record(submitted).status is RUNNING
