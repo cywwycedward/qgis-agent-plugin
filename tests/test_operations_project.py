@@ -425,6 +425,31 @@ def test_a_project_suffix_is_case_insensitive(tmp_path: Path) -> None:
     assert saved.path is not None and saved.path.endswith("b.QGS")
 
 
+# --- output models ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model, fields",
+    [
+        (project.ProjectCreateResult, ["crs_authid", "file_path", "layer_count"]),
+        (
+            project.ProjectOpenResult,
+            ["file_path", "crs_authid", "layer_count", "invalid_layer_count"],
+        ),
+        (project.ProjectSaveResult, ["file_path", "is_dirty"]),
+        (
+            project.ProjectGetInfoResult,
+            ["file_path", "crs_authid", "is_dirty", "layer_count", "project_epoch"],
+        ),
+    ],
+    ids=["create", "open", "save", "get_info"],
+)
+def test_a_result_carries_exactly_the_prd_output_fields(model: Any, fields: list[str]) -> None:
+    # PRD v1 §7.2-§7.5: every record's keys are the contract, and a field nobody
+    # asked for reaches every caller through ``model_dump(mode="json")``.
+    assert list(model.model_fields) == fields
+
+
 # --- project.create ---------------------------------------------------------
 
 

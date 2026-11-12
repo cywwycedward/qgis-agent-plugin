@@ -91,7 +91,12 @@ def _json_image(value: Any) -> Any:
 def _require_json(value: Any) -> Any:
     """``value`` as a JSON tree, or a ``ValueError`` for the model to report."""
 
-    image = _json_image(value)
+    try:
+        image = _json_image(value)
+    except RecursionError:
+        # A cyclic or absurdly deep tree is the caller's mistake, not a plugin one:
+        # left alone it escapes as an INTERNAL_ERROR instead of INVALID_INPUT.
+        image = _NO_JSON
     if image is _NO_JSON:
         raise ValueError("only finite JSON values are allowed")
     return image
@@ -184,11 +189,13 @@ class ProcessingRunAlgorithmParams(Params):
     """A native algorithm id and its native parameter map (design §5.2)."""
 
     algorithm_id: StrictStr = Field(min_length=1)
-    parameters: dict[str, Any]
+    # Strict: the top level is pydantic's dict, so this is the only place the
+    # documented "no non-string key" rule can reach it; the walk checks the rest.
+    parameters: dict[StrictStr, Any]
 
     @field_validator("parameters")
     @classmethod
-    def _parameters_are_json(cls, value: dict[str, Any]) -> dict[str, Any]:
+    def _parameters_are_json(cls, value: dict[StrictStr, Any]) -> dict[StrictStr, Any]:
         return _require_json(value)
 
 
