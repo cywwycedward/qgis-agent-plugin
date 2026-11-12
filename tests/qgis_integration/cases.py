@@ -1,13 +1,15 @@
-"""The PRD 12.2 acceptance cases, one function per AT id.
+"""验收用例集：一条用例一个函数，按用例编号登记在 ``CASES`` 里，只返回一行证据。
 
-Each case returns one evidence line for the report and raises ``AssertionError``
-when the expectation is not met, so a case can never pass by accident.  A case that
-cannot be run on this machine raises ``Skip`` with the reason instead; nothing here
-turns a skip into a pass (PRD 12.3).
+期待落空就抛 ``AssertionError``，所以用例不可能顺手通过；这台机器给不了的环境抛 ``Skip`` 并带上
+原因，跳过永远不算通过。用例需要的状态主要靠插件自己的操作、在生成的测试数据上建立；少数准备步骤
+直接动 ``QgsProject``（清空工程、搬图层树节点），因为那些形状正是要被测的东西。
 
-Every case builds the state it needs through the plugin's own operations, against
-the generated fixtures only (PRD 12.1: no user project is ever the subject of a
-destructive case).
+Each case is registered in ``CASES`` under its id and returns one evidence line.  An
+expectation that does not hold raises ``AssertionError``, so a case can never pass by
+accident; an environment this machine cannot provide raises ``Skip`` with the reason,
+and a skip never counts as a pass.  Every case builds its state through the plugin's own
+operations against the generated fixtures only: a destructive case is never about a
+user's own project.
 """
 
 from __future__ import annotations
@@ -90,7 +92,7 @@ LIVE_STATUSES = [
 ALL_STATUSES = [*LIVE_STATUSES, *TERMINAL_STATUSES]
 
 
-# --------------------------------------------------------------------------- helpers
+# ------------------------------------------------------------------- 辅助函数 / helpers
 
 
 def project_layers() -> dict[str, Any]:
@@ -104,7 +106,10 @@ def project_layer_ids() -> list[str]:
 
 
 def reset_project(ctx: Context) -> None:
-    """A clean project for a case's own setup, cleared directly, not by an operation."""
+    """给用例自己的准备步骤一个干净工程：直接清空，不走任何操作。
+
+    A clean project for a case's own setup, cleared directly rather than by an operation.
+    """
 
     from qgis.core import QgsProject
 
@@ -113,7 +118,10 @@ def reset_project(ctx: Context) -> None:
 
 
 def cities_layer(ctx: Context, name: str = "cities") -> str:
-    """A real vector layer added through the plugin's own ``layer.add``."""
+    """用插件自己的 ``layer.add`` 加一个真实矢量图层，返回图层 id。
+
+    A real vector layer added through the plugin's own ``layer.add``.
+    """
 
     return ctx.add_layer(ctx.fixtures.cities, name)
 
@@ -133,7 +141,10 @@ def result_of(record: ExecutionRecord) -> dict[str, Any]:
 
 
 def refused(call: Any) -> str:
-    """The code of the ``FrameworkError`` ``call`` raised, or a failed assertion."""
+    """``call`` 抛出的 ``FrameworkError`` 错误码；它没被拒，用例就失败。
+
+    The code of the ``FrameworkError`` ``call`` raised, or a failed assertion.
+    """
 
     try:
         call()
@@ -152,7 +163,10 @@ def manager_task_count(ctx: Context) -> int:
 
 
 def processing_algorithms() -> list[Any]:
-    """Every algorithm the live QGIS Processing registry holds, in its own order."""
+    """当前 QGIS Processing 注册表里的全部算法，按注册表自己的顺序。
+
+    Every algorithm the live QGIS Processing registry holds, in its own order.
+    """
 
     from qgis.core import QgsApplication
 
@@ -170,7 +184,10 @@ def parameters_by_name(info: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def run_algorithm(ctx: Context, algorithm_id: str, parameters: dict[str, Any]) -> ExecutionRecord:
-    """One ``processing.run_algorithm`` call, as its record."""
+    """一次 ``processing.run_algorithm`` 调用，返回它的执行记录。
+
+    One ``processing.run_algorithm`` call, as its record.
+    """
 
     return ctx.run(
         "processing.run_algorithm", {"algorithm_id": algorithm_id, "parameters": parameters}
@@ -182,7 +199,10 @@ def outputs_of(record: ExecutionRecord) -> dict[str, Any]:
 
 
 def output_layer(ctx: Context, record: ExecutionRecord, key: str) -> Any:
-    """The project layer one output key names; a stale id is a failure (charter 7/E4)."""
+    """取某个输出键指向的工程图层；id 指向工程里没有的图层就是用例失败。
+
+    The project layer one output key names; an id the project does not hold is a failure.
+    """
 
     layer_id = outputs_of(record)[key]
     require(isinstance(layer_id, str), f"{key} names {layer_id!r}, which is not a layer id")
@@ -192,13 +212,19 @@ def output_layer(ctx: Context, record: ExecutionRecord, key: str) -> Any:
 
 
 def sub_layer(ctx: Context, name: str, layer_name: str) -> str:
-    """A layer of the GeoPackage fixture, added through the plugin's own ``layer.add``."""
+    """GeoPackage 测试数据里的某一张表，走插件自己的 ``layer.add`` 加进来。
+
+    A layer of the GeoPackage fixture, added through the plugin's own ``layer.add``.
+    """
 
     return ctx.add_layer(ctx.fixtures.cities, name, sub_layer=layer_name)
 
 
 def raster_layer(ctx: Context, name: str, source: Path | None = None) -> str:
-    """A raster layer added through the plugin's own ``layer.add``."""
+    """走插件自己的 ``layer.add`` 加一个栅格图层，返回图层 id。
+
+    A raster layer added through the plugin's own ``layer.add``.
+    """
 
     record = ctx.run(
         "layer.add",
@@ -219,7 +245,10 @@ def project_layer(layer_id: str) -> Any:
 
 
 def installed_renderer(ctx: Context, layer_id: str) -> str:
-    """What ``layer.get_renderer`` reports for a layer, through the engine."""
+    """经引擎问一次 ``layer.get_renderer``，取回它报告的渲染器类型。
+
+    What ``layer.get_renderer`` reports for a layer, through the engine.
+    """
 
     record = ctx.run("layer.get_renderer", {"layer_id": layer_id})
     require(record.status is ExecutionStatus.SUCCEEDED, f"layer.get_renderer: {record.error}")
@@ -240,7 +269,10 @@ def qml_of(ctx: Context, layer_id: str, categories: list[str] | None = None) -> 
 
 
 def xml_root(qml: str) -> Any:
-    """The root element of an exported QML string; invalid XML is a failed case."""
+    """导出 QML 字符串的根元素；导出的不是合法 XML 就是用例失败。
+
+    The root element of an exported QML string; invalid XML is a failed case.
+    """
 
     import xml.etree.ElementTree as ElementTree
 
@@ -255,10 +287,14 @@ def style_categories_attribute(qml: str) -> set[str]:
 
 
 def qml_files(*roots: Path) -> list[str]:
-    """Every ``.qml`` file under the given roots (the working directory by default).
+    """给定根目录下的所有 ``.qml`` 文件（默认当前工作目录）。
 
+    ``layer.get_qml`` 根本没有文件路径参数，所以一次运行必须让扫到的根目录保持原样；运行目录与
+    测试数据根目录都会被扫。
+
+    Every ``.qml`` file under the given roots (the working directory by default).
     ``layer.get_qml`` has no file path at all, so a run must leave every scanned root
-    untouched; the run's own directory and the fixture root are both scanned (S04).
+    untouched; the run's own directory and the fixture root are both scanned.
     """
 
     found: list[str] = []
@@ -271,7 +307,7 @@ def message_of(record: ExecutionRecord) -> str:
     return "" if record.error is None else record.error.message
 
 
-# ------------------------------------------------------------------------- the cases
+# --------------------------------------------------------------- 用例 / the cases
 
 
 def at_01_duplicate_registration(ctx: Context) -> str:
@@ -548,9 +584,11 @@ def at_08c_concurrency_limit(ctx: Context) -> str:
 
     pump_until(ctx.app, tick, timeout=30.0, what="all four tasks to finish")
     equal(peak, limit, "the highest number of tasks active at once")
-    # PRD 8.5: "空位出现后按提交先后顺序（FIFO）开始 PREPARING".  The snapshot is
-    # built in prepare_main, on the main thread, where the adapter decides the order;
-    # the worker's run() order is QThreadPool's and is not part of that contract.
+    # 空位出现后按提交先后顺序启动下一个调用：快照在主线程的 prepare_main 里生成，顺序由适配器
+    # 决定；worker 里 run() 的顺序属于 QThreadPool，不在这条约定之内。
+    # A freed slot starts the next call in submission order: the snapshot is built in prepare_main
+    # on the main thread, where the adapter decides the order; the worker's run() order belongs to
+    # QThreadPool and is not part of that contract.
     equal(PROBE_LOG.prepared, labels, "the order the calls were granted a slot in")
     equal(
         sorted(PROBE_LOG.starts),
@@ -563,9 +601,10 @@ def at_08c_concurrency_limit(ctx: Context) -> str:
         "the final status of every task",
     )
 
-    # A8 #1: six calls in one go mean four waiting calls and four slot releases, each
-    # of which has to start the next call instead of losing the slot.  Every record
-    # reaching SUCCEEDED is what proves no call stayed behind in QUEUED/SCHEDULED.
+    # 一次提交六个调用：四个在等槽，每次释放都必须启动下一个，否则空位就丢了；六条记录全部
+    # SUCCEEDED，才证明没有调用留在队列里。
+    # Six calls at once mean four of them wait, and every release has to start the next call or the
+    # slot is lost; all six reaching SUCCEEDED is what proves none stayed queued.
     PROBE_LOG.prepared.clear()
     wave = [f"at08c-{letter}" for letter in "efghij"]
     wave_ids = [
@@ -788,7 +827,10 @@ def at_14_submission_refused(ctx: Context) -> str:
             self.callback = callback
 
     class RefusingManager:
-        """What PRD 12.2 AT-14 says to simulate: ``addTask`` returns 0."""
+        """模拟一个拒绝任务的加载器：``addTask`` 返回 0。
+
+        A task manager that refuses the task: ``addTask`` returns 0.
+        """
 
         progressChanged = Signal()
 
@@ -887,7 +929,10 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
 
 
 def at_18_corrupt_project(ctx: Context) -> str:
-    """Both sides of PRD 7.3: a corrupt QGZ is refused, a valid one is read."""
+    """同一条规则的两面：坏的 QGZ 被拒，好的被读进来。
+
+    Both sides of the same rule: a corrupt QGZ is refused, a valid one is read.
+    """
 
     record = ctx.run(
         "project.open",
@@ -1106,8 +1151,9 @@ def at_24_retention(ctx: Context) -> str:
         gate.set()
     ctx.wait_terminal(slow.execution_id)
 
-    # The TTL half needs 1800 seconds of retention time, so it runs on an injected clock
-    # against the same store (PRD 12.1 allows the pure-Python layer to do this).
+    # 过期的那一半需要 1800 秒保留时间，所以用注入的时钟对同一个 store 跑。
+    # The TTL half needs 1800 seconds of retention time, so it runs on an injected clock against the
+    # same store.
     now = [1000.0]
     registry = OperationRegistry()
     register_all(registry)
@@ -1260,12 +1306,15 @@ def at_27_v1_half(ctx: Context) -> str:
 
 
 def at_28_layer_add_sub_layer(ctx: Context) -> str:
-    """PRD 7.6: one named table in a GeoPackage, reached through the OGR encoder."""
+    """GeoPackage 里指定名字的一张表，经 OGR 编码器加进来。
+
+    One named table in a GeoPackage, reached through the OGR encoder.
+    """
 
     from qgis.core import QgsProject
 
     reset_project(ctx)
-    source = ctx.fixtures.spaced  # its own name contains a space on purpose
+    source = ctx.fixtures.spaced  # 文件名本身就带空格，故意如此 / its own name has a space
     layer_id = ctx.add_layer(source, "at28 roads", sub_layer=fixtures.ROADS_LAYER)
     layer = QgsProject.instance().mapLayer(layer_id)
     if layer is None:
@@ -1273,8 +1322,9 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
 
     equal(layer.providerType(), "ogr", "the provider of a sub-layer add")
     equal(layer.isValid(), True, "the layer is usable")
-    # The GeoPackage holds five cities points and one roads line, so the count is
-    # what proves the encoder selected the named table and not the first one.
+    # 这份 GeoPackage 是五点一线，所以要素数证明编码器选的是具名表。
+    # The GeoPackage holds five points and one line, so the feature count proves the encoder picked
+    # the named table.
     equal(layer.featureCount(), 1, "the features of the roads table")
     equal(
         result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))["provider"],
@@ -1288,7 +1338,10 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
 
 
 def at_29_open_refuses_a_source_outside_the_roots(ctx: Context) -> str:
-    """A project file may not smuggle in data the path policy refuses (PRD 10.2)."""
+    """工程文件不能夹带路径策略拒绕的数据：工程本身在允许目录里，它的数据源不在。
+
+    A project file may not smuggle in data the path policy refuses.
+    """
 
     record = ctx.run("project.open", {"path": str(ctx.fixtures.leak), "discard_current": True})
 
@@ -1310,7 +1363,10 @@ def at_29_open_refuses_a_source_outside_the_roots(ctx: Context) -> str:
 
 
 def at_30_open_refuses_a_remote_source_before_reading(ctx: Context) -> str:
-    """A project file may not cost a network round trip before it is checked."""
+    """工程文件不能在检查之前就花掉一次网络往返：先看文件自己的字节，再交给 read()。
+
+    A project file may not cost a network round trip before it is checked.
+    """
 
     from qgis.core import QgsProject
 
@@ -1328,8 +1384,10 @@ def at_30_open_refuses_a_remote_source_before_reading(ctx: Context) -> str:
         elapsed = time.monotonic() - started
         equal(record.status, ExecutionStatus.FAILED, f"project.open on {label}")
         equal(error_code(record), PATH_NOT_ALLOWED, f"the code for {label}")
-        # The file's own datasource text is refused before read(), so neither the
-        # HTTP retry nor the SMB connect happens on the main thread.
+        # 文件自己的 datasource 文本在 read() 之前就被拒，所以 HTTP 重试与 SMB 连接都不会发生在
+        # 主线程上。
+        # The file's own datasource text is refused before read(), so neither the HTTP retry nor the
+        # SMB connect happens on the main thread.
         require(elapsed < 1.0, f"{label} took {elapsed:.2f}s: read() reached it")
         equal(project_layer_ids(), before, f"the project's layers after {label}")
         equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
@@ -1342,7 +1400,10 @@ def at_30_open_refuses_a_remote_source_before_reading(ctx: Context) -> str:
 
 
 def at_31_open_refuses_an_encoded_or_spaced_datasource(ctx: Context) -> str:
-    """A UTF-8-only text scan can be walked past with an encoding or a space (A3 #1)."""
+    """只按 UTF-8 明文扫描可以被一个编码或一个空格绕过：UTF-16 与带空格的标签都测。
+
+    A UTF-8-only text scan can be walked past with an encoding or a space.
+    """
 
     from qgis.core import QgsProject
 
@@ -1364,8 +1425,8 @@ def at_31_open_refuses_an_encoded_or_spaced_datasource(ctx: Context) -> str:
         if error is None:
             raise AssertionError("a failed record carries an error")
         require(expected in error.message, f"the message for {label}: {error.message!r}")
-        # Neither form may reach read(): 10 s of GDAL retries is what the audit measured
-        # when the scan missed the datasource it could not see.
+        # 两种写法都不能走到 read()：扫描若看漏数据源，就要付 10 s 的 GDAL 重试（实测）。
+        # Neither form may reach read(): a datasource the scan misses costs 10 s of GDAL retries.
         require(elapsed < 0.5, f"{label} took {elapsed:.2f}s: read() reached the source")
         equal(project_layer_ids(), before, f"the project's layers after {label}")
         equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
@@ -1378,7 +1439,11 @@ def at_31_open_refuses_an_encoded_or_spaced_datasource(ctx: Context) -> str:
 
 
 def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
-    """A moved-away source directory is AT-18B, not a breach of the roots (A3 #2)."""
+    """数据源目录被搬走不等于越界：路径仍在允许目录里，只是那儿没有文件了。
+
+    A moved-away source directory is not a breach of the roots: the path is inside them and
+    only the data is gone.
+    """
 
     reset_project(ctx)
     ctx.add_layer(ctx.fixtures.cities, "at32 old")
@@ -1407,7 +1472,10 @@ def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
 
 
 def at_33_open_refuses_an_oversized_member_before_unpacking_it(ctx: Context) -> str:
-    """A tiny QGZ may hold a member that expands to 300 MB, on the main thread (A3 #3)."""
+    """一个很小的 QGZ 可以装下解压后 300 MB 的成员，而且解压发生在主线程上。
+
+    A tiny QGZ may hold a member that expands to 300 MB, on the main thread.
+    """
 
     from qgis.core import QgsProject
 
@@ -1439,7 +1507,10 @@ def at_33_open_refuses_an_oversized_member_before_unpacking_it(ctx: Context) -> 
 
 
 def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
-    """A QGZ the scanner cannot unpack is the file's problem, not the plugin's (A3 #4)."""
+    """扫描器解不开的 QGZ 是文件自己的问题，不该报成插件的内部错误。
+
+    A QGZ the scanner cannot unpack is the file's problem, not the plugin's.
+    """
 
     reset_project(ctx)
 
@@ -1471,7 +1542,10 @@ def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
 
 
 def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -> str:
-    """A deeply nested project crashes ``read()``'s parser, so it never reaches it (A4 #2)."""
+    """嵌套过深的工程会让 ``read()`` 的解析器崩溃，所以它绝不能走到 read()。
+
+    A deeply nested project crashes ``read()``'s parser, so it never reaches it.
+    """
 
     from qgis.core import QgsProject
 
@@ -1506,7 +1580,10 @@ def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -
 
 
 def at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds(ctx: Context) -> str:
-    """984 KB of unclosed tags once cost the main thread 661 s; it is linear now (A4 #1)."""
+    """984 KB 未闭合标签曾经让主线程耗掉 661 s（实测），现在是一次线性扫描。
+
+    984 KB of unclosed tags once cost the main thread 661 s; the scan is linear now.
+    """
 
     from qgis.core import QgsProject
 
@@ -1542,7 +1619,10 @@ def at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds(ctx: Conte
 
 
 def at_37_open_refuses_a_qgz_over_the_total_budget(ctx: Context) -> str:
-    """The budget is the sum of the members, not each member on its own (A4 #3)."""
+    """预算算的是各成员之和，不是逐个成员单独卡：十七个 1 MB 成员单看不超，加起来超。
+
+    The budget is the sum of the members, not each member on its own.
+    """
 
     from qgis.core import QgsProject
 
@@ -1579,7 +1659,10 @@ def at_37_open_refuses_a_qgz_over_the_total_budget(ctx: Context) -> str:
 
 
 def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
-    """16 MB of XML elements is refused by count, not walked element by element (A4 #1)."""
+    """16 MB 的 XML 元素靠计数拒绝，而不是逐个元素走一遍：一次 bytes.count 就够。
+
+    16 MB of XML elements is refused by count, not walked element by element.
+    """
 
     from qgis.core import QgsProject
 
@@ -1602,9 +1685,10 @@ def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
     if error is None:
         raise AssertionError("a failed record carries an error")
     require("XML tags" in error.message, f"the message: {error.message!r}")
-    # A cold read of this 16.7 MB file was measured at 1.9 s in the first run of a full
-    # suite (234 ms warm), so the bound separates one bytes.count from a parse per
-    # element, not one disk cache from another.
+    # 冷读 1.9 s、热读 234 ms（实测），所以这个上限区分的是“一次 bytes.count”与“逐元素解析”，
+    # 而不是两次磁盘缓存状态的差异。
+    # A cold read of this 16.7 MB file cost 1.9 s and a warm one 234 ms, so the bound separates one
+    # bytes.count from a parse per element, not one disk cache state from another.
     require(elapsed < 5.0, f"the {on_disk} byte project took {elapsed:.2f}s")
     equal(project_layer_ids(), before, "the project's layers after the refusal")
     equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
@@ -1617,7 +1701,10 @@ def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
 
 
 def at_39_open_refuses_a_datasource_hidden_by_an_attribute(ctx: Context) -> str:
-    """A ``>`` inside an attribute value is legal XML, not the end of the tag (A5 #1)."""
+    """属性值里的 ``>`` 是合法 XML，不是标签的结束：在第一个 ``>`` 处截断就会看漏数据源。
+
+    A ``>`` inside an attribute value is legal XML, not the end of the tag.
+    """
 
     from qgis.core import QgsProject
 
@@ -1669,7 +1756,10 @@ def at_39_open_refuses_a_datasource_hidden_by_an_attribute(ctx: Context) -> str:
 
 
 def at_40_open_reads_a_project_with_labelled_layers(ctx: Context) -> str:
-    """A ``>`` inside an attribute is what QGIS itself writes for every label (A5 #2)."""
+    """属性里的 ``>`` 正是 QGIS 给每个标注写出来的东西，所以正常工程不能被拒。
+
+    A ``>`` inside an attribute is what QGIS itself writes for every label.
+    """
 
     reset_project(ctx)
     on_disk = ctx.fixtures.labelled.stat().st_size
@@ -1690,10 +1780,11 @@ def at_40_open_reads_a_project_with_labelled_layers(ctx: Context) -> str:
         "the layers the labelled project holds",
     )
     equal(values["invalid_layer_count"], 0, "the invalid layers of the labelled project")
-    # Wall clock only separates "answered" from "stopped the main thread": the same
-    # 30-layer read measured 1.1 s and 2.1 s in two full runs on this box while the
-    # scan of the file was 31 ms in both, so a tighter bound is not a property of the
-    # code (recorded in docs/delegate/A7-fix.md).
+    # 墙钟时间只能区分“答出来了”与“主线程被停住”：同一个 30 层工程的读取两次整套运行分别实测
+    # 1.1 s 与 2.1 s，而文件扫描两次都是 31 ms，所以再收紧上限测的就不是代码本身了。
+    # Wall clock only separates "answered" from "stopped the main thread": the same 30-layer read
+    # took 1.1 s and then 2.1 s in two full runs while the scan of the file took 31 ms both times,
+    # so a tighter bound would not measure the code.
     require(elapsed < 20.0, f"the {on_disk} byte project took {elapsed:.2f}s")
     reset_project(ctx)
     return (
@@ -1707,7 +1798,10 @@ def at_40_open_reads_a_project_with_labelled_layers(ctx: Context) -> str:
 def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
     ctx: Context,
 ) -> str:
-    """The three shapes that held the old depth counter down (A5 #3)."""
+    """三种把深度计数压住的写法：CDATA、注释、属性值里藏着标签的结束。
+
+    The three shapes that held the old depth counter down.
+    """
 
     from qgis.core import QgsProject
 
@@ -1744,7 +1838,10 @@ def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
 
 
 def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context) -> str:
-    """``read()`` unpacks every member, not only the ``.qgs`` one (A5 #4)."""
+    """``read()`` 会把归档里每个成员都解出来，不只 ``.qgs`` 那个。
+
+    ``read()`` unpacks every member, not only the ``.qgs`` one.
+    """
 
     from qgis.core import QgsProject
 
@@ -1780,7 +1877,10 @@ def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context
 
 
 def at_43_open_reads_a_project_with_a_deep_group_tree(ctx: Context) -> str:
-    """A depth limit that a real group tree never reaches (A5 #2)."""
+    """真实的分组树远远到不了的深度上限，所以正常工程不能被它拒掉。
+
+    A depth limit that a real group tree never reaches.
+    """
 
     reset_project(ctx)
     on_disk = ctx.fixtures.grouped.stat().st_size
@@ -1806,7 +1906,10 @@ def at_43_open_reads_a_project_with_a_deep_group_tree(ctx: Context) -> str:
 
 
 def at_44_field_sum_refuses_a_non_finite_value(ctx: Context) -> str:
-    """NaN and Infinity are not JSON, so a sum over them refuses (A5 #6)."""
+    """NaN 和 Infinity 不是 JSON，所以结果里会带上它们的求和只能拒。
+
+    NaN and Infinity are not JSON, so a sum that would carry them is refused.
+    """
 
     from qgis.core import QgsFeature, QgsProject, QgsVectorLayer
 
@@ -1840,7 +1943,10 @@ def at_44_field_sum_refuses_a_non_finite_value(ctx: Context) -> str:
 
 
 def at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail(ctx: Context) -> str:
-    """An element's text is the whole subtree, tail included (A6 #1)."""
+    """元素的 text 是整个子树（含子元素的 tail），不是只算直接文本。
+
+    An element's text is the whole subtree, tail included.
+    """
 
     from qgis.core import QgsProject
 
@@ -1893,14 +1999,19 @@ def at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail(ctx: Co
 
 
 def at_46_open_refuses_a_project_that_declares_xml_entities(ctx: Context) -> str:
-    """An internal DTD subset is expanded before any budget, so it is refused (A6 #2)."""
+    """内部 DTD 子集在任何预算之前就被展开，所以只能从扫描里拒。
+
+    An internal DTD subset is expanded before any budget, so it is refused.
+    """
 
     from qgis.core import QgsProject
 
     reset_project(ctx)
     on_disk = ctx.fixtures.entity_project.stat().st_size
 
-    # What the file costs whoever parses it: read() expands it and accepts it, so the
+    # 先量出文件对任何解析器的代价：read() 会展开它并接受它，所以拒绝必须来自扫描，发生在把文件
+    # 交给 read() 之前。
+    # This measures what the file costs whoever parses it: read() expands it and accepts it, so the
     # refusal has to come from the scan, before read() is handed the file.
     reader = QgsProject()
     started = time.monotonic()
@@ -1939,7 +2050,10 @@ def at_46_open_refuses_a_project_that_declares_xml_entities(ctx: Context) -> str
 
 
 def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
-    """A CSV layer's ``file:`` source is not remote; a metadata URL now is (A6 #3)."""
+    """CSV 图层的 ``file:`` 源不算远程；图层元数据里的 URL 算。
+
+    A CSV layer's ``file:`` source is not remote; a URL in the layer metadata is.
+    """
 
     from qgis.core import QgsProject
 
@@ -1957,8 +2071,11 @@ def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
     require(csv_layers >= 1, f"the CSV project's layers: {csv_layers}")
     require(csv_elapsed < 20.0, f"the CSV project took {csv_elapsed:.2f}s")
 
-    # The rule has no element name in it, so a layer whose identifier *is* a URL is
-    # refused before read(): the accepted false refusal in docs/OPERATIONS.md section 12.
+    # 这条规则不看元素名，所以标识符本身就是一个 URL 的图层也会在 read() 之前被拒：一个已知并接受
+    # 下来的误拒——宁可误拒一个正常工程，也不让网络地址走到 read()。
+    # The rule does not look at the element name, so a layer whose identifier is a URL is refused
+    # before read() as well: a known false refusal that is accepted, because refusing a normal
+    # project beats letting a network address reach read().
     ctx.add_layer(ctx.fixtures.cities, "at47 kept")
     before = project_layer_ids()
     file_before = QgsProject.instance().fileName()
@@ -1990,7 +2107,10 @@ def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
 
 
 def at_48_open_refuses_a_source_split_across_child_elements(ctx: Context) -> str:
-    """The text of a datasource is every character data event of its subtree (A7 #1)."""
+    """datasource 的文本是它整个子树的字符数据，不是只算直接文本。
+
+    The text of a datasource is every character data event of its subtree.
+    """
 
     from qgis.core import QgsProject
 
@@ -2046,7 +2166,10 @@ def at_48_open_refuses_a_source_split_across_child_elements(ctx: Context) -> str
 
 
 def at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory(ctx: Context) -> str:
-    """``/vsi`` names a virtual file system only at the start of a source (A7 #3)."""
+    """``/vsi`` 只有在数据源开头才是虚拟文件系统；目录名叫 vsi_data 就是本地文件。
+
+    ``/vsi`` names a virtual file system only at the start of a source.
+    """
 
     reset_project(ctx)
     target = ctx.fixtures.root / "vsi directory project.qgs"
@@ -2071,7 +2194,10 @@ def at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory(ctx: Conte
 
 
 def at_50_open_refuses_a_subdataset_that_names_a_remote_file(ctx: Context) -> str:
-    """A remote file inside a datasource's own syntax is refused before read() (A12 #1)."""
+    """数据源自己的语法里写着远程文件时，在 read() 之前就拒。
+
+    A remote file inside a datasource's own syntax is refused before read().
+    """
 
     from qgis.core import QgsProject
 
@@ -2135,7 +2261,10 @@ def at_50_open_refuses_a_subdataset_that_names_a_remote_file(ctx: Context) -> st
 
 
 def at_51_open_reads_a_project_whose_layer_is_a_local_subdataset(ctx: Context) -> str:
-    """A local GDAL subdataset is inside the roots when its own file is (A12 #2)."""
+    """本地 GDAL 子数据集：它自己的文件在允许目录里，整个数据源就在允许目录里。
+
+    A local GDAL subdataset is inside the roots when its own file is.
+    """
 
     reset_project(ctx)
     target = ctx.fixtures.root / "local subdataset.qgs"
@@ -2177,10 +2306,11 @@ def at_51_open_reads_a_project_whose_layer_is_a_local_subdataset(ctx: Context) -
     )
 
 
-# ------------------------------- Processing, QML categories and renderers (PRD v2 10)
+# -------------------- Processing、QML 类别与渲染器 / Processing, QML categories and renderers
 
-# PRD v2 4.1, 4.2 and 5.1 written out here on purpose: the acceptance compares the
-# plugin with the PRD, not with the plugin's own tuples.
+# 这三张表故意在这里写死，验收拿它们与插件比对，而不是与插件自己的元组比对。
+# The three tables are written out here on purpose, so the acceptance compares the plugin against
+# them rather than against the plugin's own tuples.
 VECTOR_CATEGORY_NAMES = [
     "LayerConfiguration",
     "Symbology",
@@ -2226,32 +2356,40 @@ RASTER_RENDERER_TYPES = [
     "singlecolor",
 ]
 
-# The acceptance registers its own Processing provider: it is the only way to reach the
-# third-party path PRD 10.1 asks for, because no algorithm QGIS ships here returns a
-# value with no JSON image (measured).  A provider added through
-# ``QgsProcessingRegistry.addProvider`` is a third-party provider in the only sense this
-# plugin can see, and its algorithms go through the ordinary path: discovery, then
-# ``qgis.processing.run()`` like every other algorithm.
+# 验收自己注册一个 Processing 提供者：这是唯一能走到第三方提供者路径的办法，因为这台机器上
+# QGIS 自带的算法都没有这个形状（实测）。经 ``addProvider`` 加进来的提供者在插件看来就是第三方，
+# 它的算法走普通路径——先被发现，再用 ``run()`` 执行。
+# The acceptance registers its own Processing provider: it is the only way to reach a third-party
+# path, because no algorithm QGIS ships here has that shape (measured).  A provider added through
+# ``addProvider`` is third-party as far as the plugin can see, and its algorithms take the
+# ordinary path: discovery, then ``run()`` like every other algorithm.
 PROBE_PROVIDER = "p5probe"
 PROBE_ALGORITHMS = (
     f"{PROBE_PROVIDER}:non_json",
     f"{PROBE_PROVIDER}:runs",
 )
-# What the registered probe algorithms were asked to do, so a case can show that P15's
-# transfer really happened before the result was refused.
+# 记录探针算法被要求做了什么，这样用例才能证明图层真的被交接了，而且是在结果被拒之前。
+# What the probe algorithms were asked to do, so a case can show that the transfer really happened
+# before the result was refused.
 PROBE_CALLS: list[str] = []
-# The native registry takes ownership of a provider; the Python wrapper stays alive here
-# for the same reason ``_REGISTERED_RENDERER_METADATA`` does.
+# 原生注册表接管提供者的所有权，所以这里必须让 Python 包装对象活着，与
+# ``_REGISTERED_RENDERER_METADATA`` 是同一个理由。
+# The native registry takes ownership of a provider, so the Python wrapper has to stay alive here
+# for the same reason the renderer registry one does.
 _registered_provider: list[Any] = []
 
 
 def processing_probe_provider() -> None:
-    """Register the acceptance's own provider once, and refuse to run without it.
+    """登记验收自己的提供者一次；拿不到它就拒跑。
 
-    The classes live inside this function because this module may not import QGIS at
-    module level (the repository's import rule), and ``Skip`` is raised only when the
-    registry itself refuses the provider (``addProvider()`` returning false), which is
-    the one condition that would leave the third-party paths unmeasurable.
+    这些类写在这个函数里，是因为本模块不得在模块级 import QGIS（仓库的导入规则）；只有注册表自己
+    拒了提供者（``addProvider()`` 返回假）才抛 ``Skip``，那是唯一会让第三方路径无法度量的情形。
+
+    Register the acceptance's own provider once, and refuse to run without it.  The classes
+    live inside this function because this module may not import QGIS at module level (the
+    repository's import rule), and ``Skip`` is raised only when the registry itself refuses the
+    provider (``addProvider()`` returning false), which is the one condition that would leave
+    the third-party paths unmeasurable.
     """
 
     if _registered_provider:
@@ -2266,7 +2404,10 @@ def processing_probe_provider() -> None:
     )
 
     class NonJsonResult(QgsProcessingAlgorithm):
-        """Hands over a real result layer, then a value with no JSON image (P15)."""
+        """先交出一个真的结果图层，再交一个没有 JSON 映像的值。
+
+        Hands over a real result layer, then a value with no JSON image.
+        """
 
         def name(self) -> str:
             return "non_json"
@@ -2284,12 +2425,17 @@ def processing_probe_provider() -> None:
             PROBE_CALLS.append(f"{PROBE_PROVIDER}:non_json.processAlgorithm")
             layer = QgsVectorLayer("Point?field=p5:string", "p5 probe result", "memory")
             context.temporaryLayerStore().addMapLayer(layer)
-            # ``LAYER`` first, so the plugin really transfers it, then a value that has
-            # no lossless JSON image: the refusal must undo that transfer again.
+            # ``LAYER`` 放在前面，让插件真的把它交接过去；随后是一个没有无损 JSON 映像的值，拒绝
+            # 必须把那次交接再撤回。
+            # ``LAYER`` comes first, so the plugin really transfers it; then a value with no
+            # lossless JSON image, so the refusal must undo that transfer again.
             return {"LAYER": layer.id(), "OBJECT": object()}
 
     class Runs(QgsProcessingAlgorithm):
-        """A third-party algorithm that really runs and returns JSON (P02)."""
+        """一个真的跑起来并返回 JSON 的第三方算法。
+
+        A third-party algorithm that really runs and returns JSON.
+        """
 
         def name(self) -> str:
             return "runs"
@@ -2372,7 +2518,8 @@ def p02_no_algorithm_allow_list(ctx: Context) -> str:
             refused.append(f"{algorithm.id()}: {code}")
     require(not refused, f"the definition of {len(refused)} algorithms was refused: {refused[:3]}")
 
-    # A provider this run registered is the third-party example PRD 10.1 asks for.
+    # 本次运行自己注册的提供者就是这里的第三方例子。
+    # A provider this run registered is the third-party example here.
     third_party = run_algorithm(ctx, f"{PROBE_PROVIDER}:runs", {})
     equal(
         third_party.status,
@@ -2381,6 +2528,7 @@ def p02_no_algorithm_allow_list(ctx: Context) -> str:
     )
     equal(outputs_of(third_party), {"VALUE": 42}, "the third-party run's outputs")
 
+    # 还要测一个 QGIS 自带、但不属于 'native' 的提供者，如果这台机器上装了一个。
     # A provider QGIS ships itself but that is not 'native', when this machine has one.
     extra = "no QGIS-shipped non-native provider with a runnable algorithm is installed here"
     shipped = next((item for item in algorithms if item.id() == "3d:tessellate"), None)
@@ -2478,6 +2626,7 @@ def p03_algorithm_info_fields(ctx: Context) -> str:
         )
         outputs_seen += len(info["outputs"])
 
+    # 隐藏参数确实被略过：这次运行会找一个真的藏了参数的算法来验证。
     # A hidden parameter really is left out: this run finds an algorithm that hides one.
     hidden_algorithm = next(
         (
@@ -2532,8 +2681,9 @@ def p04_unknown_algorithm(ctx: Context) -> str:
     equal(info.status, ExecutionStatus.FAILED, "get_algorithm_info on an unknown id")
     equal(error_code(info), INVALID_INPUT, "the code for an unknown algorithm")
 
-    # The run no longer pre-checks the id: QGIS's own lookup raises, and the exception
-    # reaches the record the one way the engine reports an unexpected failure.
+    # 运行不再预检 id：QGIS 自己的查找就会抛异常，异常按引擎报告意外失败的那条路进记录。
+    # The run no longer pre-checks the id: QGIS's own lookup raises, and the exception reaches the
+    # record the one way the engine reports an unexpected failure.
     run = run_algorithm(ctx, missing, {})
     equal(run.status, ExecutionStatus.FAILED, "run_algorithm on an unknown id")
     equal(error_code(run), INTERNAL_ERROR, "the run code for an unknown algorithm")
@@ -2757,10 +2907,12 @@ def p12_input_path_policy(ctx: Context) -> str:
     outside = ctx.fixtures.outside / "secret.gpkg"
     require(outside.is_file(), "the outside fixture is missing")
 
-    # The plugin-side path policy is gone: a local file outside allowed_data_roots now
-    # reaches QGIS as it arrived, and what happens next is QGIS's own decision.  The
-    # remote half is not measured here on purpose -- the plugin no longer refuses a
-    # network source either, so measuring it would mean a real request (no case makes one).
+    # 插件侧的路径策略已经没了：允许目录之外的本地文件原样到达 QGIS，接下来由 QGIS 决定。远程那
+    # 一半故意不测——插件也不再拒网络源，要测它就得发真请求，而没有用例会发。
+    # The plugin-side path policy is gone: a local file outside the allowed roots reaches QGIS as it
+    # arrived, and what happens next is QGIS's decision.  The remote half is not measured here on
+    # purpose: the plugin no longer refuses a network source either, so measuring it would mean a
+    # real request, and no case makes one.
     outside_record = run_algorithm(
         ctx, "native:mergevectorlayers", {"LAYERS": [layer_id, str(outside)], "OUTPUT": "memory:"}
     )
@@ -2781,8 +2933,9 @@ def p12_input_path_policy(ctx: Context) -> str:
             "the plugin still refuses a local file outside the allowed roots",
         )
 
-    # The positive half of the same boundary: a CRS authority code has the shape of a
-    # URI scheme, and it is an identifier QGIS parses, not a source (review r1 B1).
+    # 同一个边界的正面一半：CRS 权威码长得像 URI scheme，但它是 QGIS 解析的标识符，不是数据源。
+    # The positive half of the same boundary: a CRS authority code has the shape of a URI scheme,
+    # yet it is an identifier QGIS parses, not a data source.
     reprojected = run_algorithm(
         ctx,
         "native:reprojectlayer",
@@ -2808,11 +2961,13 @@ def p13_destination_policy(ctx: Context) -> str:
     layer_id = cities_layer(ctx, "p13 cities")
     target = ctx.fixtures.root / "p13 output.gpkg"
 
+    # 写真实文件是调用方的决定：QGIS 就写到被告知的位置。``gdal:convertformat`` 是拷贝图层，所以
+    # 写出的文件要带同样的要素与几何——只看行数会被几何全 NULL 的表骗过，而 ``gdal:buffervectors``
+    # 在几何列名不匹配时留下的正是这种表。
     # A real file destination is the caller's decision: QGIS writes it where it was told.
-    # ``gdal:convertformat`` copies the layer, so the written file has to carry the same
-    # features *and* their geometry: a five-row table whose every geometry is NULL passes
-    # a row-count check, and that is what ``gdal:buffervectors`` leaves behind when its
-    # geometry column name does not match this fixture (review r2 B1).
+    # ``gdal:convertformat`` copies the layer, so the written file has to carry the same features
+    # and their geometry: a count alone is fooled by a table whose every geometry is NULL, which is
+    # what ``gdal:buffervectors`` leaves behind when its geometry column name does not match.
     written = run_algorithm(
         ctx,
         "gdal:convertformat",
@@ -2833,6 +2988,7 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(with_geometry, source.featureCount(), "the written features that really carry a geometry")
     equal(product.wkbType(), source.wkbType(), "the geometry type the written dataset keeps")
 
+    # QGIS 自己的临时输出：插件把它产出的那个图层收进工程。
     # QGIS's own temporary output: the plugin takes the layer it produced.
     temporary = run_algorithm(
         ctx,
@@ -2842,9 +2998,11 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(temporary.status, ExecutionStatus.SUCCEEDED, f"TEMPORARY_OUTPUT: {temporary.error}")
     require(output_layer(ctx, temporary, "OUTPUT").isValid(), "the temporary output layer")
 
-    # A provider with no non-file-based output answers SUCCEEDED with the literal
-    # "memory:" and adds no layer.  Destinations are QGIS's to judge now, so that shape
-    # is reported as the success QGIS says it is, with the literal value it returned.
+    # 非文件目的地现在由 QGIS 判：有的提供者照样回 SUCCEEDED，输出字面值 "memory:" 原样返回，
+    # 也不往工程里加图层。插件不再二次猜测，就按 QGIS 说的成功记，值也照它返回的写。
+    # Non-file destinations are QGIS's to judge now: some providers still answer SUCCEEDED with the
+    # literal "memory:" as the output value and no layer added.  The plugin does not second-guess
+    # that, and reports the success QGIS claims with the value it returned.
     made_up = run_algorithm(
         ctx, "gdal:buffervectors", {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": "memory:"}
     )
@@ -2856,8 +3014,10 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(outputs_of(made_up), {"OUTPUT": "memory:"}, "the memory destination's output value")
     require(project_layers().get("memory:") is None, "the project holds a layer named 'memory:'")
 
-    # The plugin has no destination verdict left: a remote value reaches QGIS too.  This
-    # one names a closed local port, so the acceptance request cannot leave the machine.
+    # 插件对目的地不再有任何判决：远程值也照样到 QGIS。这个值指向本机关闭的端口，所以验收的
+    # 请求出不了这台机器。
+    # The plugin has no destination verdict left: a remote value reaches QGIS too.  This one names a
+    # closed local port, so the acceptance request cannot leave the machine.
     remote = run_algorithm(
         ctx,
         "native:buffer",
@@ -2896,7 +3056,8 @@ def p14_output_ownership(ctx: Context) -> str:
     layer = project_layer(transfered)
     equal(layer.id(), transfered, "the id the record reported is the project's own id")
 
-    # The QgsProcessingContext of the run is gone by now; the layer has to outlive it.
+    # 这次运行的 QgsProcessingContext 已经没了，图层必须活得比它长。
+    # The run's QgsProcessingContext is gone by now; the layer has to outlive it.
     pump(ctx.app, 0.1)
     equal(project_layer(transfered).featureCount(), 5, "the features after the context was gone")
     info = ctx.run("layer.get_info", {"layer_id": transfered})
@@ -2917,8 +3078,9 @@ def p15_non_json_output(ctx: Context) -> str:
     added: list[str] = []
     removed: list[str] = []
 
-    # The result layer the probe hands over first must be taken into the project and then
-    # removed again: the layer step undoes only what this run added (design §5.7).
+    # 探针先交出的结果图层必须先进工程、再被搬掉：图层这一步只搬本次运行加进去的。
+    # The result layer the probe hands over must enter the project and then be removed again: the
+    # layer step undoes only what this run added.
     def note_added(layer: Any) -> None:
         added.append(layer.id())
 
@@ -3002,8 +3164,9 @@ def p17_no_injected_destination(ctx: Context) -> str:
 
     record = run_algorithm(ctx, "native:buffer", parameters)
     equal(record.status, ExecutionStatus.FAILED, "a run without the required destination")
-    # QGIS's own checkParameterValues refuses the missing destination; the exception is
-    # the engine's unexpected failure, not a plugin code invented for this case.
+    # QGIS 自己的参数校验拒了它，异常走引擎的意外失败，不是为本用例新造的插件错误码。
+    # QGIS's own parameter check refuses it, and the exception is the engine's unexpected failure,
+    # not a plugin code invented for this case.
     equal(error_code(record), INTERNAL_ERROR, "the code for a missing destination")
     equal(
         message_of(record),
@@ -3012,8 +3175,10 @@ def p17_no_injected_destination(ctx: Context) -> str:
     )
     equal(project_layer_ids(), before, "the layers after the refusal")
 
-    # The plugin never fills the key in: had it injected ``memory:`` this very call would
-    # have succeeded, because the same parameters plus OUTPUT do.
+    # 插件自己从不填这个键：真要是注入了 ``memory:``，这次调用本来会成功，因为同样的参数加上
+    # OUTPUT 就成功。
+    # The plugin never fills the key in: had it injected ``memory:``, this very call would have
+    # succeeded, because the same parameters plus OUTPUT do.
     with_destination = run_algorithm(ctx, "native:buffer", {**parameters, "OUTPUT": "memory:"})
     equal(
         with_destination.status,
@@ -3028,7 +3193,7 @@ def p17_no_injected_destination(ctx: Context) -> str:
     )
 
 
-# --------------------------------------------------------------- QML (PRD v2 10.2)
+# ---------------------------------------------------------- QML 导出 / QML export
 
 
 def s01_vector_categories(ctx: Context) -> str:
@@ -3150,7 +3315,7 @@ def s06_export_failure(ctx: Context) -> str:
     )
 
 
-# -------------------------------------------------- renderer candidates (10.3)
+# ------------------------------------------------ 候选渲染器 / renderer candidates
 
 
 def a01_vector_candidates(ctx: Context) -> str:
@@ -3205,8 +3370,10 @@ def a02_raster_candidates(ctx: Context) -> str:
     )
 
 
-# Registered through the application registry by A03, so the instance outlives the case:
-# the native registry takes ownership and Python must keep its wrapper alive.
+# 由 A03 注册进应用级注册表，所以这个实例要活得比用例久：原生注册表接管所有权，Python 必须留住
+# 包装对象。
+# Registered into the application registry by A03, so the instance outlives the case: the native
+# registry takes ownership, and Python must keep its wrapper alive.
 _REGISTERED_RENDERER_METADATA: list[Any] = []
 
 
@@ -3222,8 +3389,9 @@ def a03_third_party_candidate(ctx: Context) -> str:
     before = result_of(ctx.run("layer.list_available_renderers", {"layer_id": layer_id}))[
         "renderer_types"
     ]
-    # The setter implements five vector types; the registered ones it cannot set are
-    # candidates all the same, which is what "not filtered by the setter" means.
+    # 设置器只实现五种矢量渲染器，它设不了的那几个照样是候选——这就是“不按设置器过滤”。
+    # The setter implements five vector types; the registered ones it cannot set are candidates all
+    # the same, which is what "not filtered by the setter" means.
     for name in ("heatmapRenderer", "pointCluster", "pointDisplacement"):
         require(name in before, f"{name} is missing from the candidates: {before}")
 
@@ -3262,8 +3430,10 @@ def a03_third_party_candidate(ctx: Context) -> str:
 def a03b_raster_third_party(ctx: Context) -> str:
     from qgis.core import QgsApplication
 
-    # The PRD's accessor is not bound in 3.44, and a registry object built here is not
-    # the C++ singleton a third-party provider would register into (charter 7/E3).
+    # 这个访问器在 3.44 里没绑定；而这里新建的注册表对象也不是第三方提供者会注册进去的那个 C++
+    # 单例。
+    # The accessor is not bound in 3.44, and a registry object built here is not the C++ singleton a
+    # third-party provider would register into.
     require(
         not hasattr(QgsApplication, "rasterRendererRegistry"),
         "QgsApplication now exposes rasterRendererRegistry(); the A03 raster half can be run",
@@ -3343,7 +3513,9 @@ def a06_get_renderer(ctx: Context) -> str:
         equal(sorted(result), ["layer_id", "renderer_type"], "the result fields")
         equal(result["renderer_type"], project_layer(layer_id).renderer().type(), "the live type")
 
-    # A renderer the setter cannot build is still read, and its configuration comes from QML.
+    # 设置器造不出来的渲染器照样能读，它的配置从 QML 导出里取。
+    # A renderer the setter cannot build is still read, and its configuration comes from the QML
+    # export.
     project_layer(vector_id).setRenderer(QgsHeatmapRenderer())
     equal(installed_renderer(ctx, vector_id), "heatmapRenderer", "a type the setter cannot build")
     qml = qml_of(ctx, vector_id, ["Symbology"])
@@ -3355,7 +3527,7 @@ def a06_get_renderer(ctx: Context) -> str:
     )
 
 
-# ------------------------------------------------------ vector setters (10.4)
+# ------------------------------------------- 矢量渲染器设置 / vector setters
 
 
 def v01_null_symbol(ctx: Context) -> str:
@@ -3736,7 +3908,7 @@ def v08_unsupported(ctx: Context) -> str:
     )
 
 
-# ------------------------------------------------------ raster setters (10.5)
+# ------------------------------------------- 栅格渲染器设置 / raster setters
 
 
 def r01_single_band_gray(ctx: Context) -> str:
