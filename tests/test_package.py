@@ -45,8 +45,10 @@ assert callable(main_thread.MainThreadRunner)
 assert callable(qgs_task.OperationTaskRunner)
 assert callable(qgs_task.task_class)
 
-# The seventeen operations of PRD v2 §2 register in an interpreter that has no QGIS,
-# and each one publishes the kind, strategy and risk label the PRD lists.
+# 十七个 Operation 在一个没有 QGIS 的解释器里注册成功，并且每个都声明了本文件列出的
+# kind、strategy 与风险标记。
+# The seventeen operations register in an interpreter without QGIS, and each one declares
+# the kind, strategy and risk label listed here.
 filled = registry.OperationRegistry()
 operations.register_all(filled)
 specs = filled.list_specs()
@@ -70,6 +72,7 @@ assert {spec.name: (spec.kind.value, spec.strategy.value, spec.destructive) for 
     "processing.get_algorithm_info": ("query", "main_thread", False),
     "processing.run_algorithm": ("command", "main_thread", True),
 }
+# 唯一自带元组的模块，在这里再拄一份就会走样。
 # The one module that carries its own tuple, so a copy here would drift.
 assert len(processing.PROCESSING_OPERATIONS) == 3
 
@@ -80,10 +83,13 @@ leaked = sorted(
 )
 assert not leaked, leaked
 
-# ``ui/dock.py`` is the one module allowed to import Qt at module level, and the only
-# Qt it may import is ``qgis.PyQt``.  The rule is read off its source: importing it
-# would need Qt, and ``sys.modules`` cannot answer the question -- importing
-# ``qgis.PyQt`` already loads ``qgis.core`` and ``qgis.gui`` in this interpreter.
+# ``ui/dock.py`` 是唯一允许模块级 import Qt 的模块，而它能 import 的 Qt 只有 ``qgis.PyQt``。
+# 这条规则读它的源码来判断：import 它需要 Qt，而 ``sys.modules`` 回答不了这个问题——
+# 在这个解释器里 import ``qgis.PyQt`` 本身就已经加载了 ``qgis.core`` 与 ``qgis.gui``。
+# ``ui/dock.py`` is the one module allowed to import Qt at module level, and the only Qt it
+# may import is ``qgis.PyQt``.  The rule is read off its source: importing it would need Qt,
+# and ``sys.modules`` cannot answer the question -- importing ``qgis.PyQt`` already loads
+# ``qgis.core`` and ``qgis.gui`` in this interpreter.
 dock_source = (Path(ui.__file__).parent / "dock.py").read_text(encoding="utf-8")
 offenders = [
     line.strip()
@@ -92,6 +98,7 @@ offenders = [
 ]
 assert not offenders, offenders
 
+# 并且它确实是 QMainWindow 能停靠的控件——这一点在 Qt 存在时才问得了。
 # And it is really a widget a QMainWindow can dock, where Qt exists to ask.
 try:
     from qgis.PyQt.QtWidgets import QDockWidget
