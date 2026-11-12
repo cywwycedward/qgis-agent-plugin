@@ -1,14 +1,20 @@
-"""The processing operations against a fake QGIS.
+"""processing 操作的契约测试：用一副最小的假 QGIS 盯住调用形状，而不去重跑真实算法。
 
-The real registry, providers and algorithms are exercised by the QGIS acceptance
-run; here the question is whether the contract holds -- which fields a definition
-report carries, what reaches ``qgis.processing.run()`` and with which keywords, what
-a run keeps from its feedback, what happens to a result layer, and which values can
-leave as JSON.  The fakes are deliberately narrow: one process-wide ``run`` with a
-canned answer, a feedback base class that notes what was asked of it, and a project
-with QGIS's real duplicate-id rule.  Nothing here models a parameter check, an
-instance factory or a ``canExecute()``, because the operations must not reach for
-one (design §5.3).
+真实的注册表、提供者与算法由 QGIS 侧的验收跑覆盖；这里只问契约是否成立——一份算法报告
+带哪些字段、交给 ``qgis.processing.run()`` 的到底是什么、关键字里有几项、一次运行从反馈
+对象上留下什么、结果图层落到哪里、哪些值能作为 JSON 离开。假件刻意做窄：一个进程级的
+``run`` 只回一个写死的答案、一个会自己记账的反馈基类、一个带 QGIS 真实「id 不可重复」
+规则的工程。这里没有参数校验、没有实例工厂、也没有 ``canExecute()``，因为操作不允许
+去碰它们。
+
+The processing operations against a fake QGIS: the question is whether the contract
+holds -- which fields a definition report carries, what reaches ``qgis.processing.run()``
+and with which keywords, what a run keeps from its feedback, what happens to a result
+layer, and which values can leave as JSON.  The fakes are deliberately narrow: one
+process-wide ``run`` with a canned answer, a feedback base class that notes what was
+asked of it, and a project with QGIS's real duplicate-id rule.  Nothing here models a
+parameter check, an instance factory or a ``canExecute()``, because the operations must
+not reach for one.
 """
 
 from __future__ import annotations
@@ -32,16 +38,21 @@ from qgis_agent_plugin.core.models import INTERNAL_ERROR, INVALID_INPUT, Framewo
 from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.operations import processing as ops
 
-# Mirrors ``QgsProcessingParameterDefinition.FlagHidden`` in the 3.44.13 build.
+# 与 3.44.13 里 ``FlagHidden`` 的取值一致。
+# Mirrors ``FlagHidden`` in 3.44.13.
 _FLAG_HIDDEN = 4
 
 LOGGER_NAME = "qgis_agent_plugin.operations.processing"
 
-# --- the fake QGIS -----------------------------------------------------------
+# --- 假 QGIS 层 / the fake QGIS ---------------------------------------------
 
 
 class FakeLayer:
-    """A layer the project can hold, and the object a run hands back; identity is all."""
+    """一个能被工程装下的图层，也是运行吐回来的对象；测试只比较它的身份。
+
+    A layer the project can hold, and the object a run hands back; identity is all a
+    test compares.
+    """
 
     def __init__(self, layer_id: str) -> None:
         self.layer_id = layer_id
@@ -51,7 +62,10 @@ class FakeLayer:
 
 
 class FakeProject:
-    """A project with QGIS's real addMapLayer rule: a duplicate id is refused."""
+    """一个带 QGIS 真实加入规则的工程：id 已存在时第二层被拒，工程返回 ``None``。
+
+    A project with QGIS's real ``addMapLayer`` rule: a duplicate id is refused.
+    """
 
     def __init__(self) -> None:
         self.layers: dict[str, Any] = {}
@@ -65,8 +79,10 @@ class FakeProject:
         return dict(self.layers)
 
     def addMapLayer(self, layer: Any, add_to_legend: bool = True) -> Any:
-        # Measured on 3.44.13: a second layer with an existing id is not added and
-        # the project returns None, leaving the first layer in place.
+        # 实测：id 重复的第二层不会被加入。
+        # 工程返回 ``None``，先前的层保留。
+        # Measured: a duplicate id is not added.
+        # The project returns None; the first stays.
         if layer.id() in self.layers:
             return None
         self.layers[layer.id()] = layer
@@ -79,10 +95,14 @@ class FakeProject:
 
 
 class FakeFeedback:
-    """``QgsProcessingFeedback``: the base implementation the records sit on.
+    """``QgsProcessingFeedback`` 的替身：记录都挂在它这个基类上。
 
-    Each call notes its name and how many records already existed, which is how a
-    test can see that the base class ran *before* the subclass recorded its message.
+    每次调用都记下自己的名字和当时已有多少条记录，测试因此能确认基类方法是在子类写入
+    那条消息之前跑完的。
+
+    A stand-in for ``QgsProcessingFeedback``, the base implementation the records sit on.
+    Each call notes its name and how many records already existed, which is how a test
+    can see that the base class ran *before* the subclass recorded its own message.
     """
 
     def __init__(self) -> None:
@@ -114,13 +134,19 @@ class FakeFeedback:
 
 
 class FakeParameterDefinition:
-    """The namespace holding the one flag the definition report reads."""
+    """只装一个标志位的命名空间：报告唯一读的就是 ``FlagHidden``。
+
+    The namespace holding the one flag the definition report reads.
+    """
 
     FlagHidden = _FLAG_HIDDEN
 
 
 class FakeDefinition:
-    """Enough of one parameter definition for one summary."""
+    """一条参数定义里被摘要读到的全部内容，多的不建。
+
+    Enough of one parameter definition for one summary.
+    """
 
     def __init__(
         self,
@@ -154,7 +180,10 @@ class FakeDefinition:
 
 
 class FakeEnumDefinition(FakeDefinition):
-    """The one definition family with display options; the base class has none."""
+    """唯一带可选项的定义族；基类没有 ``options()``，所以单列一个子类。
+
+    The one definition family with display options; the base class has none.
+    """
 
     def __init__(self, name: str, options: list[str], **values: Any) -> None:
         super().__init__(name, "enum", **values)
@@ -165,7 +194,10 @@ class FakeEnumDefinition(FakeDefinition):
 
 
 class FakeParameterType:
-    """A ``QgsProcessingParameterType``: only its accepted python types are read."""
+    """``QgsProcessingParameterType`` 的替身：只暴露被读取的 accepted python types。
+
+    A ``QgsProcessingParameterType``: only its accepted python types are read.
+    """
 
     def __init__(self, *python_types: str) -> None:
         self._python_types = list(python_types)
@@ -187,7 +219,10 @@ class FakeOutput:
 
 
 class FakeAlgorithm:
-    """One registered algorithm definition; a run never touches this object."""
+    """一条已注册的算法定义；一次运行从头到尾不会碰这个对象。
+
+    One registered algorithm definition; a run never touches this object.
+    """
 
     def __init__(
         self,
@@ -231,7 +266,10 @@ class FakeAlgorithm:
 
 
 class FakeRegistry:
-    """``QgsProcessingRegistry``, deliberately without an instance factory."""
+    """``QgsProcessingRegistry`` 的替身，故意不提供实例工厂。
+
+    ``QgsProcessingRegistry``, deliberately without an instance factory.
+    """
 
     def __init__(self) -> None:
         self.algorithms_by_id: dict[str, FakeAlgorithm] = {}
@@ -250,7 +288,10 @@ class FakeRegistry:
 
 
 class Call(NamedTuple):
-    """One recorded ``qgis.processing.run()`` call."""
+    """记录下的一次 ``qgis.processing.run()`` 调用。
+
+    One recorded ``qgis.processing.run()`` call.
+    """
 
     algorithm_id: str
     parameters: dict[str, Any]
@@ -258,18 +299,25 @@ class Call(NamedTuple):
 
     @property
     def feedback(self) -> Any:
-        """The feedback the operation built; its surface is the run's own business."""
+        """操作自建的反馈对象；它长什么样是运行自己的事。
+
+        The feedback the operation built; its surface is the run's own business.
+        """
         return self.kwargs["feedback"]
 
 
 class FakeProcessing:
-    """``qgis.processing``: one recorded call per run, with a canned answer."""
+    """``qgis.processing``：每次运行记一条调用，回一个备好的答案。
+
+    ``qgis.processing``: one recorded call per run, with a canned answer.
+    """
 
     def __init__(self) -> None:
         self.calls: list[Call] = []
         self.results: Any = {}
         self.error: BaseException | None = None
-        # ``(method name, arguments)`` replayed on the feedback the run was given.
+        # ``(方法名, 参数)`` 重放到本次的反馈对象上。
+        # Replayed on this call's feedback.
         self.messages: list[tuple[str, tuple[Any, ...]]] = []
 
     def run(self, algorithm_id: str, parameters: dict[str, Any], **kwargs: Any) -> Any:
@@ -288,7 +336,10 @@ class FakeProcessing:
 
 
 class FakeQgis:
-    """The ``qgis`` package holding only what the processing operations import."""
+    """只装 processing 操作会 import 的那几样的 ``qgis`` 包。
+
+    The ``qgis`` package holding only what the processing operations import.
+    """
 
     def __init__(self) -> None:
         self.registry = FakeRegistry()
@@ -326,7 +377,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
     return fake
 
 
-# --- helpers -----------------------------------------------------------------
+# --- 辅助函数 / helpers ------------------------------------------------------
 
 
 def fake_module(name: str, **attributes: Any) -> types.ModuleType:
@@ -387,7 +438,10 @@ def run_params(parameters: dict[str, Any], algorithm_id: str = "native:test") ->
 
 
 def run(fake: FakeQgis, parameters: dict[str, Any] | None = None, **kwargs: Any) -> Any:
-    """One successful call, with the run's answer already in place."""
+    """一次成功的调用，运行要回的答案已经先放好。
+
+    One successful call, with the run's answer already in place.
+    """
 
     fake.processing.results = kwargs.pop("results", {})
     return ops.ProcessingRunAlgorithm().execute_main(
@@ -396,7 +450,7 @@ def run(fake: FakeQgis, parameters: dict[str, Any] | None = None, **kwargs: Any)
     )
 
 
-# --- input and output models (design §3.5, §4.4, PRD §8.1) --------------------
+# --- 输入与输出模型 / input and output models ------------------------------
 
 
 def test_the_list_parameters_accept_only_an_empty_object() -> None:
@@ -534,21 +588,27 @@ def test_a_nested_non_string_key_is_refused() -> None:
 
 
 def test_a_parameter_key_must_be_a_string() -> None:
-    # The top level is pydantic's dict rather than the walk's, so the key rule has
-    # to be part of the field type too.
+    # 顶层是 pydantic 的 dict，不是递归的那个。
+    # 所以键的规则也写进字段类型。
+    # The top level is pydantic's dict, not the walk's.
+    # So the key rule is part of the field type too.
     with pytest.raises(ValidationError):
         ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={b"OFFSET": 1})
 
     class Colour(StrEnum):
         RED = "red"
 
-    # A str subclass is still a str, so an enum key keeps working.
+    # ``str`` 子类仍是 ``str``，枚举键照常可用。
+    # A str subclass works as an enum key.
     enum_keyed = ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={Colour.RED: 1})
     assert enum_keyed.parameters == {"red": 1}
 
 
 def _too_deep_list() -> Any:
-    """A tree deeper than the interpreter recurses (1000 by default)."""
+    """比解释器递归深度（默认 1000）还深一层的树。
+
+    A tree deeper than the interpreter recurses (1000 by default).
+    """
 
     value: Any = None
     for _ in range(sys.getrecursionlimit() + 1):
@@ -557,7 +617,10 @@ def _too_deep_list() -> Any:
 
 
 def _cyclic_list() -> Any:
-    """A list that contains itself: no finite JSON image exists for it."""
+    """含有自己的列表：它没有任何有限的 JSON 形态。
+
+    A list that contains itself: no finite JSON image exists for it.
+    """
 
     value: list[Any] = []
     value.append(value)
@@ -568,8 +631,10 @@ def _cyclic_list() -> Any:
     "value", [_too_deep_list(), _cyclic_list()], ids=["deeper-than-the-stack", "cyclic"]
 )
 def test_a_parameter_tree_the_json_walk_cannot_finish_is_invalid_input(value: Any) -> None:
-    # RecursionError is not a ValidationError, and letting it escape reports a
-    # caller's parameter tree as an internal failure.
+    # ``RecursionError`` 不是 ``ValidationError``。
+    # 让它逃出去会被报成内部故障。
+    # RecursionError is not a ValidationError.
+    # Letting it escape reports an internal failure.
     with pytest.raises(ValidationError):
         ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={"VALUE": value})
 
@@ -591,7 +656,7 @@ def test_outputs_are_checked_as_json_too() -> None:
     }
 
 
-# --- processing.list_algorithms (PRD §3.1.1, P01) ----------------------------
+# --- processing.list_algorithms：列出算法 / listing the algorithms ----------
 
 
 def test_every_algorithm_is_listed_in_id_order(fake_qgis: FakeQgis) -> None:
@@ -627,7 +692,7 @@ def test_the_list_result_carries_only_algorithms(fake_qgis: FakeQgis) -> None:
     }
 
 
-# --- processing.get_algorithm_info (design §3, P03, P04) ---------------------
+# --- processing.get_algorithm_info：一条算法的详情 / one algorithm's details -
 
 
 def info(fake: FakeQgis, algorithm_id: str = "native:test") -> Any:
@@ -708,7 +773,10 @@ def test_info_reads_the_six_parameter_fields(fake_qgis: FakeQgis) -> None:
         "options": ["Solid", "Dashed"],
         "accepted_types": ["str", "int"],
     }
-    # A non-enum definition has no options at all, so the field states that.
+    # 非枚举的定义没有可选项。
+    # 字段就用 ``None`` 说明这一点。
+    # A non-enum definition has no options.
+    # The field states that with None.
     assert second.model_dump() == {
         "name": "DISTANCE",
         "description": "",
@@ -720,7 +788,10 @@ def test_info_reads_the_six_parameter_fields(fake_qgis: FakeQgis) -> None:
 
 
 def test_info_reports_an_unknown_parameter_type_as_an_empty_list(fake_qgis: FakeQgis) -> None:
-    """``registry.parameterType()`` returning None is an empty list, not null."""
+    """``registry.parameterType()`` 返回 ``None`` 时给空表，而不是 ``null``。
+
+    ``registry.parameterType()`` returning None is an empty list, not null.
+    """
     install(fake_qgis, FakeDefinition("SRC", "customprobe"))
     assert info(fake_qgis).parameters[0].accepted_types == []
 
@@ -742,7 +813,7 @@ def test_info_refuses_an_unknown_algorithm_as_invalid_input(fake_qgis: FakeQgis)
     assert caught.value.message == "the algorithm is not registered"
 
 
-# --- processing.run_algorithm: the call (design §5.2, §5.5) ------------------
+# --- processing.run_algorithm：这次调用 / the call --------------------------
 
 
 def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: FakeQgis) -> None:
@@ -756,7 +827,10 @@ def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: Fake
     assert len(fake_qgis.processing.calls) == 1
     call = fake_qgis.processing.calls[0]
     assert (call.algorithm_id, call.parameters) == ("native:test", parameters)
-    # Nothing else is passed: no context, no onFinish, no is_child_algorithm.
+    # 除了反馈对象，别的都不传。
+    # 不要 context、onFinish 或 is_child_algorithm。
+    # Nothing but the feedback object is passed.
+    # No context, onFinish or is_child_algorithm.
     assert list(call.kwargs) == ["feedback"]
     assert isinstance(call.feedback, FakeFeedback)
     assert result.algorithm_id == "native:test"
@@ -765,7 +839,10 @@ def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: Fake
 
 
 def test_the_run_never_asks_the_registry_for_an_instance(fake_qgis: FakeQgis) -> None:
-    """The fake registry has no ``createAlgorithmById``; a call to it would AttributeError."""
+    """假注册表没有 ``createAlgorithmById``，真要去调就会抛 ``AttributeError``。
+
+    The fake registry has no ``createAlgorithmById``; a call to it would AttributeError.
+    """
     install(fake_qgis)
     assert not hasattr(fake_qgis.registry, "createAlgorithmById")
 
@@ -775,7 +852,10 @@ def test_the_run_never_asks_the_registry_for_an_instance(fake_qgis: FakeQgis) ->
 
 
 def test_the_parameters_reach_the_run_as_they_arrived(fake_qgis: FakeQgis) -> None:
-    """A path, a remote value and an unknown key are all QGIS's to judge now."""
+    """路径、远程值、没声明的键都原样交出去，判断这些是 QGIS 的事。
+
+    A path, a remote value and an unknown key are all QGIS's to judge now.
+    """
     parameters = {
         "INPUT": "https://example.com/data.gpkg",
         "MASK": r"C:\outside\the\roots\mask.shp",
@@ -799,7 +879,7 @@ def test_a_result_that_is_not_a_mapping_is_refused(fake_qgis: FakeQgis) -> None:
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
 
 
-# --- processing.run_algorithm: the feedback records (design §4.4) ------------
+# --- processing.run_algorithm：反馈对象留下的记录 / the feedback records -----
 
 
 def test_every_feedback_method_is_recorded_with_its_level(fake_qgis: FakeQgis) -> None:
@@ -841,7 +921,8 @@ def test_the_feedback_keeps_the_base_class_calls_and_the_errors_view(fake_qgis: 
     run(fake_qgis)
     feedback = call[0].feedback
 
-    # Each base method ran before the record it belongs to was appended.
+    # 基类方法在对应记录写入前跑完。
+    # The base method ran before its record was appended.
     assert feedback.base == [
         ("pushInfo", 0),
         ("reportError", 1),
@@ -860,7 +941,7 @@ def test_a_feedback_without_an_error_reports_none(fake_qgis: FakeQgis) -> None:
     assert feedback.has_errors is False
 
 
-# --- processing.run_algorithm: the result layers (design §5.7, P06, P14) -----
+# --- processing.run_algorithm：结果图层 / the result layers ------------------
 
 
 def test_a_result_layer_is_added_to_the_project_and_reported_by_its_id(
@@ -904,7 +985,8 @@ def test_a_project_id_collision_is_an_internal_error(fake_qgis: FakeQgis) -> Non
     with pytest.raises(FrameworkError) as caught:
         run(fake_qgis, results={"OUTPUT": FakeLayer("memory-out")}, project=project)
     assert caught.value.code == INTERNAL_ERROR
-    # The project refused the second layer with that id; the first one is untouched.
+    # 工程用这个 id 拒了第二层；先前那层没被碰。
+    # The duplicate id was refused; the first stays.
     assert project.mapLayer("memory-out") is existing
     assert project.added == []
 
@@ -920,7 +1002,8 @@ def test_a_result_without_a_json_image_is_an_internal_error(
     with pytest.raises(FrameworkError) as caught:
         run(fake_qgis, results={"OUTPUT": value})
     assert caught.value.code == INTERNAL_ERROR
-    # A refused result is described by its contract, never by an object's repr.
+    # 被拒的结果用契约描述，不用对象的 repr。
+    # A refused result is described by its contract.
     assert caught.value.message in (
         "an algorithm result cannot be expressed as JSON",
         "an algorithm result key is not a string",
@@ -936,15 +1019,19 @@ def test_a_refused_result_removes_only_the_layers_this_run_added(fake_qgis: Fake
     assert caught.value.code == INTERNAL_ERROR
     assert project.removed == ["memory-out"]
     assert project.mapLayer("memory-out") is None
-    # The layer that was in the project before the call is untouched.
+    # 调用前就在工程里的图层没被碰。
+    # The layer already in the project is untouched.
     assert project.mapLayer("roads") is not None
 
 
-# --- processing.run_algorithm: a failure is QGIS's exception (design §5.6) --
+# --- processing.run_algorithm：失败就是 QGIS 的原异常 / a failure is QGIS's --
 
 
 class RunFailed(RuntimeError):
-    """What a fake ``qgis.processing.run()`` raises."""
+    """假 ``qgis.processing.run()`` 抛出的异常。
+
+    What a fake ``qgis.processing.run()`` raises.
+    """
 
 
 def test_an_exception_from_the_run_is_raised_unchanged(
@@ -960,10 +1047,12 @@ def test_an_exception_from_the_run_is_raised_unchanged(
     ):
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
 
-    # The same exception object, not a plugin error code invented from its text.
+    # 同一个异常对象，不是编出来的错误码。
+    # The same exception object, not an invented code.
     assert caught.value is fake_qgis.processing.error
     assert not isinstance(caught.value, FrameworkError)
-    # The native messages and the exception text reach the local log only.
+    # 原生消息和异常文本只进本地日志。
+    # Native messages and text go to the local log only.
     assert native in caplog.text
     assert "RunFailed" in caplog.text
     assert "the algorithm did not finish" in caplog.text
@@ -974,11 +1063,12 @@ def test_a_failed_run_reports_no_result_and_no_messages(fake_qgis: FakeQgis) -> 
     fake_qgis.processing.error = RunFailed("no result")
     with pytest.raises(RunFailed):
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
-    # The record is the engine's to build: this operation returns nothing on failure.
+    # 记录由引擎写，失败时不返回。
+    # The engine builds it; a failure returns nothing.
     assert fake_qgis.processing.calls[0].kwargs.keys() == {"feedback"}
 
 
-# --- the declarations, the class placement and the import rule ---------------
+# --- 声明、类的摆放与导入规则 / the declarations, the class placement, the import rule ---
 
 
 def test_the_three_operations_register_as_main_thread_processing_capabilities() -> None:
@@ -996,7 +1086,10 @@ def test_the_three_operations_register_as_main_thread_processing_capabilities() 
 
 
 def test_the_feedback_is_built_inside_the_run_and_the_message_is_module_level() -> None:
-    """Which names the module exports is the import rule: only the message is shared."""
+    """哪些名字出现在模块里就是导入规则：只有“消息”是共享的。
+
+    Which names the module exports is the import rule: only the message is shared.
+    """
     assert "ProcessingMessage" in vars(ops)
     assert not hasattr(ops, "ProcessingRunFeedback")
 

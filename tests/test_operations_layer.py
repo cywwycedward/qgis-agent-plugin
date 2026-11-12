@@ -1,9 +1,14 @@
-"""The layer operations against a fake QGIS.
+"""用假 QGIS 驱动 ``layer.*`` 操作。
 
-The real provider and the real layer tree are exercised by the QGIS acceptance
-run; here the question is whether the contract holds -- which path is refused,
-which error code comes back, which URI reaches the layer constructor, and whether
-a layer's own check state stays apart from its effective visibility.
+真实的 provider 与图层树由 QGIS 侧的验收跑覆盖；这里只问契约是否成立——哪条路径被拒、
+回的是哪个错误码、什么 URI 进了图层构造函数，以及图层自己的勾选状态是否和实际可见性
+分开。
+
+The layer operations against a fake QGIS.  The real provider and the real layer tree are
+exercised by the QGIS acceptance run; here the question is whether the contract holds --
+which path is refused, which error code comes back, which URI reaches the layer
+constructor, and whether a layer's own check state stays apart from its effective
+visibility.
 """
 
 from __future__ import annotations
@@ -34,8 +39,10 @@ from qgis_agent_plugin.core.models import (
 from qgis_agent_plugin.core.registry import OperationRegistry
 from qgis_agent_plugin.operations import layer as ops
 
-# The PRD's fixed category names.  The fake gives each name its own bit in this
-# order, and the style tests assert the operations return exactly these names.
+# 固定的样式分类名，假件按这个顺序给每个名字一位。
+# 样式测试断言返回的正好是这些名字。
+# The fixed categories, one bit each.
+# The style tests assert exactly these names come back.
 VECTOR_CATEGORIES = (
     "LayerConfiguration",
     "Symbology",
@@ -70,7 +77,7 @@ RASTER_CATEGORIES = (
     "Notes",
 )
 
-# --- the fake QGIS -----------------------------------------------------------
+# --- 假 QGIS 层 / the fake QGIS ---------------------------------------------
 
 
 class FakeCrs:
@@ -82,7 +89,10 @@ class FakeCrs:
 
 
 class FakeRenderer:
-    """Enough of a renderer: the type name the read side reports."""
+    """有渲染器的那一点：读侧报的类型名。
+
+    Enough of a renderer: the type name the read side reports.
+    """
 
     def __init__(self, renderer_type: str) -> None:
         self._renderer_type = renderer_type
@@ -92,25 +102,34 @@ class FakeRenderer:
 
 
 class FakeSymbol:
-    """What a ``createSimple`` call produced: the declared properties, nothing else."""
+    """一次 ``createSimple`` 的产物：只有声明的那些属性。
+
+    What a ``createSimple`` call produced: the declared properties, nothing else.
+    """
 
     def __init__(self, kind: str, properties: dict[str, Any]) -> None:
         self.kind = kind
         self.properties = dict(properties)
 
 
-# The fake's ``QVariant.Type`` values; the real ones are Bool 1, Int 2, LongLong 4,
-# String 10, Date 14.
+# 假件的 ``QVariant.Type`` 值。
+# 真实值依次是 1、2、4、10、14。
+# The fake's ``QVariant.Type`` values.
+# The real values are 1, 2, 4, 10, 14.
 VARIANT_STRING = 10
 
 
 class FakeQVariant:
-    """A value and the one conversion the setter asks of it.
+    """一个值，以及 setter 对它做的那一次转换。
 
-    ``convert`` mirrors the 3.44.13 measurements: a date target takes an ISO date
-    string and refuses everything else, a boolean target takes every string but
-    ``'false'``/``'0'``/``''`` (``'yes'``, ``'1'`` and ``'nope'`` all become True),
-    and a string target takes any value as its text.
+    ``convert`` 照抄实测行为：日期目标收 ISO 日期串，别的都拒。
+    布尔目标收任何字符串，只有 ``'false'``/``'0'``/``''`` 为假。
+    字符串目标把任何值变成它的文本。
+
+    A value and the one conversion the setter asks of it.  ``convert`` mirrors the
+    measured behaviour: a date target takes an ISO date string and refuses everything
+    else, a boolean target takes every string but ``'false'``/``'0'``/``''``, and a
+    string target takes any value as its text.
     """
 
     Bool = 1
@@ -138,8 +157,10 @@ class FakeQVariant:
                 self.converted = bool(value)
                 return True
         elif target_type == FakeQVariant.String:
-            # Measured on 3.44.13: a bool becomes ``'true'``/``'false'`` (lower case) and a
-            # whole float loses its ``.0``.
+            # 实测：bool 变 ``'true'``/``'false'``。
+            # 整数浮点丢掉 ``.0``。
+            # A bool becomes ``'true'``/``'false'``.
+            # A whole float loses its ``.0``.
             if isinstance(value, bool):
                 self.converted = "true" if value else "false"
             elif isinstance(value, float) and value.is_integer():
@@ -155,7 +176,10 @@ class FakeQVariant:
 
 
 class FakeField:
-    """What the setter reads of a field: its numeric kind and its QVariant type."""
+    """setter 从一个字段上读的东西：是不是数值，以及它的 QVariant 类型。
+
+    What the setter reads of a field: its numeric kind and its QVariant type.
+    """
 
     def __init__(self, name: str, numeric: bool = True, field_type: int = VARIANT_STRING) -> None:
         self.name = name
@@ -184,7 +208,10 @@ class FakeFields:
 
 
 class FakeColor:
-    """``QColor`` for the raster setter: the string it was built from."""
+    """栅格 setter 眼里的 ``QColor``：它就是构造时用的那个字符串。
+
+    ``QColor`` for the raster setter: the string it was built from.
+    """
 
     def __init__(self, color: str) -> None:
         self._color = color
@@ -194,7 +221,10 @@ class FakeColor:
 
 
 class FakeRule:
-    """One ``QgsRuleBasedRenderer.Rule``: its own filter, symbol and children."""
+    """一条 ``QgsRuleBasedRenderer.Rule``：自己的过滤、符号和子规则。
+
+    One ``QgsRuleBasedRenderer.Rule``: its own filter, symbol and children.
+    """
 
     def __init__(
         self,
@@ -218,7 +248,10 @@ class FakeRule:
 
 
 class FakeDocument:
-    """Stand-in for ``QDomDocument``: the fake layer decides what it holds."""
+    """``QDomDocument`` 的替身：里面装什么由假图层决定。
+
+    Stand-in for ``QDomDocument``: the fake layer decides what it holds.
+    """
 
     def __init__(self) -> None:
         self.content = ""
@@ -231,7 +264,10 @@ class FakeDocument:
 
 
 class FakeLayer:
-    """Enough of ``QgsMapLayer``: identity, provider, CRS, validity, style."""
+    """``QgsMapLayer`` 够用的那部分：身份、provider、CRS、有效性、样式。
+
+    Enough of ``QgsMapLayer``: identity, provider, CRS, validity, style.
+    """
 
     def __init__(
         self,
@@ -246,13 +282,19 @@ class FakeLayer:
         self.provider = provider
         self.authid = authid
         self.valid = valid
-        # The style read side: a geometry type, a renderer and a native export.
+        # 样式读侧：几何类型、渲染器和一次原生导出。
+        # 几何类型、渲染器、原生导出。
+        # The style read side.
+        # A geometry type, a renderer and a native export.
         self.geometry = 0
         self.renderer_value: FakeRenderer | None = None
         self.style_xml = "<qgis/>"
         self.style_error = ""
         self.style_exports: list[tuple[Any, Any]] = []
-        # The setter side: what was installed, what the layer holds, and the calls.
+        # 写侧：装上了什么、图层里有什么、以及调用记录。
+        # 装上了什么、图层里有什么、调用记录。
+        # The setter side.
+        # What was installed and what was called.
         self.renderer_sets: list[Any] = []
         self.repaints = 0
         self.events: list[str] = []
@@ -306,7 +348,10 @@ class FakeLayer:
 
 
 class FakeGroup:
-    """A parent group; nothing a layer operation does may change it (AT-21B)."""
+    """父分组；任何图层操作都不许改它。
+
+    A parent group; nothing a layer operation does may change it.
+    """
 
     def __init__(self, checked: bool = True) -> None:
         self.checked = checked
@@ -324,7 +369,10 @@ class FakeGroup:
 
 
 class FakeNode:
-    """A layer tree node: its own check state, and the group above it."""
+    """图层树节点：自己的勾选状态，以及它上面的分组。
+
+    A layer tree node: its own check state, and the group above it.
+    """
 
     def __init__(self, parent: FakeGroup | None = None, checked: bool = True) -> None:
         self.checked = checked
@@ -370,7 +418,8 @@ class FakeProject:
         self.dirty.append(dirty)
 
     def addMapLayer(self, layer: Any, add_to_legend: bool = True) -> Any:
-        # Matches QGIS: without a legend entry the layer gets no tree node.
+        # 与 QGIS 一致：没有图例条目，图层就没有树节点。
+        # No legend entry, no tree node.
         self.layers[layer.id()] = layer
         self.added.append((layer, add_to_legend))
         if add_to_legend:
@@ -379,7 +428,10 @@ class FakeProject:
 
 
 class FakeQgis:
-    """A ``qgis.core`` holding only what the layer operations import."""
+    """只装图层操作会 import 的那些东西的 ``qgis.core``。
+
+    A ``qgis.core`` holding only what the layer operations import.
+    """
 
     def __init__(self) -> None:
         self.constructed: list[Any] = []
@@ -388,18 +440,24 @@ class FakeQgis:
         self.valid = True
         holder = self
 
-        # The live registries: renderer names the operations must read, not guess.
+        # 活的注册表：渲染器名字要从这里读，不能猜。
+        # 渲染器名字从这里读，不猜。
+        # The live registries.
+        # The renderer names are read, never guessed.
         self.vector_renderer_types: list[str] = []
         self.raster_renderer_types: list[str] = []
         self.renderer_registry_layers: list[Any] = []
         self.raster_registries_built = 0
 
-        # The renderer setter: what was built, in what order, and what may fail.
+        # 渲染器 setter：造了什么、按什么顺序、什么可以失败。
+        # 造了什么、什么顺序、什么会失败。
+        # The renderer setter.
+        # What was built, in what order, what fails.
         self.events: list[str] = []
         self.built: list[Any] = []
         self.invalid_expressions: set[str] = set()
         self.fail_build: str | None = None
-        self.raster_data_type = 1  # Qgis.DataType.Byte
+        self.raster_data_type = 1  # 对应 Qgis.DataType.Byte / Qgis.DataType.Byte
 
         QgsMapLayer = type(
             "QgsMapLayer",
@@ -468,7 +526,7 @@ class FakeQgis:
                 self.data_provider = FakeRasterProvider()
                 holder.constructed.append(self)
 
-        # --- the renderer setter (PRD v2 5.4-7.5) ---------------------------
+        # --- 渲染器 setter / the renderer setter -----------------------------
 
         class FakeBuiltRenderer:
             renderer_type = ""
@@ -532,8 +590,10 @@ class FakeQgis:
                 record("categorizedSymbol", self)
 
             def categoryIndexForValue(self, value: Any) -> int:
-                # Measured on 3.44.13: the native lookup compares values numerically,
-                # so an int category matches the same number looked up as a float.
+                # 实测：原生查找按数值比较。
+                # 所以 int 类别能匹配 float 查的值。
+                # Measured: the native lookup compares numerically.
+                # So an int category matches a float value.
                 for index, category in enumerate(self.categories):
                     if category.value == value:
                         return index
@@ -683,7 +743,10 @@ class FakeQgis:
         self.QgsRasterRendererRegistry = QgsRasterRendererRegistry
         self.Qgis = Qgis
         self.QVariant: Any = QVariant
-        # The renderer setter's native classes, for the tests' isinstance assertions.
+        # setter 用到的原生类。
+        # 供测试里的 isinstance 断言用。
+        # The setter's native classes.
+        # For the tests' isinstance assertions.
         self.QgsMarkerSymbol: Any = QgsMarkerSymbol
         self.QgsLineSymbol: Any = QgsLineSymbol
         self.QgsFillSymbol: Any = QgsFillSymbol
@@ -754,7 +817,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
     return fake
 
 
-# --- helpers -----------------------------------------------------------------
+# --- 辅助函数 / helpers ------------------------------------------------------
 
 
 def fake_module(name: str, **attributes: Any) -> types.ModuleType:
@@ -765,7 +828,10 @@ def fake_module(name: str, **attributes: Any) -> types.ModuleType:
 
 @pytest.fixture
 def data_root(tmp_path: Path) -> Path:
-    # A space in the root, because the real ogr URI has to survive one.
+    # 根目录里带个空格。
+    # 真实的 ogr URI 必须能扈住它。
+    # A space in the root.
+    # The real ogr URI has to survive one.
     root = tmp_path / "data root"
     root.mkdir()
     return root
@@ -795,7 +861,10 @@ def make_layer(
 ) -> Any:
     layer_class = fake.QgsVectorLayer if kind == "vector" else fake.QgsRasterLayer
     layer = layer_class(f"source-{layer_id}", name, provider, layer_id=layer_id)
-    # The setter tests assert the order of construction, install and repaint.
+    # setter 测试断言这三步的顺序。
+    # 构造、安装、重绘。
+    # The setter tests assert the order.
+    # Construction, install and repaint.
     layer.events = fake.events
     return layer
 
@@ -816,7 +885,7 @@ def refuse(operation: Any, ctx: OperationContext, request: Any) -> str:
     return caught.value.code
 
 
-# --- input models (PRD 7.6, 通用输入约束) ------------------------------------
+# --- 输入模型 / input models -----------------------------------------------
 
 
 def test_an_undeclared_field_is_refused() -> None:
@@ -880,7 +949,7 @@ def test_a_visibility_flag_must_be_a_real_boolean() -> None:
         ops.LayerSetVisibilityParams.model_validate({"layer_id": "x", "visible": "false"})
 
 
-# --- layer.add (PRD 7.6, AT-19, AT-20) ---------------------------------------
+# --- layer.add：加图层 / adding a layer ----------------------------------
 
 
 def test_a_path_outside_the_allowed_roots_is_refused(
@@ -943,7 +1012,10 @@ def test_a_sub_layer_uri_comes_from_the_ogr_encoder(fake_qgis: FakeQgis, data_ro
     )
 
     resolved = str(source.resolve())
-    # The encoder gets the path untouched: quoting it here would double-escape it.
+    # 编码器拿到的是原样路径。
+    # 在这里加引号会变成双重转义。
+    # The encoder gets the path untouched.
+    # Quoting it here would double-escape it.
     assert fake_qgis.provider_names == ["ogr"]
     assert fake_qgis.encoded == [{"path": resolved, "layerName": "roads"}]
     assert fake_qgis.constructed[0].source_uri == f"{resolved}|layername=roads"
@@ -990,7 +1062,7 @@ def test_a_layer_added_without_a_legend_entry_has_no_tree_node(
     assert code == LAYER_NOT_IN_TREE
 
 
-# --- layer.list (PRD 7.7, AT-21, AT-21B) -------------------------------------
+# --- layer.list：列图层 / listing the layers ------------------------------
 
 
 def test_layers_are_listed_in_id_order(fake_qgis: FakeQgis, data_root: Path) -> None:
@@ -1049,12 +1121,17 @@ def test_a_layer_that_is_neither_vector_nor_raster_is_other(
 def test_list_and_get_info_take_every_field_from_its_layer(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """A vector and a raster, so each value has to come from the layer it belongs to."""
+    """一个 vector 一个 raster，每个值都必须来自它自己那一层。
+
+    A vector and a raster, so each value has to come from the layer it belongs to.
+    """
 
     project = FakeProject()
     ctx = make_context(project, data_root)
-    # The fake gives a vector EPSG:4326 and a raster EPSG:3857, so a swapped or
-    # constant CRS cannot pass.
+    # 假件给 vector 4326、raster 3857。
+    # 所以 CRS 换个位或写死都过不了。
+    # A vector is 4326, a raster 3857.
+    # So a swapped or constant CRS cannot pass.
     roads = make_layer(fake_qgis, "roads", name="Roads")
     dem = make_layer(fake_qgis, "dem", name="Dem", kind="raster", provider="gdal")
     for layer in (roads, dem):
@@ -1084,7 +1161,7 @@ def test_list_and_get_info_take_every_field_from_its_layer(
     assert info.valid is True
 
 
-# --- layer.get_info (PRD 7.8) ------------------------------------------------
+# --- layer.get_info：看图层 / reading one layer ---------------------------
 
 
 def test_get_info_refuses_an_unknown_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
@@ -1119,7 +1196,7 @@ def test_get_info_reports_validity_and_the_same_visibility_as_list(
     assert (info.visible, info.effective_visible) == (True, False)
 
 
-# --- layer.set_visibility (PRD 7.9, AT-21B, AT-22) ---------------------------
+# --- layer.set_visibility：设可见性 / setting visibility ------------------
 
 
 def test_set_visibility_refuses_an_unknown_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
@@ -1202,7 +1279,7 @@ def test_a_hidden_parent_group_is_never_touched(fake_qgis: FakeQgis, data_root: 
     assert toggled.effective_visible is False
 
 
-# --- the declarations and the import rule ------------------------------------
+# --- 声明与导入规则 / the declarations and the import rule ----------------
 
 
 def test_the_four_operations_register_as_main_thread_layer_capabilities() -> None:
@@ -1246,7 +1323,7 @@ def test_the_layer_module_imports_without_qgis() -> None:
     assert result.returncode == 0, result.stderr
 
 
-# --- the style reads (PRD v2 §4, §5.1–5.3) ----------------------------------
+# --- 样式读操作 / the style reads -----------------------------------------
 
 STYLE_READS = (
     ops.LayerListStyleCategories,
@@ -1333,7 +1410,7 @@ def test_every_style_read_refuses_a_layer_without_a_style(
 ) -> None:
     project = FakeProject()
     table = style_layer(fake_qgis, project, "table")
-    table.geometry = 4  # Qgis.GeometryType.NullGeometry
+    table.geometry = 4  # 对应 Qgis.GeometryType.NullGeometry / Qgis.GeometryType.NullGeometry
     project.layers["plugin-1"] = FakeLayer("plugin-1", "annotations", provider="custom", authid="")
 
     ctx = make_context(project, data_root)
@@ -1382,7 +1459,10 @@ def test_get_qml_only_ors_the_requested_categories(fake_qgis: FakeQgis, data_roo
 
 
 def test_get_qml_exports_a_single_category(fake_qgis: FakeQgis, data_root: Path) -> None:
-    """One category takes a different flag path than several (PRD v2 §10.2 S04)."""
+    """一个分类走的是与多个分类不同的标志位路径。
+
+    One category takes a different flag path than several.
+    """
 
     project = FakeProject()
     layer = style_layer(fake_qgis, project, "roads")
@@ -1396,7 +1476,10 @@ def test_get_qml_exports_a_single_category(fake_qgis: FakeQgis, data_root: Path)
 
 
 def test_get_qml_params_refuse_an_empty_category_list() -> None:
-    """A named list must name something; omitted still means every applicable one."""
+    """给了列表就得给东西；不传仍然是“全部适用的”。
+
+    A named list must name something; omitted still means every applicable one.
+    """
 
     assert ops.LayerGetQmlParams(layer_id="roads").categories is None
     with pytest.raises(ValidationError):
@@ -1439,8 +1522,10 @@ def test_an_unknown_category_name_is_refused_by_the_model() -> None:
 def test_a_failed_native_export_is_internal_error_without_the_native_message(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    # 3.44's binding signals a failed export with a non-empty message instead of
-    # the (message, ok) pair PRD v2 §4.3 describes.
+    # 3.44 用非空消息表示导出失败。
+    # 而不是 (message, ok) 这一对。
+    # A failed export is a non-empty message.
+    # Not a (message, ok) pair.
     project = FakeProject()
     layer = style_layer(fake_qgis, project, "roads")
     layer.style_error = "C:/secret/roads.qml: permission denied"
@@ -1588,7 +1673,7 @@ def test_the_style_reads_register_as_main_thread_queries() -> None:
     ]
 
 
-# --- the renderer setter (PRD v2 5.4-7.5) ------------------------------------
+# --- 渲染器 setter / the renderer setter ----------------------------------
 
 POINT = 0
 LINE = 1
@@ -1599,7 +1684,8 @@ FILL = {"type": "fill", "color": "#398F59"}
 LINE_SYMBOL = {"type": "line", "color": "#D95843", "width_mm": 0.8}
 MARKER = {"type": "marker", "color": "#FF0000"}
 
-# The seven vector and four raster types this version recognises but does not set.
+# 这个版本认得但不设置的七个矢量类型和四个栅格类型。
+# Seven vector and four raster types.
 UNSUPPORTED_RENDERER_TYPES = (
     "pointDisplacement",
     "pointCluster",
@@ -1662,7 +1748,10 @@ def test_a_null_symbol_renderer_is_installed_in_one_call(
     assert result.layer_id == "parcels"
     assert result.renderer_type == "nullSymbol"
     assert set(result.model_dump()) == {"layer_id", "renderer_type"}
-    # The renderer was complete before the layer saw it, and it was installed once.
+    # 渲染器在图层看到它之前就已经完整。
+    # 并且只装了一次。
+    # The renderer was complete before the layer saw it.
+    # And it was installed once.
     assert layer.renderer_sets == [fake_qgis.built[0]]
     assert layer.renderer_value is layer.renderer_sets[0]
     assert layer.events == ["construct:nullSymbol", "setRenderer", "repaint"]
@@ -1760,7 +1849,8 @@ def test_categories_keep_the_declared_order_and_values(
     ]
     assert [category.symbol.kind for category in renderer.categories] == ["fill", "fill"]
     assert result.renderer_type == "categorizedSymbol"
-    # The read side agrees with the object that was installed.
+    # 读侧和装上去的那个对象一致。
+    # The read side agrees with the installed object.
     read_back = ops.LayerGetRenderer().execute_main(
         ctx, ops.LayerGetRendererParams(layer_id="landuse")
     )
@@ -1825,7 +1915,10 @@ def test_a_flat_rule_renderer_builds_its_rules_in_order(
     renderer = layer.renderer_sets[0]
     assert isinstance(renderer, fake_qgis.QgsRuleBasedRenderer)
     children = renderer.root.children
-    # A root built from Rule(None) starts empty: no implicit catch-all rule exists.
+    # 用 Rule(None) 造的根一开始是空的。
+    # 没有隐式的兜底规则。
+    # A root built from Rule(None) starts empty.
+    # No implicit catch-all rule exists.
     assert [child.label for child in children] == ["Main", "Other", "Else"]
     assert [child.filter for child in children] == [
         "\"class\" = 'primary'",
@@ -1863,11 +1956,17 @@ def test_a_single_band_gray_renderer_carries_its_stretch(
     assert renderer.provider is layer.data_provider
     enhancement = renderer.enhancement
     assert enhancement is not None
-    # The enhancement uses the band's own data type and the declared stretch.
+    # 增强用波段自己的数据类型。
+    # 拉伸值是声明的那些。
+    # The enhancement takes the band's own data type.
+    # The stretch is the declared one.
     assert enhancement.data_type == fake_qgis.raster_data_type
     assert (enhancement.minimum, enhancement.maximum) == (0.0, 2500.0)
     assert enhancement.algorithm == fake_qgis.QgsContrastEnhancement.StretchToMinimumMaximum
-    # The bounds only store their values; the algorithm setter builds the table once.
+    # 两个边界只存值。
+    # 表由算法 setter 建一次。
+    # The bounds only store their values.
+    # The algorithm setter builds the table once.
     assert (enhancement.minimum_table, enhancement.maximum_table) == (False, False)
     assert layer.events == [
         "construct:singlebandgray",
@@ -1994,8 +2093,12 @@ def test_an_unimplemented_renderer_type_never_touches_the_layer(
     old = FakeRenderer("singleSymbol")
     layer.renderer_value = old
 
-    # The union refuses the type, which the Engine reports as INVALID_INPUT
-    # (test_engine pins that mapping); no layer is reached, so nothing changed.
+    # union 拒掉这个类型。
+    # 引擎把它报成 INVALID_INPUT。
+    # 没有任何图层被碰到，所以什么都没变。
+    # The union refuses the type.
+    # The engine reports INVALID_INPUT.
+    # No layer is reached, so nothing changed.
     with pytest.raises(ValidationError):
         ops.LayerSetRendererParams.model_validate(
             setter_payload("parcels", {"type": renderer_type})
@@ -2148,7 +2251,10 @@ def test_a_numeric_field_normalises_one_and_one_point_zero(
 def test_a_fractional_value_on_an_integer_field_is_refused(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """A category the field can never hold would blank the layer, so it is refused."""
+    """字段根本存不下的分类值会让图层整片空白，所以拒掉。
+
+    A category the field can never hold would blank the layer, so it is refused.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
@@ -2176,7 +2282,10 @@ def test_a_fractional_value_on_an_integer_field_is_refused(
 def test_a_whole_value_on_an_integer_field_is_stored_as_an_integer(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """``2.0`` is a value the integer field can hold, and the stored value says so."""
+    """``2.0`` 是这个整数字段存得下的值，存下来的值也说明这一点。
+
+    ``2.0`` is a value the integer field can hold, and the stored value says so.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
@@ -2204,7 +2313,10 @@ def test_a_whole_value_on_an_integer_field_is_stored_as_an_integer(
 def test_a_whole_float_and_an_integer_are_one_category_on_an_integer_field(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """The two spellings stay one category: the dedupe key does not depend on the type."""
+    """两种写法仍是同一个分类：去重键不看类型。
+
+    The two spellings stay one category: the dedupe key does not depend on the type.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
@@ -2242,7 +2354,10 @@ def test_a_whole_float_and_an_integer_are_one_category_on_an_integer_field(
 def test_an_integer_outside_the_fields_range_is_refused(
     fake_qgis: FakeQgis, data_root: Path, variant_name: str, value: int
 ) -> None:
-    """No such value can be a feature, so the category would never match (measured)."""
+    """这种值不可能是要素的值，分类永远匹配不上。
+
+    No such value can be a feature, so the category would never match.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
@@ -2279,7 +2394,10 @@ def test_an_integer_outside_the_fields_range_is_refused(
 def test_an_integer_at_the_fields_edge_is_stored_as_an_integer(
     fake_qgis: FakeQgis, data_root: Path, variant_name: str, value: int
 ) -> None:
-    """The outermost values the field can hold stay accepted and match natively."""
+    """字段能存的最外层值仍然接受，并且原生也能匹配上。
+
+    The outermost values the field can hold stay accepted and match natively.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
@@ -2306,7 +2424,10 @@ def test_an_integer_at_the_fields_edge_is_stored_as_an_integer(
 def test_two_integers_one_float_cannot_tell_apart_are_two_categories(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """Above 2**53 two int64 values share a float; the field still holds both."""
+    """超过 2**53 后两个 int64 值共用一个 float，但字段仍然装得下两个。
+
+    Above 2**53 two int64 values share a float; the field still holds both.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
@@ -2358,7 +2479,10 @@ def test_a_category_value_the_field_cannot_hold_is_refused(
 
 
 def test_an_unrepresentable_category_value_is_refused(fake_qgis: FakeQgis, data_root: Path) -> None:
-    """An int too large for a float is a bad value, not an internal failure."""
+    """装不进 float 的整数是坏值，不是内部故障。
+
+    An int too large for a float is a bad value, not an internal failure.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
@@ -2383,7 +2507,10 @@ def test_an_unrepresentable_category_value_is_refused(fake_qgis: FakeQgis, data_
 def test_a_boolean_category_is_refused_on_a_field_that_is_not_boolean(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """A bool on a date field would be a category that can never match."""
+    """日期字段上的 bool 会变成永远匹配不上的分类。
+
+    A bool on a date field would be a category that can never match.
+    """
 
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "events", geometry=POLYGON)
@@ -2431,7 +2558,10 @@ def test_a_boolean_category_is_accepted_on_a_boolean_field(
 def test_a_string_a_boolean_field_converts_is_written_as_that_boolean(
     fake_qgis: FakeQgis, data_root: Path, value: str
 ) -> None:
-    """The converted value is what the renderer stores, so a feature can match it."""
+    """渲染器存的是转换后的值，所以要素才匹配得上。
+
+    The converted value is what the renderer stores, so a feature can match it.
+    """
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "flags", geometry=POLYGON)
     layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
@@ -2453,7 +2583,10 @@ def test_a_string_a_boolean_field_converts_is_written_as_that_boolean(
 def test_a_boolean_and_its_string_form_are_one_category(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """Two spellings of the same value dedupe on the converted value, not the raw one."""
+    """同一个值的两种写法按转换后的值去重，而不是按原始值。
+
+    Two spellings dedupe on the converted value, not the raw one.
+    """
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "flags", geometry=POLYGON)
     layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
@@ -2479,7 +2612,10 @@ def test_a_boolean_and_its_string_form_are_one_category(
 def test_a_date_field_takes_a_date_string_and_refuses_a_non_date(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """A date category has to convert to a date, or it can never match a feature."""
+    """日期分类必须转成日期，否则永远匹配不上要素。
+
+    A date category has to convert to a date, or it can never match a feature.
+    """
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "events", geometry=POLYGON)
     layer.field_list = [FakeField("recorded", numeric=False, field_type=fake_qgis.QVariant.Date)]
@@ -2581,7 +2717,10 @@ def test_a_range_needs_lower_below_upper() -> None:
 
 
 def test_a_range_label_may_be_empty() -> None:
-    """PRD v2 6.4 asks for a label string only; a legend entry without text is legal."""
+    """标签只要求是字符串；没有文字的图例条目也合法。
+
+    A label string is all that is asked; a legend entry without text is legal.
+    """
 
     config = ops.RangeConfig.model_validate({"lower": 0, "upper": 10, "label": "", "symbol": FILL})
     assert config.label == ""
@@ -2590,16 +2729,19 @@ def test_a_range_label_may_be_empty() -> None:
 @pytest.mark.parametrize(
     "rules",
     [
+        # ELSE 夹在中间。
         # An ELSE in the middle.
         [
             {"label": "Else", "else_rule": True, "symbol": FILL},
             {"label": "A", "filter": '"a" = 1', "symbol": FILL},
         ],
+        # 两个 ELSE：只有最后一个可以是。
         # Two ELSE rules: only the last may be one.
         [
             {"label": "Else", "else_rule": True, "symbol": FILL},
             {"label": "Else again", "else_rule": True, "symbol": FILL},
         ],
+        # ELSE 还带了过滤表达式。
         # An ELSE that also carries a filter.
         [{"label": "Else", "filter": '"a" = 1', "else_rule": True, "symbol": FILL}],
     ],
