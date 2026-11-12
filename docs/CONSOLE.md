@@ -223,7 +223,7 @@ engine.get(running_id).status  # 等任务自己报告，才变 'CANCELLED'
 
 **未实测（本文件）**：正在 `RUNNING` 的 `QgsTask` 的 `CANCEL_REQUESTED -> CANCELLED` 这一段。
 4 要素/9000 要素的求和在毫秒级结束，构造不出稳定的取消窗口；这条路径由 `tests/test_qgs_task.py` 的
-单测覆盖。语义见 `docs/ERRORS.md` §4。
+单测覆盖。六格取消矩阵见 `qgis\DEVELOP.md` §6.8。
 
 `cancel` 对主线程正在执行的调用、以及 `FINALIZING` 的记录，返回 `accepted=false`
 与 `reason="NOT_INTERRUPTIBLE"` / `"FINALIZING"`。
