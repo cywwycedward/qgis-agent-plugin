@@ -131,7 +131,8 @@ _FIELD_LABELS = {
 
 # What a failure means, in the dock's own words: ``code -> (what happened, what next)``.
 # The engine's own message is kept as the label's tooltip -- it is written for a
-# caller, not for the operator, and half of it is English.
+# caller, not for the operator, and half of it is English.  ``INVALID_INPUT`` is the
+# exception: its message names the fields, and nothing else does.
 _ERRORS = {
     "OPERATION_NOT_FOUND": ("注册表里没有这个操作。", "重新启用插件，让全部操作重新注册。"),
     "INVALID_OPERATION_DEFINITION": ("操作声明不合法，注册被拒。", "这是插件缺陷，看 QGIS 日志。"),
@@ -140,7 +141,7 @@ _ERRORS = {
     "ENGINE_CLOSING": ("插件正在关闭，调用没有执行。", "重新启用插件后再试。"),
     "UNSUPPORTED_EXECUTION_MODE": ("这个执行方式不受支持。", "这是插件缺陷，看 QGIS 日志。"),
     "EXECUTION_NOT_FOUND": ("这次调用的记录已经不在了。", "重新运行一次。"),
-    "INVALID_INPUT": ("参数没有通过校验。", "按提示改掉参数，再运行一次。"),
+    "INVALID_INPUT": ("参数没有通过校验。", "按上面点名的参数改掉，再运行一次。"),
     "INVALID_CRS": ("坐标参考系写法不对。", "用 EPSG:4326 这样的写法重试。"),
     "PROJECT_REPLACE_REQUIRED": (
         "当前工程还有未保存的内容。",
@@ -888,10 +889,14 @@ class OperationDock(QDockWidget):
         """Name a failure in the dock's words; the engine's text becomes the tooltip.
 
         Half of what the engine writes is English, and it is written for a caller;
-        this panel is the operator's.
+        this panel is the operator's.  ``INVALID_INPUT`` is the exception: the schema
+        cannot carry the models' own validators, so the fields they rejected are named
+        nowhere else, and that message joins the sentence the operator reads.
         """
 
         happened, next_step = _ERRORS.get(code, (f"引擎返回：{detail}", _HINT))
+        if code == INVALID_INPUT:
+            happened = f"{happened}{detail}"
         self._show_banner(code, happened, next_step, detail)
 
     def _show_problem(self, code: str, message: str) -> None:
@@ -1046,7 +1051,8 @@ def _field_tooltip(title: str, name: str, schema: dict[str, Any]) -> str:
     description = schema.get("description")
     if description:
         tooltip += f"：{description}"
-    if schema.get("default") is not None:
+    # A checkbox has no empty state: its default is its initial state, not a fallback.
+    if schema.get("default") is not None and schema.get("type") != "boolean":
         tooltip += f"；留空用默认值 {schema['default']}"
     return tooltip
 
