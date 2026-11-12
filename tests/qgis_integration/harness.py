@@ -1,15 +1,21 @@
-"""The headless QGIS session the acceptance cases run in (PRD 12.1).
+"""验收用例跑在其中的无 GUI QGIS 会话。
 
-One ``QgsApplication`` without a GUI, the real ``QgsProject``, one real
-``QgsTaskManager`` per plugin session, a stand-in interface and a handful of probe
-operations that hold a task open long enough to look at it.  Everything the cases
-exercise is the real object from ``src``; the interface and the probes are the only
-test doubles, and every case says so in its evidence line.
+一个没有界面的 ``QgsApplication``、真实的 ``QgsProject``、每个插件会话一个真实的
+``QgsTaskManager``、一个替身界面，以及几个能把任务按住足够久的探针操作。用例碰到的都是 ``src`` 里
+真实的对象；只有界面和探针是测试替身，每条用例都在证据行里说明这一点。
 
-The application runs inside a throwaway profile (``QGIS_CUSTOM_CONFIG_PATH``), so
-the seven PRD 10.1 keys the acceptance run writes live nowhere near the operator's
-own ``QGIS3.ini``, and the working directory is the throwaway one because QGIS
-drops ``symbology-style.db`` into whatever directory it starts in.
+应用跑在一次性的配置目录里（``QGIS_CUSTOM_CONFIG_PATH``），所以验收写下的七项配置离操作者自己的
+``QGIS3.ini`` 很远；工作目录也是那个一次性目录，因为 QGIS 会把 ``symbology-style.db`` 丢在它启动
+时所在的目录。
+
+The headless QGIS session the acceptance cases run in.  One ``QgsApplication`` without a GUI,
+the real ``QgsProject``, one real ``QgsTaskManager`` per plugin session, a stand-in interface
+and a handful of probe operations that hold a task open long enough to look at it.  Everything
+the cases exercise is the real object from ``src``; the interface and the probes are the only
+test doubles, and every case says so in its evidence line.  The application runs inside a
+throwaway profile (``QGIS_CUSTOM_CONFIG_PATH``), so the seven configuration keys the acceptance
+run writes live nowhere near the operator's own ``QGIS3.ini``, and the working directory is the
+throwaway one because QGIS drops ``symbology-style.db`` into whatever directory it starts in.
 """
 
 from __future__ import annotations
@@ -60,13 +66,18 @@ __all__ = [
 
 SETTINGS_GROUP = "qgis_agent_plugin"
 
-# Why QGIS's processing framework is not registered, when it could not be; the
-# ``processing.*`` cases skip on it instead of measuring an empty registry.
+# QGIS 的 processing 框架起不来时记下的原因，``processing.*`` 的用例据此跳过，而不是去量一
+# 个空注册表。
+# Why QGIS's processing framework is not registered, when it could not be; the ``processing.*``
+# cases skip on it instead of measuring an empty registry.
 PROCESSING_ERROR: str | None = None
 
 
 class Skip(Exception):
-    """The environment cannot run this case; never reported as a pass (PRD 12.3)."""
+    """这台机器跑不了这个用例；永远不会被当成通过。
+
+    The environment cannot run this case; it is never reported as a pass.
+    """
 
 
 def require(condition: bool, message: str) -> None:
@@ -78,11 +89,14 @@ def equal(got: Any, want: Any, what: str) -> None:
     require(got == want, f"{what}: expected {want!r}, got {got!r}")
 
 
-# --------------------------------------------------------------------------- the app
+# -------------------------------------------------------------------- 应用 / the app
 
 
 def start_application(runtime: Path, profile: Path) -> Any:
-    """A headless application with its own profile; call once per acceptance run."""
+    """起一个带自己配置目录的无界面应用；每次验收运行只调一次。
+
+    A headless application with its own profile; call once per acceptance run.
+    """
 
     runtime.mkdir(parents=True, exist_ok=True)
     profile.mkdir(parents=True, exist_ok=True)
@@ -98,13 +112,17 @@ def start_application(runtime: Path, profile: Path) -> Any:
 
 
 def start_processing() -> None:
-    """Register QGIS's own processing providers, which a bare ``initQgis`` does not.
+    """注册 QGIS 自己的 processing 提供者，裸 ``initQgis`` 不会做这件事。
 
-    QGIS Desktop registers them when its processing plugin loads, and the launcher
-    puts neither ``python/plugins`` on ``sys.path`` nor the providers in the
-    registry; without this the P cases would measure an empty registry (PRD v2 3.1).
-    The plugin directory is derived from the ``qgis`` package itself, so nothing here
-    depends on where QGIS was installed.
+    QGIS Desktop 是在 processing 插件加载时注册它们的，而启动器既没把 ``python/plugins`` 放进
+    ``sys.path``，也没把提供者放进注册表；少了这一步，processing 用例只能跳过，不拿空表凑数。
+    插件目录从 ``qgis`` 包自身推出来，所以这里不依赖 QGIS 装在哪。
+
+    Register QGIS's own processing providers, which a bare ``initQgis`` does not.  QGIS Desktop
+    registers them when its processing plugin loads, and the launcher puts neither
+    ``python/plugins`` on ``sys.path`` nor the providers in the registry; without this the
+    processing cases would measure an empty registry.  The plugin directory is derived from the
+    ``qgis`` package itself, so nothing here depends on where QGIS was installed.
     """
 
     global PROCESSING_ERROR
@@ -114,8 +132,8 @@ def start_processing() -> None:
     if source:
         plugins = Path(source).resolve().parents[1] / "plugins"
         if str(plugins) not in sys.path:
-            # Appended, not inserted: the repository's own ``src`` keeps its place at
-            # the front of the search path (run_acceptance.py puts it there).
+            # 追加而不是插入：仓库自己的 ``src`` 仍留在搜索路径最前面。
+            # Appended, not inserted: the repository's own ``src`` keeps its place at the front.
             sys.path.append(str(plugins))
     try:
         from processing.core.Processing import Processing
@@ -126,7 +144,10 @@ def start_processing() -> None:
 
 
 def require_processing() -> None:
-    """Refuse to measure processing when QGIS's framework is not registered here."""
+    """QGIS 的框架没注册上时，拒绕去量 processing 的结果。
+
+    Refuse to measure processing when QGIS's framework is not registered here.
+    """
 
     from qgis.core import QgsApplication
 
@@ -137,7 +158,10 @@ def require_processing() -> None:
 
 
 def configure_settings(data_root: Path, project_root: Path) -> None:
-    """Point the two PRD 10.1 roots at the fixtures; nothing else is changed."""
+    """把两个允许目录指向测试数据；其他键不动。
+
+    Point the two allowed roots at the fixtures; nothing else is changed.
+    """
 
     from qgis.core import QgsSettings
 
@@ -154,7 +178,10 @@ def settings_file() -> Path:
 
 
 def pump(application: Any, seconds: float = 0.0) -> None:
-    """Turn the event loop for at least ``seconds`` of wall clock."""
+    """至少把事件循环转 ``seconds`` 秒。
+
+    Turn the event loop for at least ``seconds`` of wall clock.
+    """
 
     deadline = time.monotonic() + seconds
     while True:
@@ -176,7 +203,10 @@ def pump_until(application: Any, predicate: Any, *, timeout: float = 20.0, what:
 
 
 def flush_deferred(application: Any) -> None:
-    """Deliver the ``deleteLater`` queue, which is how PRD 9.3.5 cleans up."""
+    """把 ``deleteLater`` 队列投递出去，卸载就是靠它清理的。
+
+    Deliver the ``deleteLater`` queue, which is how an unload cleans up.
+    """
 
     from qgis.PyQt.QtCore import QEvent
 
@@ -191,12 +221,17 @@ def qt_deleted(obj: Any) -> bool:
 
 
 class FakeIface:
-    """The one interface call the operations make: ``newProject``.
+    """操作真正用到的那一个界面调用：``newProject``。
 
-    QGIS Desktop's own implementation clears the current project and reports
-    whether it did; headless, that is the whole of it (PRD 7.2 is the operation
-    calling it, not this stand-in).  ``agent_engine`` and ``agent_registry`` are
-    published on it by ``Plugin.initGui``, exactly as on the real one.
+    QGIS Desktop 里的实现会清空当前工程并报告是否清空；无界面时这就是它的全部内容。用例测的是调
+    用它的那个操作，不是这个替身。``agent_engine`` 与 ``agent_registry`` 由 ``Plugin.initGui``
+    挂上去，和真实界面一样。
+
+    The one interface call the operations make: ``newProject``.  QGIS Desktop's own
+    implementation clears the current project and reports whether it did; headless, that is the
+    whole of it.  A case measures the operation that calls it, not this stand-in.
+    ``agent_engine`` and ``agent_registry`` are published on it by ``Plugin.initGui``, exactly as
+    on the real one.
     """
 
     def newProject(self, promptToSaveFlag: bool = False) -> bool:
@@ -206,10 +241,11 @@ class FakeIface:
         return True
 
 
-# --------------------------------------------------------------------------- probes
+# ----------------------------------------------------------------- 探针 / probes
 
-# Shared with the probe operations: they are instantiated by the registry, so the
-# evidence a case wants has to live beside them rather than inside one instance.
+# 与探针操作共用：它们由注册表实例化，所以用例要的证据不能存在某个实例里，只能放在旁边。
+# Shared with the probe operations: they are instantiated by the registry, so the evidence a case
+# wants has to live beside them rather than inside one instance.
 GATES: dict[str, Any] = {}
 FINALIZE_CANCEL: dict[str, Any] = {}
 
@@ -267,12 +303,16 @@ class SlowProbe(
     BaseQuery[SlowParams, SlowResult],
     BackgroundOperationMixin[SlowParams, SlowResult, SlowSnapshot, SlowWork],
 ):
-    """A background query that stays alive exactly as long as a case needs.
+    """一个活多久由用例决定的背景查询。
 
-    ``gate`` is the acceptance-only entry stop: the worker blocks before doing any
-    work, which is how "QGIS holds the task but it has not run" is reproducible
-    (AT-08B).  ``report_progress=False`` keeps the record in ``SCHEDULED`` until it
-    is cancelled, because PRD 8.2 says the first progress report is what moves it.
+    ``gate`` 只给验收用的入口闸：worker 在做任何事之前先阻塞，这样才能复现“QGIS 拿着任务但它还没
+    跑”。``report_progress=False`` 让记录停在 ``SCHEDULED`` 直到被取消，因为把记录推走的是第一次
+    进度上报。
+
+    A background query that stays alive exactly as long as a case needs.  ``gate`` is the
+    acceptance-only entry stop: the worker blocks before doing any work, which is how "QGIS holds
+    the task but it has not run" is reproducible.  ``report_progress=False`` keeps the record in
+    ``SCHEDULED`` until it is cancelled, because the first progress report is what moves it.
     """
 
     name = "probe.slow"
@@ -321,7 +361,7 @@ class BoomProbe(
     BaseQuery[EmptyParams, LabelResult],
     BackgroundOperationMixin[EmptyParams, LabelResult, str, str],
 ):
-    """A worker that raises: PRD 12.2 AT-07's shape."""
+    """一个会抛异常的 worker：执行失败的那种形状。"""
 
     name = "probe.boom"
     description = "Raise inside the worker thread on purpose"
@@ -344,10 +384,12 @@ class FinalizeCancelProbe(
     BaseQuery[EmptyParams, LabelResult],
     BackgroundOperationMixin[EmptyParams, LabelResult, str, str],
 ):
-    """A background query that asks to be cancelled while it is being finalised.
+    """一个在收尾过程中要求取消自己的背景查询。
 
-    ``finalize_main`` runs inside the ``FINALIZING`` window, which no caller outside
-    the engine can otherwise reach (PRD 12.2 AT-10).
+    ``finalize_main`` 跑在 ``FINALIZING`` 窗口里，引擎之外没有别的办法进到那里。
+
+    A background query that asks to be cancelled while it is being finalised.  ``finalize_main``
+    runs inside the ``FINALIZING`` window, which no caller outside the engine can otherwise reach.
     """
 
     name = "probe.finalize_cancel"
@@ -373,7 +415,7 @@ class BadFinalizeProbe(
     BaseQuery[EmptyParams, LabelResult],
     BackgroundOperationMixin[EmptyParams, LabelResult, str, str],
 ):
-    """A ``finalize_main`` that raises (PRD 12.2 AT-23)."""
+    """会抛异常的 ``finalize_main``。"""
 
     name = "probe.bad_finalize"
     description = "Raise while finalising on the main thread"
@@ -396,7 +438,7 @@ class BadOutputProbe(
     BaseQuery[EmptyParams, LabelResult],
     BackgroundOperationMixin[EmptyParams, LabelResult, str, object],
 ):
-    """A ``finalize_main`` whose output does not match the declared model."""
+    """输出与声明的模型不符的 ``finalize_main``。"""
 
     name = "probe.bad_output"
     description = "Return an output the declared model refuses"
@@ -412,14 +454,16 @@ class BadOutputProbe(
     def finalize_main(
         self, ctx: OperationContext, request: EmptyParams, result: object
     ) -> LabelResult:
-        return result  # pyright: ignore[reportReturnType] - the refusal is the case
+        return result  # pyright: ignore[reportReturnType] 拒绝即目的 / the refusal is the point
 
 
 class SlowSum(LayerSumNumericField):
-    """The real field sum, slowed down so its dependent layer can be removed.
+    """真实的字段求和，只是被放慢，方便在它跑着时删掉依赖图层。
 
-    ``prepare_main``, ``finalize_main`` and ``dependent_layer_ids`` are the real
-    ones; only the worker is held open (PRD 8.4 / AT-12).
+    ``prepare_main``、``finalize_main`` 与 ``dependent_layer_ids`` 都是真的，只有 worker 被按住。
+
+    The real field sum, slowed down so its dependent layer can be removed.  ``prepare_main``,
+    ``finalize_main`` and ``dependent_layer_ids`` are the real ones; only the worker is held open.
     """
 
     name = "probe.slow_sum"
@@ -443,7 +487,10 @@ class DuplicateProjectInfo(
     BaseQuery[ProjectGetInfoParams, ProjectGetInfoResult],
     MainThreadOperationMixin[ProjectGetInfoParams, ProjectGetInfoResult],
 ):
-    """A second declaration of a name the build already registered (PRD 12.2 AT-01)."""
+    """重复声明一个已经注册过的名字，注册必须拒绝它。
+
+    A duplicate declaration of a registered name, which registration must refuse.
+    """
 
     name = "project.get_info"
     description = "A duplicate declaration, which registration must refuse"
@@ -459,14 +506,18 @@ class DuplicateProjectInfo(
 PROBES = (SlowProbe, BoomProbe, FinalizeCancelProbe, BadFinalizeProbe, BadOutputProbe, SlowSum)
 
 
-# ------------------------------------------------------------------------ the session
+# ------------------------------------------------------------- 会话 / the session
 
 
 class TaskWatch:
-    """What the plugin's own task manager reported, recorded on the side.
+    """插件自己的任务管理器报了些什么，记在旁边。
 
-    ``taskAdded``/``taskAboutToBeDeleted`` are the two moments the acceptance cases
-    need to prove a real ``QgsTask`` existed and was really deleted.
+    ``taskAdded``/``taskAboutToBeDeleted`` 是两个能证明真有一个 ``QgsTask`` 存在、并且真的被删掉的
+    时刻。
+
+    What the plugin's own task manager reported, recorded on the side.  ``taskAdded`` and
+    ``taskAboutToBeDeleted`` are the two moments that prove a real ``QgsTask`` existed and was
+    really deleted.
     """
 
     def __init__(self, manager: Any) -> None:
@@ -477,7 +528,10 @@ class TaskWatch:
 
 
 class Context:
-    """One loaded plugin session, and everything a case needs to look at it."""
+    """一个已加载的插件会话，以及用例要看的全部东西。
+
+    One loaded plugin session, and everything a case needs to look at it.
+    """
 
     def __init__(self, application: Any, fixtures: Any) -> None:
         self.app = application
@@ -487,7 +541,7 @@ class Context:
         self.probes: dict[str, Any] = {}
         self._probes_registered_for: Any = None
 
-    # -- lifecycle ---------------------------------------------------------
+    # -- 生命周期 / lifecycle ---------------------------------------------
 
     def load(self) -> Any:
         from qgis_agent_plugin import classFactory
@@ -504,7 +558,10 @@ class Context:
         flush_deferred(self.app)
 
     def register_probes(self) -> None:
-        """Register the probe operations into the current session, once."""
+        """把探针操作注册进当前会话，只注册一次。
+
+        Register the probe operations into the current session, once.
+        """
 
         if self._probes_registered_for is self.plugin:
             return
@@ -516,7 +573,7 @@ class Context:
             self.probes[probe.name] = probe
         self._probes_registered_for = self.plugin
 
-    # -- the session's parts ----------------------------------------------
+    # -- 会话的各个部件 / the session's parts ----------------------------
 
     @property
     def engine(self) -> Any:
@@ -547,7 +604,7 @@ class Context:
     def watch_tasks(self) -> TaskWatch:
         return TaskWatch(self.manager)
 
-    # -- calls -------------------------------------------------------------
+    # -- 调用 / calls ----------------------------------------------------
 
     def run(self, name: str, arguments: dict[str, Any] | None = None) -> ExecutionRecord:
         return self.engine.run_sync(name, arguments if arguments is not None else {})
@@ -556,7 +613,7 @@ class Context:
         return self.engine.submit(name, arguments if arguments is not None else {})
 
     def add_layer(self, source: Path | str, name: str, **extra: Any) -> str:
-        """A vector layer added through the real operation, returning its id."""
+        """经真实操作加一个矢量图层，返回它的 id。"""
 
         record = self.run(
             "layer.add",
@@ -584,7 +641,7 @@ class Context:
         return self.record(execution_id)
 
     def trace(self, execution_id: str, *, timeout: float = 30.0) -> list[str]:
-        """The statuses one execution went through, as the store reported them."""
+        """一个执行经历过的状态序列，以 store 报告的样子为准。"""
 
         statuses = [str(self.status(execution_id))]
         deadline = time.monotonic() + timeout

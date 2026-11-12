@@ -1,9 +1,12 @@
-"""The plugin package must load in an interpreter that has no QGIS and no Qt.
+"""插件包必须能在一个没有 QGIS、也没有 Qt 的解释器里导入成功。
 
-The contract layer, the operations and the plugin entry are imported in a fresh
-process, so the guard proves the rule instead of accidentally relying on a QGIS
-import another test already made.  The plugin is also what QGIS loads by name,
-which is why the entry point is checked here rather than in a unit test.
+契约层、操作和插件入口都在一个全新进程里导入，所以守卫证明的是这条规则本身，而不是恰好依赖了别的
+测试已经做过的 QGIS 导入。QGIS 按名字加载的也正是这个包，所以入口在这里查，而不放在单元测试里。
+
+The plugin package must load in an interpreter that has no QGIS and no Qt.  The contract layer,
+the operations and the plugin entry are imported in a fresh process, so the guard proves the
+rule instead of accidentally relying on a QGIS import another test already made.  The plugin is
+also what QGIS loads by name, which is why the entry point is checked here, not in a unit test.
 """
 
 from __future__ import annotations
