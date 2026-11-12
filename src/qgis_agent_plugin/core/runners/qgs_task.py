@@ -1,8 +1,29 @@
-"""Background operations as ``QgsTask``s: two at a time, cancellable, never raising.
+"""后台操作就是 ``QgsTask``：并发受限、可取消、绝不抛异常。
+
+引擎在 ``submit`` 之后一轮事件循环，把放行的后台调用交给这个适配器。
+从这里开始，适配器负责引擎不能碰的部分：主线程上的 ``prepare_main``、
+``QgsTaskManager`` 的提交、后台线程，以及回到主线程的完成回调。
+
+三条规则决定了这段代码的形状。状态只从主线程写，所以后台线程用
+``QgsTask.setProgress`` 报进度，适配器再从管理器的 ``progressChanged`` 信号读回来，
+Qt 会在主线程投递该信号；存储每 100 毫秒最多写一次，任务结束前的最后一个值例外。
+任何东西都不许抛进 Qt 槽或 C++ 任务框架，所以后台线程的异常被收下来当诊断，
+适配器的每个 Qt 入口都加了守卫，包括投出去的排空回调。还有，``QgsTask`` 从不被保留：
+任务一结束 QGIS 就删掉它的 C++ 部分，所以只在它活着时记住任务 id，
+它身上没有任何东西活进记录里。
+
+一次完成释放出来的槽位在一个事件循环轮次之后才补上，走的是引擎用的同一个投递函数。
+在另一个任务的 ``finished()`` 回调里提交任务，正是 3.44.13 有时接受却从不运行的情形：
+任务一直停在 ``Queued``，``finished()`` 永远不来，这个槽位整个会话就丢了。
+投出去的排空会重新读槽位数和每个等待中的记录，所以这期间到达的取消或工程换代仍然优先。
+
+QGIS 在 ``_build_task_class`` 内部导入，这使本模块和 core 其余部分一样能在裸解释器里导入。
+
+Background operations as ``QgsTask``s: two at a time, cancellable, never raising.
 
 The engine hands an accepted background call to this adapter one event-loop turn
-after ``submit`` (PRD 6.5).  From there the adapter owns the parts the engine may
-not touch: ``prepare_main`` on the main thread, the ``QgsTaskManager`` submission,
+after ``submit``.  From there the adapter owns the parts the engine may not
+touch: ``prepare_main`` on the main thread, the ``QgsTaskManager`` submission,
 the worker thread, and the completion callback back on the main thread.
 
 Three rules shape the code.  A status is written from the main thread only, so a
@@ -18,7 +39,7 @@ is held while it lives and nothing of it survives into the record.
 A slot freed by a completion is filled one event-loop turn later, through the same
 poster the engine uses.  Submitting a task from inside another task's ``finished()``
 callback is what 3.44.13 sometimes takes without ever running it: the task stays
-``Queued``, ``finished()`` never comes, and the slot is lost for the session (A8 #1).
+``Queued``, ``finished()`` never comes, and the slot is lost for the session.
 The posted drain re-reads the slot count and every waiting record before it starts
 anything, so a cancel or a project generation that arrived in between still wins.
 
@@ -57,18 +78,25 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# How often a running task may rewrite its execution record (PRD 8.4).  The value
-# reported last before the task ends is written regardless: a throttled drop there
-# would leave a finished record short of what the worker actually reached.
+# 运行中的任务最多每 0.1 秒改写一次记录。结束前的最后一个值无论如何都会写：
+# 在那里节流会让记录落后于后台真正到达的位置。
+# How often a running task may rewrite its execution record.  The value reported last before
+# the task ends is written regardless: a throttled drop there would leave a finished record
+# short of what the worker actually reached.
 PROGRESS_INTERVAL_SECONDS = 0.1
 
 
 class OperationRun:
-    """What one worker produced, kept apart from the ``QgsTask`` that carried it.
+    """一次后台运行产出的东西，与承载它的 ``QgsTask`` 分开保存。
+
+    ``run`` 从不抛异常：逸进 C++ 任务框架的异常会让 QGIS 中止，而不是让一次执行失败，
+    所以它被收下来当诊断，任务报告失败。
+
+    What one worker produced, kept apart from the ``QgsTask`` that carried it.
 
     ``run`` never raises: an exception escaping into the C++ task framework aborts
     QGIS instead of failing one execution, so it is kept as a diagnostic and the
-    task reports failure (PRD 8.4, 11.3, AT-07).
+    task reports failure.
     """
 
     def __init__(self, operation: BaseOperation, snapshot: Any) -> None:
@@ -90,7 +118,10 @@ class OperationRun:
 
 
 class _TaskControl:
-    """The worker's whole view of its execution: a cancel flag and progress."""
+    """后台线程对这次执行的全部视野：一个取消标志和进度。
+
+    The worker's whole view of its execution: a cancel flag and progress.
+    """
 
     def __init__(self, task: Any) -> None:
         self._task = task
@@ -99,13 +130,19 @@ class _TaskControl:
         return bool(self._task.isCanceled())
 
     def set_progress(self, value: float) -> None:
-        # The protocol grants 0-100; clamping is the adapter's job (PRD 6.2).
+        # 协议只给 0-100，夹取是适配器的事。
+        # The protocol grants 0-100; clamping is the adapter's job.
         self._task.setProgress(max(0.0, min(100.0, float(value))))
 
 
 @dataclass
 class _Submission:
-    """One accepted background call: what it needs to run, and where it stands.
+    """一次已接受的后台调用：跑起来需要什么，以及它现在到哪了。
+
+    进度字段放在这里而不是各开一张表，这样关于一次执行的三个事实不会彼此漂移：
+    ``progress_written`` 是上次写记录的时刻，``progress_pending`` 是区间内被留下的最新值。
+
+    One accepted background call: what it needs to run, and where it stands.
 
     The progress fields belong here rather than in maps of their own, so the three
     facts about an execution cannot drift apart: ``progress_written`` is when the
@@ -123,7 +160,10 @@ class _Submission:
 
 
 class OperationTaskRunner:
-    """Submit background operations to a ``QgsTaskManager``, two at a time (PRD 8.4, 8.5)."""
+    """把后台操作提交给 ``QgsTaskManager``，并发上限取自配置。
+
+    Submit background operations to a ``QgsTaskManager``, up to the configured cap.
+    """
 
     def __init__(
         self,
@@ -137,8 +177,10 @@ class OperationTaskRunner:
         self._clock = clock or time.monotonic
         self._post = post or _post_to_event_queue
         self._manager = task_manager
-        # Active tasks by execution id, and the calls still waiting for a slot in
-        # submission order.  Both are emptied as work finishes, so neither is history.
+        # 活跃任务按执行 id 索引，等待槽位的调用按提交顺序排队。
+        # 工作一结束两边都会空，所以它们都不是历史。
+        # Active tasks by execution id, and the calls still waiting for a slot in submission
+        # order.  Both are emptied as work finishes, so neither is history.
         self._active: dict[str, _Submission] = {}
         self._waiting: deque[_Submission] = deque()
         task_manager.progressChanged.connect(self._progress_reported)
@@ -150,17 +192,26 @@ class OperationTaskRunner:
         operation: BaseOperation,
         request: BaseModel,
     ) -> None:
-        """The engine's seam: one accepted background call, still ``QUEUED``."""
+        """引擎的接缝：一次已接受的后台调用，记录仍是 ``QUEUED``。
+
+        The engine's seam: one accepted background call, still ``QUEUED``.
+        """
 
         submission = _Submission(engine, record.execution_id, operation, request)
         if len(self._active) >= engine._settings.max_active_background:
-            # The call keeps its QUEUED record until a slot frees (PRD 8.5, AT-08C).
+            # 调用保留它的 QUEUED 记录，直到有槽位空出来。
+            # The call keeps its QUEUED record until a slot frees.
             self._waiting.append(submission)
             return
         self._start(submission)
 
     def cancel(self, engine: OperationEngine, execution_id: str) -> None:
-        """Ask one task to stop, or drop one call still waiting for a slot.
+        """请一个任务停下，或者丢掉一个还在等槽位的调用。
+
+        绝不调 ``QgsTaskManager.cancelAll()``：那是整个 QGIS 会话的队列，
+        不是这个插件自己的任务。
+
+        Ask one task to stop, or drop one call still waiting for a slot.
 
         Never ``QgsTaskManager.cancelAll()``: that is the whole QGIS session's queue,
         not this plugin's own tasks.
@@ -168,8 +219,10 @@ class OperationTaskRunner:
 
         submission = self._active.get(execution_id)
         if submission is None:
-            # A call still in the waiting deque has no task to ask: removing its entry
-            # is what keeps the deque from growing on every submit-and-cancel.
+            # 还在等待队列里的调用没有任务可请：删掉它的条目，
+            # 才不会让队列在每次提交加取消之后越来越长。
+            # A call still in the waiting deque has no task to ask: removing its entry is what
+            # keeps the deque from growing on every submit-and-cancel.
             for waiting in tuple(self._waiting):
                 if waiting.execution_id == execution_id:
                     self._waiting.remove(waiting)
@@ -185,14 +238,22 @@ class OperationTaskRunner:
     def task_finished(
         self, execution_id: str, run: OperationRun, task: Any, succeeded: bool
     ) -> None:
-        """The main-thread completion handler for one task (PRD 8.4).
+        """一个任务在主线程上的完成处理器。
+
+        ``task`` 只在这次调用期间活着，永不被保留：QGIS 在任务一结束时就删掉它的
+        C++ 部分。这里无论出什么错，槽位都会被释放，记录也不会停在活跃状态。
+
+        排空是投递出去的，不在这里调用：在这个回调里提交任务，正是 3.44.13 可能接受
+        却永不运行的那一种。
+
+        The main-thread completion handler for one task.
 
         ``task`` is alive for the length of this call and is never kept: QGIS
         deletes its C++ side as soon as the task ends.  Whatever goes wrong in
-        here, the slot is released and the record does not stay live (PRD 12.3).
+        here, the slot is released and the record does not stay live.
 
         The drain is posted, never called here: a submission made inside this
-        callback is one 3.44.13 may accept and never run (A8 #1).
+        callback is one 3.44.13 may accept and never run.
         """
 
         submission = self._active.pop(execution_id, None)
@@ -203,7 +264,7 @@ class OperationTaskRunner:
             return
         try:
             self._complete(submission, run, task, succeeded)
-        except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 8.4, 11.3)
+        except Exception:  # noqa: BLE001 - a Qt slot may not raise
             _LOGGER.exception("completion of %s failed", execution_id)
             self._abandon(submission, "the completion of this execution failed")
         finally:
@@ -219,23 +280,28 @@ class OperationTaskRunner:
         pending = submission.progress_pending
         submission.progress_pending = None
         if pending is not None and record.status not in TERMINAL_STATUSES:
+            # 后台线程报告的最后一个进度，即使在节流区间内也会被写。
             # The last progress a worker reported is written even inside the interval.
             record = store.transition(execution_id, progress=pending)
 
         if run.error is not None:
-            # A real failure outranks a cancel request (PRD 8.2: CANCEL_REQUESTED -> FAILED).
+            # 真正的失败优先于取消请求（CANCEL_REQUESTED -> FAILED）。
+            # A real failure outranks a cancel request (CANCEL_REQUESTED -> FAILED).
             self._running(store, execution_id, record)
             if isinstance(run.error, FrameworkError):
-                # A worker's own refusal keeps its code: the field sum refuses a total
-                # that overflowed to Infinity (A6 #4) and the caller has to see that
-                # code, not INTERNAL_ERROR.
+                # 后台自己的拒绝保留错误码：字段求和会拒绝溢出成 Infinity 的合计，
+                # 调用方要看到的是这个码，而不是 INTERNAL_ERROR。
+                # A worker's own refusal keeps its code: the field sum refuses a total that
+                # overflowed to Infinity, and the caller has to see that code, not INTERNAL_ERROR.
                 self._fail(store, execution_id, run.error.code, run.error.message)
             else:
                 self._fail(store, execution_id, INTERNAL_ERROR, _unexpected(run.error))
         elif cancelled:
             if record.status in (ExecutionStatus.SCHEDULED, ExecutionStatus.RUNNING):
-                # QGIS cancels a task on its own when its dependent layer goes away,
-                # and neither SCHEDULED nor RUNNING reaches CANCELLED directly (PRD 8.2).
+                # 依赖图层消失时 QGIS 会自己取消任务，
+                # 而 SCHEDULED 与 RUNNING 都不能直接到 CANCELLED。
+                # QGIS cancels a task on its own when its dependent layer goes away, and neither
+                # SCHEDULED nor RUNNING reaches CANCELLED directly.
                 store.transition(execution_id, ExecutionStatus.CANCEL_REQUESTED)
             store.transition(execution_id, ExecutionStatus.CANCELLED)
         elif not succeeded:
@@ -245,10 +311,15 @@ class OperationTaskRunner:
             self._finish_results(submission, self._running(store, execution_id, record), run.result)
 
     def _abandon(self, submission: _Submission, message: str) -> None:
-        """Settle a record whose completion broke (PRD 12.3).
+        """把一条完成过程出错的记录收尾。
+
+        任务已经没了，还停在活跃状态的记录再也动不了；
+        每个非终态都有一条到 ``FAILED`` 的边。
+
+        Settle a record whose completion broke.
 
         The task is gone, so a record still in a live state could never be moved
-        again; every non-terminal status has an edge to FAILED (PRD 8.2).
+        again; every non-terminal status has an edge to FAILED.
         """
 
         store = submission.engine._store
@@ -264,13 +335,17 @@ class OperationTaskRunner:
             _LOGGER.exception("could not settle %s", submission.execution_id)
 
     def _start(self, submission: _Submission) -> None:
-        """Take one QUEUED call to SCHEDULED, or to the record that says why not."""
+        """把一次 ``QUEUED`` 调用带到 ``SCHEDULED``，或者带到说明为什么不能的记录。
+
+        Take one QUEUED call to SCHEDULED, or to the record that says why not.
+        """
 
         engine = submission.engine
         execution_id = submission.execution_id
         operation = submission.operation
         store = engine._store
         if store.get(execution_id).project_epoch != engine._lifecycle.current_epoch:
+            # 旧工程下接受的调用，现在连快照都不许读。
             # Accepted under the old project: not even a snapshot may be read now.
             store.transition(execution_id, ExecutionStatus.CANCELLED)
             return
@@ -302,6 +377,7 @@ class OperationTaskRunner:
             _LOGGER.exception("%s: addTask raised", operation.name)
             task_id = 0
         if not task_id:
+            # 管理器没有接手，所以任务对象归我们自己丢掉。
             # The manager took no ownership, so the task object is ours to drop.
             self._fail(
                 store,
@@ -315,22 +391,32 @@ class OperationTaskRunner:
         store.transition(execution_id, ExecutionStatus.SCHEDULED)
 
     def _post_drain(self) -> None:
-        """Post the drain behind the guard every other Qt slot here has.
+        """在守卫之后投递排空，和这里其他 Qt 槽一样。
+
+        排空现在是自己跑的独立回调，所以过去会接住它异常的 ``finished`` 槽
+        不在它的栈上了。
+
+        Post the drain behind the guard every other Qt slot here has.
 
         The drain runs as a callback of its own now, so the ``finished`` slot that
-        used to catch its exceptions is no longer on its stack (A9).
+        used to catch its exceptions is no longer on its stack.
         """
 
         def drain() -> None:
             try:
                 self._drain()
-            except Exception:  # noqa: BLE001 - a Qt slot may not raise (PRD 8.4, 11.3)
+            except Exception:  # noqa: BLE001 - a Qt slot may not raise
                 _LOGGER.exception("the background queue could not be drained")
 
         self._post(drain)
 
     def _drain(self) -> None:
-        """Start waiting calls while a slot is free, in submission order (PRD 8.5).
+        """有空槽位时按提交顺序启动等待中的调用。
+
+        在释放槽位的那次完成之后一轮事件循环运行。槽位数和每条记录都是在这里读的，
+        而不是投递时读，所以这期间被取消的调用会被丢掉，代数已经变了的工程会被拒绝。
+
+        Start waiting calls while a slot is free, in submission order.
 
         Runs one event-loop turn after the completion that freed the slot.  The slot
         count and each record are read here, not at posting time, so a call cancelled
@@ -352,18 +438,24 @@ class OperationTaskRunner:
             except Exception as error:  # noqa: BLE001 - a drain defect may not stop the turn
                 _LOGGER.exception("%s: the drain could not start it", head.execution_id)
                 if head.execution_id not in self._active:
-                    # Nothing owns the popped call, so settling it is this loop's job;
-                    # an active entry is released by the completion of its own task.
+                    # 没人接手这个被弹出的调用，所以收尾是这个循环的责任；
+                    # 活跃条目由它自己任务的完成来释放。
+                    # Nothing owns the popped call, so settling it is this loop's job; an active
+                    # entry is released by the completion of its own task.
                     self._abandon(head, _unexpected(error))
 
     def _finish_results(self, submission: _Submission, record: Any, output: Any) -> None:
-        """Validate the project generation, finalise, and write the result (PRD 9.2)."""
+        """校验工程代数、收尾、然后写入结果。
+
+        Validate the project generation, finalise, and write the result.
+        """
 
         engine = submission.engine
         store = engine._store
         execution_id = submission.execution_id
         if record.project_epoch != engine._lifecycle.current_epoch:
-            # An old generation's result never reaches the new project (PRD 9.1, AT-11).
+            # 旧一代的结果永远不会到达新工程。
+            # An old generation's result never reaches the new project.
             self._fail(
                 store,
                 execution_id,
@@ -387,7 +479,10 @@ class OperationTaskRunner:
         store.transition(execution_id, ExecutionStatus.SUCCEEDED, result=serialised, progress=100)
 
     def _progress_reported(self, task_id: int, progress: float) -> None:
-        """The manager's progress signal, already delivered on the main thread."""
+        """任务管理器的进度信号，投递时已经在主线程上。
+
+        The manager's progress signal, already delivered on the main thread.
+        """
 
         try:
             self._record_progress(task_id, progress)
@@ -396,9 +491,11 @@ class OperationTaskRunner:
 
     def _record_progress(self, task_id: int, progress: float) -> None:
         if progress >= 100.0:
-            # Only the success transition may write 100 (PRD 6.6): QGIS reports 100 for
-            # every task whose run() returned True, cancelled and failed ones included,
-            # and nothing but SUCCEEDED can prove the work really finished.
+            # 只有成功那一跳可以写 100：QGIS 对 run() 返回 True 的每个任务都报 100，
+            # 被取消和被失败的也算，而只有 SUCCEEDED 能证明工作真的完成了。
+            # Only the success transition may write 100: QGIS reports 100 for every task whose
+            # run() returned True, cancelled and failed ones included, and nothing but SUCCEEDED
+            # can prove the work really finished.
             return
         submission = self._submission_for(task_id)
         if submission is None:
@@ -406,6 +503,7 @@ class OperationTaskRunner:
         now = self._clock()
         written = submission.progress_written
         if written is not None and now - written < PROGRESS_INTERVAL_SECONDS:
+            # 每个区间只写一次；最新的值留到最后一次刷写时再写。
             # One write per interval; the newest value waits for the flush at the end.
             submission.progress_pending = progress
             return
@@ -415,11 +513,13 @@ class OperationTaskRunner:
         if record.status in TERMINAL_STATUSES:
             return
         if record.status is ExecutionStatus.SCHEDULED:
-            # The first report is what tells the main thread the task really started
-            # (PRD 8.2: SCHEDULED -> RUNNING), since ``run`` is on another thread.
+            # 第一次报告才告诉主线程任务真的开始了，因为 ``run`` 在另一个线程上。
+            # The first report is what tells the main thread the task really started, since
+            # ``run`` is on another thread.
             record = store.transition(execution_id, ExecutionStatus.RUNNING)
-        # A value kept back inside the window is older than this one, so writing it
-        # at the end would move the record's progress backwards.
+        # 区间内留下的值比这次旧，结束时再写它会让进度倒退。
+        # A value kept back inside the window is older than this one, so writing it at the end
+        # would move the record's progress backwards.
         submission.progress_pending = None
         store.transition(execution_id, progress=progress)
         submission.progress_written = now
@@ -432,7 +532,10 @@ class OperationTaskRunner:
 
     @staticmethod
     def _running(store: ExecutionStore, execution_id: str, record: Any) -> Any:
-        """Move SCHEDULED to RUNNING before anything else may be written (PRD 8.2)."""
+        """在别的东西写之前，先把 ``SCHEDULED`` 移到 ``RUNNING``。
+
+        Move SCHEDULED to RUNNING before anything else may be written.
+        """
 
         if record.status is ExecutionStatus.SCHEDULED:
             return store.transition(execution_id, ExecutionStatus.RUNNING)
@@ -446,11 +549,16 @@ class OperationTaskRunner:
 
 
 def _unexpected(error: BaseException) -> str:
-    """A caller-safe message: the type only, never the exception's own text.
+    """对调用方安全的消息：只给类型，不给异常自身的文本。
 
-    The engine writes the same string for its own paths (PRD 11.1, 11.3); it is
-    repeated here rather than imported because it is a private name of another
-    module, and the rule is one line.
+    引擎对自己的路径写同样的字符串；这里重复一份而不导入，是因为它是另一个模块的
+    私有名字，而这条规则只有一行。
+
+    A caller-safe message: the type only, never the exception's own text.
+
+    The engine writes the same string for its own paths; it is repeated here rather
+    than imported because it is a private name of another module, and the rule is
+    one line.
     """
 
     return f"{type(error).__name__}: unexpected failure"
@@ -459,7 +567,12 @@ def _unexpected(error: BaseException) -> str:
 def _dependent_layers(
     engine: OperationEngine, operation: BaseOperation, request: BaseModel
 ) -> list[Any]:
-    """The layers a task depends on, so QGIS cancels it when one is removed (PRD 8.4).
+    """任务依赖的图层，好让 QGIS 在图层被移除时取消它。
+
+    操作通过声明 ``dependent_layer_ids(request)`` 来选择加入；三个后台阶段是冻结的
+    协议，所以依赖是一件可选附加，而不是第四个阶段。
+
+    The layers a task depends on, so QGIS cancels it when one is removed.
 
     An operation opts in by declaring ``dependent_layer_ids(request)``; the three
     background stages are the frozen protocol, so the dependency is an optional
@@ -477,7 +590,10 @@ _TASK_CLASS: type | None = None
 
 
 def task_class() -> type:
-    """The ``QgsTask`` subclass, built on first use so this module imports without QGIS."""
+    """``QgsTask`` 子类，第一次使用时才构建，本模块因此不需要 QGIS 就能导入。
+
+    The ``QgsTask`` subclass, built on first use so this module imports without QGIS.
+    """
 
     global _TASK_CLASS
     if _TASK_CLASS is None:
@@ -489,7 +605,10 @@ def _build_task_class() -> type:
     from qgis.core import QgsTask
 
     class OperationTask(QgsTask):
-        """One background operation as a task QGIS owns from submission on (PRD 8.4)."""
+        """一次后台操作，作为一个从提交起就归 QGIS 所有的任务。
+
+        One background operation as a task QGIS owns from submission on.
+        """
 
         def __init__(
             self,
@@ -507,8 +626,10 @@ def _build_task_class() -> type:
             return self._run.run(_TaskControl(self))
 
         def finished(self, result: bool) -> None:
-            # Always the main thread, always inside a Qt slot: an exception here would
-            # abort QGIS instead of failing one execution (PRD 8.4, 11.3).
+            # 永远在主线程、永远在 Qt 槽里：这里的异常会让 QGIS 中止，
+            # 而不是让一次执行失败。
+            # Always the main thread, always inside a Qt slot: an exception here would abort QGIS
+            # instead of failing one execution.
             try:
                 self._runner.task_finished(self._execution_id, self._run, self, bool(result))
             except Exception:  # noqa: BLE001 - a Qt slot may not raise
