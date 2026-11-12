@@ -27,6 +27,10 @@ from qgis_agent_plugin.core.models import (
 )
 
 
+class LooseParams(BaseModel):
+    """A plain model: it does not reject an undeclared key, so no operation may take one."""
+
+
 class NoParams(Params):
     """An operation with no parameters still refuses an unknown key."""
 
@@ -216,6 +220,12 @@ def test_a_non_model_input_is_refused() -> None:
     operation = MainQuery()
     operation.input_model = dict  # type: ignore
     refusal(operation)
+
+
+def test_an_input_model_that_is_not_params_is_refused() -> None:
+    operation = MainQuery()
+    operation.input_model = LooseParams  # type: ignore[assignment]
+    assert "Params" in refusal(operation).message
 
 
 def test_a_non_boolean_destructive_flag_is_refused() -> None:

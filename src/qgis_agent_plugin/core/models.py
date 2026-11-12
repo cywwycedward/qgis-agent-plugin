@@ -15,12 +15,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictStr,
     field_validator,
@@ -146,7 +147,7 @@ class ErrorDetail(BaseModel):
 
     code: StrictStr
     message: StrictStr
-    details: dict[str, Any] | None = None
+    details: dict[str, JsonValue] | None = None
 
     @field_validator("code")
     @classmethod
@@ -163,7 +164,7 @@ class CancelReceipt(BaseModel):
     execution_id: StrictStr
     accepted: StrictBool
     status: ExecutionStatus
-    reason: StrictStr | None = None
+    reason: Literal["ALREADY_TERMINAL", "NOT_INTERRUPTIBLE", "FINALIZING"] | None = None
 
 
 class ExecutionRecord(BaseModel):
@@ -232,7 +233,9 @@ class Params(BaseModel):
     Every input model inherits this so the rule cannot drift between operations,
     and an operation with no parameters gets an empty model that rejects
     anything.  Fields opt into ``StrictBool``/``StrictStr`` themselves, so a
-    string ``"true"`` cannot pass for a boolean (PRD 6.1).
+    string ``"true"`` cannot pass for a boolean (PRD 6.1).  The operation this
+    model is handed to is a caller that may have built the model itself, so an
+    instance is revalidated instead of being taken on trust.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")

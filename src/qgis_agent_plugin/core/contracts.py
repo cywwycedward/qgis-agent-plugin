@@ -25,6 +25,7 @@ from .models import (
     ExecutionStrategy,
     FrameworkError,
     OperationKind,
+    Params,
 )
 
 __all__ = [
@@ -148,6 +149,11 @@ def validate_operation(operation: object) -> None:
         model = getattr(operation, attribute, None)
         if not (isinstance(model, type) and issubclass(model, BaseModel)):
             refuse(f"{attribute} must be a pydantic model")
+
+    # PRD 6.1: an input model that is not ``Params`` may accept an undeclared key,
+    # and the caller would then see it silently dropped instead of refused.
+    if not issubclass(operation.input_model, Params):
+        refuse("input_model must inherit Params")
 
     if not isinstance(operation.destructive, bool):
         refuse("destructive must be a boolean")
