@@ -65,6 +65,7 @@ from ..core.models import (
     STALE_PROJECT,
     FrameworkError,
     Params,
+    Result,
 )
 from ..core.security import resolve_path
 
@@ -89,9 +90,7 @@ class LayerAddParams(Params):
         return self
 
 
-class LayerAddResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerAddResult(Result):
     layer_id: StrictStr
     name: StrictStr
     kind: LayerKind
@@ -117,9 +116,7 @@ class LayerListParams(Params):
     pass
 
 
-class LayerListResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerListResult(Result):
     layers: list[LayerSummary]
 
 
@@ -127,9 +124,7 @@ class LayerGetInfoParams(Params):
     layer_id: StrictStr = Field(min_length=1)
 
 
-class LayerGetInfoResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerGetInfoResult(Result):
     layer_id: StrictStr
     name: StrictStr
     kind: LayerSummaryKind
@@ -146,9 +141,7 @@ class LayerSetVisibilityParams(Params):
     visible: StrictBool
 
 
-class LayerSetVisibilityResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerSetVisibilityResult(Result):
     layer_id: StrictStr
     visible: StrictBool
     effective_visible: StrictBool
@@ -335,15 +328,13 @@ class SumNumericFieldParams(Params):
     field_name: StrictStr = Field(min_length=1)
 
 
-class SumNumericFieldResult(BaseModel):
+class SumNumericFieldResult(Result):
     """The sum of a snapshot, which is not the layer's value when the task ends.
 
     shortcut: the values are summed as float64, so a QInt64 field with values above
     2**53 loses precision in ``total``; add an integer path when an exact integer
     sum is needed.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     layer_id: StrictStr
     field_name: StrictStr
@@ -601,9 +592,7 @@ class LayerListStyleCategoriesParams(Params):
     layer_id: StrictStr = Field(min_length=1)
 
 
-class LayerListStyleCategoriesResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerListStyleCategoriesResult(Result):
     layer_id: StrictStr
     categories: list[StyleCategoryName]
 
@@ -613,9 +602,7 @@ class LayerGetQmlParams(Params):
     categories: Annotated[list[StyleCategoryName] | None, Field(min_length=1)] = None
 
 
-class LayerGetQmlResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerGetQmlResult(Result):
     layer_id: StrictStr
     qml: StrictStr
 
@@ -624,9 +611,7 @@ class LayerListAvailableRenderersParams(Params):
     layer_id: StrictStr = Field(min_length=1)
 
 
-class LayerListAvailableRenderersResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerListAvailableRenderersResult(Result):
     renderer_types: list[StrictStr]
 
 
@@ -634,9 +619,7 @@ class LayerGetRendererParams(Params):
     layer_id: StrictStr = Field(min_length=1)
 
 
-class LayerGetRendererResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerGetRendererResult(Result):
     layer_id: StrictStr
     renderer_type: StrictStr
 
@@ -988,9 +971,7 @@ class LayerSetRendererParams(Params):
     renderer: RendererConfig
 
 
-class LayerSetRendererResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class LayerSetRendererResult(Result):
     layer_id: StrictStr
     renderer_type: StrictStr
 

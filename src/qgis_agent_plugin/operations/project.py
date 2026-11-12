@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from xml.parsers import expat
 
-from pydantic import AfterValidator, BaseModel, Field, StrictBool, StrictStr
+from pydantic import AfterValidator, Field, StrictBool, StrictStr
 
 from ..core.contracts import (
     BaseCommand,
@@ -42,6 +42,7 @@ from ..core.models import (
     TARGET_EXISTS,
     FrameworkError,
     Params,
+    Result,
 )
 from ..core.security import resolve_path
 
@@ -143,7 +144,7 @@ class ProjectCreateParams(Params):
     discard_current: StrictBool = False
 
 
-class ProjectCreateResult(BaseModel):
+class ProjectCreateResult(Result):
     crs_authid: StrictStr
     file_path: StrictStr | None = None
     layer_count: int = 0
@@ -154,7 +155,7 @@ class ProjectOpenParams(Params):
     discard_current: StrictBool = False
 
 
-class ProjectOpenResult(BaseModel):
+class ProjectOpenResult(Result):
     file_path: StrictStr
     crs_authid: StrictStr
     layer_count: int
@@ -168,7 +169,7 @@ class ProjectSaveParams(Params):
     overwrite: StrictBool = False
 
 
-class ProjectSaveResult(BaseModel):
+class ProjectSaveResult(Result):
     file_path: StrictStr
     is_dirty: StrictBool
 
@@ -177,7 +178,7 @@ class ProjectGetInfoParams(Params):
     pass
 
 
-class ProjectGetInfoResult(BaseModel):
+class ProjectGetInfoResult(Result):
     file_path: StrictStr | None
     crs_authid: StrictStr
     is_dirty: StrictBool

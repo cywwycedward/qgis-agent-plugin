@@ -49,7 +49,7 @@ from ..core.contracts import (
     MainThreadOperationMixin,
     OperationContext,
 )
-from ..core.models import INTERNAL_ERROR, INVALID_INPUT, FrameworkError, Params
+from ..core.models import INTERNAL_ERROR, INVALID_INPUT, FrameworkError, Params, Result
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -167,9 +167,7 @@ class ProcessingListAlgorithmsParams(Params):
     """Empty on purpose: the current registry is the only input (PRD §3.1.1)."""
 
 
-class ProcessingListAlgorithmsResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ProcessingListAlgorithmsResult(Result):
     algorithms: list[AlgorithmSummary]
 
 
@@ -177,9 +175,7 @@ class ProcessingGetAlgorithmInfoParams(Params):
     algorithm_id: StrictStr = Field(min_length=1)
 
 
-class ProcessingGetAlgorithmInfoResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class ProcessingGetAlgorithmInfoResult(Result):
     algorithm: AlgorithmDetails
     parameters: list[AlgorithmParameter]
     outputs: list[AlgorithmOutput]
@@ -199,10 +195,8 @@ class ProcessingRunAlgorithmParams(Params):
         return _require_json(value)
 
 
-class ProcessingRunAlgorithmResult(BaseModel):
+class ProcessingRunAlgorithmResult(Result):
     """The id that ran, every output under its native key, and the run's messages."""
-
-    model_config = ConfigDict(extra="forbid")
 
     algorithm_id: StrictStr
     outputs: dict[str, Any]
