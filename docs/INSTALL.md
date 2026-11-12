@@ -46,21 +46,19 @@ npm run deploy:list    # 干跑，只列文件，不写盘
 npm run deploy         # 真部署
 ```
 
-实测（干跑，2026-11-07）：
+实测（干跑，本机；数字随 `src/` 的文件数变化，以命令输出为准）：
 
 ```text
-Source : ...\src\qgis_agent_plugin\
-Dest   : C:\Users\<user>\AppData\Roaming\QGIS\QGIS3\profiles\default\python\plugins\qgis-agent-plugin\
-Files : 18  Copied 18  Extras 68
+Dirs : 10 (10 skipped)   Files : 22 (22 copied)   Bytes : 248.2 k   Extras : 0
 deployed ... -> ...\qgis-agent-plugin
 restart QGIS; enable "QGIS Agent" under Plugins > Manage and Install Plugins if it is not enabled yet
 ```
 
 部署语义（脚本里定死，改脚本前先读它）：
 
-- 用 `robocopy /MIR` 做**镜像**：源里删掉的文件，目标里也会被删。干跑里那 68 个 `*EXTRA File`
-  是上一次部署留下的旧表面（`qgis_actions/`、`jobs.py`、`qgis_socket_bridge.py` 等），真部署会
-  一并清掉。
+- 用 `robocopy /MIR` 做**镜像**：源里删掉的文件，目标里也会被删；目标里多出来的文件会出现在
+  `Extras` 列，真部署时被清掉（早期部署在目标里留过 `qgis_actions/`、`jobs.py` 等 68 个旧表面，
+  现在的 `Extras` 是 0）。
 - 排除 `__pycache__`、`.ruff_cache`。
 - 目标目录如果是 junction/symlink，脚本直接报错退出，避免把源目录覆盖掉。
 - 部署不会重启 QGIS，也不会启用插件。
