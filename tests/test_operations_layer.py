@@ -1395,17 +1395,22 @@ def test_get_qml_exports_a_single_category(fake_qgis: FakeQgis, data_root: Path)
     assert layer.style_exports[0][1] == category_flag(fake_qgis, ("Symbology",))
 
 
-@pytest.mark.parametrize("categories", [[], ["Symbology", "Symbology"]])
-def test_get_qml_refuses_an_empty_or_repeating_category_list(
-    fake_qgis: FakeQgis, data_root: Path, categories: list[str]
-) -> None:
+def test_get_qml_params_refuse_an_empty_category_list() -> None:
+    """A named list must name something; omitted still means every applicable one."""
+
+    assert ops.LayerGetQmlParams(layer_id="roads").categories is None
+    with pytest.raises(ValidationError):
+        ops.LayerGetQmlParams.model_validate({"layer_id": "roads", "categories": []})
+
+
+def test_get_qml_refuses_a_repeating_category_list(fake_qgis: FakeQgis, data_root: Path) -> None:
     project = FakeProject()
     layer = style_layer(fake_qgis, project, "roads")
 
     code = refuse(
         ops.LayerGetQml(),
         make_context(project, data_root),
-        ops.LayerGetQmlParams(layer_id="roads", categories=categories),
+        ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology", "Symbology"]),
     )
     assert code == INVALID_INPUT
     assert layer.style_exports == []
@@ -2298,6 +2303,38 @@ def test_an_integer_at_the_fields_edge_is_stored_as_an_integer(
     assert layer.renderer_sets[0].categoryIndexForValue(value) == 0
 
 
+def test_two_integers_one_float_cannot_tell_apart_are_two_categories(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """Above 2**53 two int64 values share a float; the field still holds both."""
+
+    project = FakeProject()
+    layer = setter_layer(fake_qgis, project, "num", geometry=POLYGON)
+    layer.field_list = [FakeField("num", field_type=fake_qgis.QVariant.LongLong)]
+    shared = 2**53
+    neighbour = shared + 1
+
+    set_renderer(
+        make_context(project, data_root),
+        setter_payload(
+            "num",
+            {
+                "type": "categorizedSymbol",
+                "field": "num",
+                "categories": [
+                    {"value": shared, "label": "Shared", "symbol": FILL},
+                    {"value": neighbour, "label": "Neighbour", "symbol": FILL},
+                ],
+            },
+        ),
+    )
+
+    renderer = layer.renderer_sets[0]
+    assert [category.value for category in renderer.categories] == [shared, neighbour]
+    assert all(type(category.value) is int for category in renderer.categories)
+    assert renderer.categoryIndexForValue(neighbour) == 1
+
+
 def test_a_category_value_the_field_cannot_hold_is_refused(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
@@ -2541,6 +2578,13 @@ def test_ranges_may_share_an_endpoint() -> None:
 def test_a_range_needs_lower_below_upper() -> None:
     with pytest.raises(ValidationError):
         ops.RangeConfig.model_validate({"lower": 5, "upper": 5, "label": "A", "symbol": FILL})
+
+
+def test_a_range_label_may_be_empty() -> None:
+    """PRD v2 6.4 asks for a label string only; a legend entry without text is legal."""
+
+    config = ops.RangeConfig.model_validate({"lower": 0, "upper": 10, "label": "", "symbol": FILL})
+    assert config.label == ""
 
 
 @pytest.mark.parametrize(
