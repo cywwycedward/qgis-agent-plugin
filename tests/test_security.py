@@ -1,4 +1,7 @@
-"""Path policy: only absolute local files inside an allowed root are usable."""
+"""路径白名单：只有位于允许目录内的本地绝对路径可用。
+
+A path policy only accepts local absolute paths that resolve inside an allowed root.
+"""
 
 from __future__ import annotations
 
@@ -60,8 +63,10 @@ def test_a_directory_is_not_a_readable_file(tmp_path: Path) -> None:
 
 
 def test_a_directory_may_be_a_data_source(tmp_path: Path) -> None:
-    # An ESRI FileGDB is a directory; the data-source shape is what allows one.
-    # A read is always a regular file, so ``allow_directory`` says nothing there.
+    # FileGDB 本身是目录，所以只有数据源形态收目录；读取永远只收普通文件，那里
+    # ``allow_directory`` 不起作用
+    # a FileGDB is a directory, so only that shape admits one; a read always takes a regular
+    # file, where ``allow_directory`` does nothing
     root = data_root(tmp_path)
     source = root / "roads.gdb"
     source.mkdir()
@@ -72,9 +77,10 @@ def test_a_directory_may_be_a_data_source(tmp_path: Path) -> None:
 
 
 def test_a_data_source_whose_directory_is_gone_is_still_inside_the_root(tmp_path: Path) -> None:
-    # A2 #4's promise for the case where the directory itself moved away: the source
-    # is not there any more, but it is still a path inside the root (AT-18B), so the
-    # save shape's "the parent must exist" is not the question asked here.
+    # 目录本身搬走后源已不存在，但它仍是允许目录内的路径，所以不套用保存形态的
+    # 「父目录必须存在」
+    # the directory may have moved away, so the save shape's "the parent must exist" rule is
+    # not the question asked here
     root = data_root(tmp_path)
     source = root / "moved-away" / "roads.gpkg"
     assert resolve_path(str(source), [root], must_exist=False, allow_directory=True) == (
@@ -95,8 +101,9 @@ def test_a_data_source_whose_directory_is_gone_outside_the_root_is_refused(
 
 
 def test_a_data_source_shape_does_not_follow_a_link_out_of_the_root(tmp_path: Path) -> None:
-    # The non-strict resolve still follows what exists, so a source under a link that
-    # leaves the root cannot be vouched for just because its directory is gone.
+    # 非严格解析仍跟随已存在的部分，所以越界链接下的源不能因目录不存在而被放行
+    # the non-strict resolve still follows what exists, so a link out of the root cannot be
+    # vouched for
     root = data_root(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -112,8 +119,9 @@ def test_a_data_source_shape_does_not_follow_a_link_out_of_the_root(tmp_path: Pa
 def test_a_data_source_that_cannot_be_resolved_is_refused_not_an_internal_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # An unreadable source is an untrusted one; it may not escape as an exception the
-    # engine would report as its own defect.
+    # 解析不了的源即不可信的源，不能以异常逃出，让引擎把它当成自己的缺陷
+    # an unresolvable source is an untrusted one and may not escape as an exception the engine
+    # reports as its own
     root = data_root(tmp_path)
     original = Path.resolve
 
@@ -177,9 +185,11 @@ def test_network_and_virtual_paths_are_refused(raw: str, tmp_path: Path) -> None
 def test_a_network_path_is_refused_before_the_file_system_is_touched(
     raw: str, must_exist: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A UNC path reaches a host, so resolving it would open a connection with the
-    # operator's credentials (and block the main thread until it timed out).  The
-    # refusal has to come first, which is what failing ``resolve`` proves.
+    # UNC 通向远端主机：解析它会用凭据建连接并卡住主线程，所以必须先拒绝；
+    # ``resolve`` 失败即证拒绝发生在触碰之前
+    # a UNC path reaches a host, so resolving it opens a connection with the operator's
+    # credentials and blocks the main thread; failing ``resolve`` proves the refusal came before
+    # anything was touched
     def resolve(*args: object, **kwargs: object) -> Path:
         raise AssertionError("the path was resolved before it was refused")
 
@@ -230,7 +240,10 @@ def test_a_save_target_named_as_the_parent_is_refused(tmp_path: Path) -> None:
 
 
 def escape_link(root: Path, outside: Path) -> Path:
-    """Point a directory link inside ``root`` at ``outside``; skip where none can be made."""
+    """在 ``root`` 内造一个指向 ``outside`` 的目录链接；造不出来就跳过这条用例。
+
+    Point a directory link inside ``root`` at ``outside``; skip where none can be made.
+    """
 
     link = root / "link"
     try:
@@ -309,8 +322,9 @@ COUNT_KEYS = (
 @pytest.mark.parametrize("key", COUNT_KEYS)
 @pytest.mark.parametrize("value", [0, -1, "0", "-3"])
 def test_a_count_below_one_is_refused_and_names_the_key(key: str, value: object) -> None:
-    # A count of 0 has a silent failure mode: max_active_background=0 would leave
-    # every background call waiting for a slot that never frees.
+    # 计数为 0 是静默失败：后台名额永不释放，于是每个后台调用都等不到
+    # a count of 0 fails silently, because no background slot would ever free, leaving every
+    # call waiting for one
     with pytest.raises(RuntimeError) as caught:
         Settings.from_mapping({key: value})
     assert key in str(caught.value)
@@ -325,6 +339,7 @@ def test_a_count_that_is_not_a_number_names_the_key_and_the_value(key: str) -> N
 
 
 def test_a_count_of_one_is_accepted() -> None:
-    # The lower bound is inclusive: one background slot is a usable configuration.
+    # 下界是闭区间：只有一个后台名额也是一种可用配置
+    # the lower bound is inclusive: one background slot is a usable configuration too
     settings = Settings.from_mapping({"max_active_background": "1"})
     assert settings.max_active_background == 1

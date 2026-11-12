@@ -1,8 +1,12 @@
-"""The engine: a refused call leaves no record, an accepted one ends in a record.
+"""引擎：被拒的调用不留记录，被接受的调用最后都变成一条记录。
 
-The Qt event queue is stood in for by a list the test drains, which is also how the
-thread rule is checked; the last test starts a headless ``QgsApplication``, because
-``aboutToBeCleared`` only exists for real (AT-04, AT-09, AT-16, AT-18, AT-24, AT-26).
+Qt 事件队列用一个由测试抽干的列表顶替，线程规则也是这样验的；最后一条用例会起一个无界面的
+``QgsApplication``，因为 ``aboutToBeCleared`` 只有真的才存在。
+
+The engine: a refused call leaves no record, an accepted one ends in a record. The Qt event
+queue is stood in for by a list the test drains, which is also how the thread rule is
+checked; the last test starts a headless ``QgsApplication``, because ``aboutToBeCleared``
+only exists for real.
 """
 
 from __future__ import annotations
@@ -152,7 +156,10 @@ class Replacing(
     BaseQuery[ValueParams, ValueResult],
     MainThreadOperationMixin[ValueParams, ValueResult],
 ):
-    """A main-thread call that replaces the project while it is still running."""
+    """一个在主线程里跑、并顺手把工程替换掉的操作。
+
+    A main-thread call that replaces the project while it is still running.
+    """
 
     name = "test.replace"
     description = "trigger a project replacement from inside execute_main"
@@ -169,7 +176,10 @@ class Replacing(
 
 
 def no_adapter(*args: Any) -> None:
-    """Accept the background hand-off and do nothing: these tests only drive states."""
+    """接下后台交接但什么也不做：这些用例只驱动状态。
+
+    Accept the background hand-off and do nothing: these tests only drive states.
+    """
 
 
 class ExplodingParams(Params):
@@ -178,7 +188,8 @@ class ExplodingParams(Params):
     @field_validator("value")
     @classmethod
     def _explode(cls, value: str) -> str:
-        # Pydantic only wraps ValueError and AssertionError, so this escapes validation.
+        # Pydantic 只包 ValueError 与 AssertionError，所以这个异常会逃出校验
+        # pydantic only wraps ValueError and AssertionError, so this one escapes validation
         raise RuntimeError("validator exploded")
 
 
@@ -202,7 +213,8 @@ class RefusingParams(Params):
     @field_validator("value")
     @classmethod
     def _refuse(cls, value: str) -> str:
-        # An operation's own refusal must keep its code, not become INVALID_INPUT.
+        # 操作自己的拒绝要保留错误码，不能变成 INVALID_INPUT
+        # an operation's own refusal keeps its code, not INVALID_INPUT
         raise FrameworkError(PATH_NOT_ALLOWED, "value is not an allowed path")
 
 
@@ -221,7 +233,10 @@ class RefusingInput(
 
 
 class Queue:
-    """The Qt event queue, stood in for by a list the test drains."""
+    """Qt 的事件队列，用一个由测试抽干的列表顶替。
+
+    The Qt event queue, stood in for by a list the test drains.
+    """
 
     def __init__(self) -> None:
         self.callbacks: list[Callable[[], None]] = []
@@ -235,7 +250,10 @@ class Queue:
 
 
 class Harness:
-    """An engine, the registry it dispatches, and the queue it posts into."""
+    """引擎、它派发的注册表，以及它往里投递的队列。
+
+    An engine, the registry it dispatches, and the queue it posts into.
+    """
 
     def __init__(
         self,
@@ -257,8 +275,9 @@ class Harness:
             background_runner=background_runner,
             background_cancel=background_cancel,
         )
-        # The store is the engine's own; the tests read it to prove a refused call
-        # left nothing behind and to reach states only F5 can produce.
+        # 存储是引擎自己的，用例读它来证明被拒的调用什么也没留下，也用它造出外面够不到的状态
+        # the store is the engine's own: the tests read it to prove a refused call left nothing
+        # behind, and to reach states nothing outside can produce
         self.store: ExecutionStore = self.engine._store
 
     def records(self) -> list[ExecutionRecord]:
@@ -310,9 +329,10 @@ def test_invalid_input_ends_as_a_failed_record_and_does_not_run(call_name: str) 
     assert record.status is FAILED
     assert record.error is not None
     assert record.error.code == INVALID_INPUT
-    # The message names the offending field, and names no other field and no value.
+    # 消息点名出错的那个字段，不点别的字段、也不带值
+    # the message names the offending field, and names no other field and no value
     assert record.error.message == "test.echo: invalid input at surprise"
-    # A non-success terminal record never claims to be complete (PRD 6.6).
+    # 非成功的终结记录绝不声称自己完成 / a non-success terminal record never claims to be complete
     assert record.progress == 0
     assert CALLED == []
     assert harness.queue.callbacks == []
@@ -321,8 +341,10 @@ def test_invalid_input_ends_as_a_failed_record_and_does_not_run(call_name: str) 
 @pytest.mark.parametrize("call_name", ["run_sync", "submit"])
 def test_a_prebuilt_input_model_is_revalidated_before_the_operation_runs(call_name: str) -> None:
     harness = Harness(Echo())
-    # A caller that builds the input model itself is not trusted: ``value`` is a str field,
-    # and model_construct is how a wrong value reaches model_validate without a check.
+    # 自己造输入模型的调用者不被信任：``value`` 是 str 字段，而 model_construct 正是错值
+    # 绕过检查到达 model_validate 的路径
+    # a caller that builds the input model itself is not trusted: ``value`` is a str field, and
+    # model_construct is how a wrong value reaches model_validate without a check
     arguments = cast(Any, ValueParams.model_construct(value=123))
     record = getattr(harness.engine, call_name)("test.echo", arguments)
     assert record.status is FAILED
@@ -348,14 +370,14 @@ def test_an_input_model_that_raises_unexpectedly_ends_as_failed() -> None:
         assert record.error is not None
         assert record.error.code == INTERNAL_ERROR
         assert "validator exploded" not in record.error.message
-    # Nothing was left waiting: the call cannot eat a queue slot.
+    # 什么都没留下排队：这种调用吃不掉队列名额 / nothing was left waiting: the call eats no slot
     assert harness.store.ids({QUEUED}) == []
     assert CALLED == []
 
 
 def test_calls_whose_input_explodes_cannot_exhaust_the_queue() -> None:
     harness = Harness(Exploding(), Echo())
-    for _ in range(33):  # one more than max_pending
+    for _ in range(33):  # 比 max_pending 多一 / one more than max_pending
         assert harness.engine.submit("test.explode", {"value": "x"}).status is FAILED
 
     queued = harness.engine.submit("test.echo", {})
@@ -397,8 +419,9 @@ def test_a_queued_call_cancelled_before_its_turn_never_runs(
     cancelled = harness.engine.get(record.execution_id)
     assert cancelled.status is CANCELLED
     assert cancelled.progress == 0
-    # Skipped on purpose, not "started, refused by the state machine and logged":
-    # a missing skip leaves an ERROR record from the Qt-slot guard.
+    # 是故意跳过的，不是「起了又被状态机拒掉再记日志」，少一次跳过就会留下 Qt 槽守卫写的 ERROR
+    # skipped on purpose, not "started, refused by the state machine and logged": a missing skip
+    # leaves an ERROR record from the Qt-slot guard
     assert cancelled.started_at is None
     assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
 
@@ -431,8 +454,9 @@ def test_cancelling_a_queued_background_call_tells_the_adapter() -> None:
 
     receipt = harness.engine.cancel(record.execution_id)
 
-    # A background call that never reached a task is still the adapter's waiting
-    # entry, and only the adapter can take it out of that queue.
+    # 还没走到任务的调用仍算适配器的等待项
+    # such a background call is still the adapter's waiting entry, and only the adapter can take
+    # it out of that queue
     assert receipt.status is CANCELLED
     assert stopped == [record.execution_id]
 
@@ -448,15 +472,16 @@ def test_cancelling_a_queued_main_thread_call_does_not_touch_the_adapter() -> No
 
     harness.engine.cancel(record.execution_id)
 
-    # The cancel seam belongs to background work: a queued main-thread call is only
-    # the event-loop callback the runner skips.
+    # 取消这个接缝只属于后台工作：排队的主线程调用不过是 runner 会跳过的那个事件循环回调
+    # the cancel seam belongs to background work: a queued main-thread call is only the
+    # event-loop callback the runner skips
     assert stopped == []
 
 
 def test_a_stale_callback_does_not_run_a_call_that_already_moved_on() -> None:
     harness = Harness(Echo())
     record = harness.engine.submit("test.echo", {})
-    # Something else already started it, so this queued callback is a leftover.
+    # 别处已启动了它，这条排队的回调只是残留 / something else started it, so this is a leftover
     harness.store.transition(record.execution_id, RUNNING)
 
     harness.queue.tick()
@@ -502,7 +527,7 @@ def test_a_running_background_call_only_gets_a_cancel_request() -> None:
     receipt = harness.engine.cancel(record.execution_id)
     assert receipt.accepted is True
     assert receipt.status is CANCEL_REQUESTED
-    # Asking twice is the same request, not a second transition.
+    # 问第二次是同一个请求，不是第二次迁移 / asking twice is the same request, not a transition
     again = harness.engine.cancel(record.execution_id)
     assert again.accepted is True
     assert again.status is CANCEL_REQUESTED
@@ -667,7 +692,10 @@ def test_a_queued_call_is_cancelled_when_the_project_was_replaced() -> None:
 
 
 def live_background(harness: Harness, *path: ExecutionStatus) -> ExecutionRecord:
-    """A background call of this generation, moved along ``path``."""
+    """本代数的一次后台调用，沿 ``path`` 推进。
+
+    A background call of this generation, moved along ``path``.
+    """
 
     record = harness.engine.submit("test.sum", {})
     for status in path:
@@ -688,22 +716,27 @@ def test_a_project_replacement_leaves_a_running_main_thread_call_alone(
 
     record = harness.engine.run_sync("test.replace", {})
 
-    # PRD 9.2: the generation is dropped, not the call that is dropping it -- the
-    # open/create that fires aboutToBeCleared comes from inside its own execute_main.
+    # 丢掉的是代数，不是正在丢它的那次调用：触发 aboutToBeCleared 的 open/create 就在自己的
+    # execute_main 里发出这个信号
+    # the generation is dropped, not the call that is dropping it: that open/create fires the
+    # signal in its own execute_main
     assert record.status is SUCCEEDED
     assert record.result == {"value": "hello"}
     assert harness.lifecycle.current_epoch == 1
-    # The old generation's live background task is still asked to stop (PRD 9.2).
+    # 旧代数里活着的后台任务照样被要求停下 / the old generation's live task is still stopped
     assert harness.store.get(background.execution_id).status is CANCEL_REQUESTED
 
 
 def test_a_replacement_that_cannot_cancel_the_queue_still_asks_the_tasks_to_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A10: the epoch moved before the engine was asked, so the cancel still happens.
+    """代数在引擎被叫到之前就动了，所以取消仍要发生。
 
-    The queued-cancel loop is the half that fails here; the old generation's running
-    background task is asked to stop anyway (PRD 9.1, 9.2).
+    这里失掉的是「取消排队那些调用」这一半；旧代数中在跑的后台任务照样被要求停下。
+
+    The epoch moved before the engine was asked, so the cancel still happens. The
+    queued-cancel loop is the half that fails here; the old generation's running
+    background task is asked to stop anyway.
     """
 
     harness = Harness(Echo(), Sum(), background_runner=no_adapter)
@@ -734,8 +767,9 @@ def test_shutdown_leaves_a_running_main_thread_call_alone() -> None:
 
     record = harness.engine.run_sync("test.replace", {})
 
-    # PRD 9.3.2 cancels main-thread work that has not started; the call on this
-    # stack is not it, and only the background task may get a cancel request.
+    # 关停取消的是还没开始的主线程工作，栈上的这次调用不算，只有后台任务可能收到取消请求
+    # the shutdown cancels main-thread work that has not started; the call on this stack is not
+    # it, and only the background task may get a cancel request
     assert record.status is SUCCEEDED
     assert harness.store.get(background.execution_id).status is CANCEL_REQUESTED
 
@@ -795,7 +829,7 @@ def test_a_queued_callback_that_raises_is_logged_and_dropped(
     with caplog.at_level(logging.ERROR):
         posted[0]()
     assert "main-thread step for x failed" in caplog.text
-    # The stack went to the log instead of into the Qt slot.
+    # 栈进了日志，而没抛进 Qt 槽 / the stack went to the log, not into the Qt slot
     assert "slot blew up" in caplog.text
 
 
@@ -814,11 +848,14 @@ def test_a_liveness_check_that_raises_cannot_escape_the_slot(
     assert "main-thread step for x failed" in caplog.text
 
 
-# --- the real signal ---------------------------------------------------------
+# --- 真的信号 / the real signal ----------------------------------------------------
 
 
 class HeadlessIface:
-    """``iface.newProject`` without a GUI: QGIS's own ``clear()`` fires the signal."""
+    """不带界面的 ``iface.newProject``：QGIS 自己的 ``clear()`` 会发出信号。
+
+    ``iface.newProject`` without a GUI: QGIS's own ``clear()`` fires the signal.
+    """
 
     def __init__(self, project: Any) -> None:
         self._project = project
@@ -831,10 +868,14 @@ class HeadlessIface:
 def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AT-16 and AT-18's success half, on the signal a real project emits.
+    """在真工程发出的信号上跑通「替换工程不打断替换它的那次调用」。
 
-    ``project.open`` and ``project.create`` fire ``aboutToBeCleared`` from inside
-    their own ``execute_main``, which the fakes above cannot reproduce.
+    ``project.open`` 与 ``project.create`` 是在自己的 ``execute_main`` 里发出
+    ``aboutToBeCleared`` 的，上面的伪造对象复现不了这一点。
+
+    The success half of a real replacement, on the signal a real project emits.
+    ``project.open`` and ``project.create`` fire ``aboutToBeCleared`` from inside their own
+    ``execute_main``, which the fakes above cannot reproduce.
     """
 
     pytest.importorskip("qgis", reason="a real project signal needs a QGIS interpreter")
@@ -843,9 +884,11 @@ def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
 
     from qgis_agent_plugin.operations.project import ProjectCreate, ProjectOpen
 
-    # A headless application is enough for the real signal.  QGIS keeps its profile
-    # and style databases under QGIS_CUSTOM_CONFIG_PATH and stray working-directory
-    # files next to the cwd, so both are pointed at tmp_path (qgis/TEST.md).
+    # 无界面应用就够让真信号发出来；QGIS 把 profile 与样式库放在 QGIS_CUSTOM_CONFIG_PATH 下，
+    # 散落的文件也会落在 cwd 旁边，所以两者都指到 tmp_path
+    # a headless application is enough for the real signal. QGIS keeps its profile and style
+    # databases under that variable, and drops stray files next to the cwd, so both point at
+    # tmp_path.
     monkeypatch.setenv("QGIS_CUSTOM_CONFIG_PATH", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     application = QgsApplication([], False)
@@ -869,7 +912,7 @@ def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
         )
 
         def replaced() -> None:
-            # What plugin.Plugin._project_about_to_be_cleared does, on the real signal.
+            # plugin.Plugin._project_about_to_be_cleared 在真信号上做的事 / what that slot does
             lifecycle.bump()
             engine.on_project_replaced()
 
@@ -882,8 +925,9 @@ def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
 
             assert opened.status is SUCCEEDED
             assert created.status is SUCCEEDED
-            # Each replacement bumped the generation, and a record keeps the epoch
-            # it was created under: one behind the project its own call made.
+            # 每次替换都推了代数，记录保留它被创建时的代数，比它自己造出的工程落后一代
+            # each replacement bumped the generation, and a record keeps the epoch it was
+            # created under: one behind the project its own call made
             assert lifecycle.current_epoch > 0
             assert opened.project_epoch < created.project_epoch < lifecycle.current_epoch
             assert [
