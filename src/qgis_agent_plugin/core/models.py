@@ -239,3 +239,15 @@ class Params(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+
+class Result(BaseModel):
+    """Base for every operation output: an undeclared key is a plugin defect.
+
+    A result is built by the operation that produced it, never by a caller, so a
+    key the model does not declare means the operation reports something wrong --
+    dropping it would hand the caller a default nobody produced.  Every result
+    inherits this so the rule cannot drift between operations.
+    """
+
+    model_config = ConfigDict(extra="forbid")

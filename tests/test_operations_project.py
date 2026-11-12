@@ -450,6 +450,13 @@ def test_a_result_carries_exactly_the_prd_output_fields(model: Any, fields: list
     assert list(model.model_fields) == fields
 
 
+def test_a_result_rejects_an_undeclared_field() -> None:
+    # A model without ``extra="forbid"`` drops a mistyped key and substitutes the
+    # field's own default, so the caller reads a value nobody produced.
+    with pytest.raises(ValidationError):
+        project.ProjectCreateResult(crs_authid="EPSG:4326", layer_counts=5)
+
+
 # --- project.create ---------------------------------------------------------
 
 
