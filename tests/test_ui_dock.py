@@ -202,7 +202,6 @@ def _spec(
         destructive=destructive,
         input_schema=schema if schema is not None else {"type": "object", "properties": {}},
         output_schema={"type": "object"},
-        pydantic_major=2,
     )
 
 

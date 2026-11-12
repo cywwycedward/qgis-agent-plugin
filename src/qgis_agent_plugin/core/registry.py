@@ -75,6 +75,4 @@ def _spec(operation: BaseOperation) -> OperationSpec:
         destructive=operation.destructive,
         input_schema=operation.input_model.model_json_schema(),
         output_schema=operation.output_model.model_json_schema(),
-        # Pydantic 2 is the only supported major; plugin.py refuses any other at start-up.
-        pydantic_major=2,
     )

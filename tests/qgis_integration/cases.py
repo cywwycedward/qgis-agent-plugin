@@ -1223,7 +1223,6 @@ def at_27_pydantic_v2(ctx: Context) -> str:
     specs = ctx.registry.list_specs()
     equal(len(specs), 17, "the seventeen specs")
     for spec in specs:
-        equal(spec.pydantic_major, 2, f"{spec.name}: pydantic_major")
         exported = spec.model_dump_json()
         require(json.loads(exported) is not None, f"{spec.name}: the spec did not export JSON")
         equal(
@@ -1246,9 +1245,9 @@ def at_27_pydantic_v2(ctx: Context) -> str:
     require(json.loads(exported) is not None, "the record did not export JSON")
     equal(ExecutionRecord.model_validate_json(exported), record, "the record round trip")
     return (
-        f"pydantic {pydantic.VERSION}: the seventeen specs export and round-trip JSON with "
-        "pydantic_major=2, StrictBool refuses the string 'true', and the terminal record with its "
-        "result round-trips. The v1 half of AT-27 is a separate, skipped row"
+        f"pydantic {pydantic.VERSION}: the seventeen specs export and round-trip JSON, "
+        "StrictBool refuses the string 'true', and the terminal record with its result "
+        "round-trips. The v1 half of AT-27 is a separate, skipped row"
     )
 
 

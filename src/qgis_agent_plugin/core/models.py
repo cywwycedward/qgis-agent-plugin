@@ -224,7 +224,6 @@ class OperationSpec(BaseModel):
     destructive: StrictBool
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
-    pydantic_major: int
 
 
 class Params(BaseModel):

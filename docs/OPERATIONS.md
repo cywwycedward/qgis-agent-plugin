@@ -33,7 +33,7 @@ v2 新增的八个（`layer.list_style_categories` / `layer.get_qml` / `layer.li
 
 `OperationSpec`（`iface.agent_registry.get_spec(name)` / `list_specs()`）是同一份契约的
 机器可读版本，字段为 `name`、`description`、`kind`、`strategy`、`destructive`、
-`input_schema`、`output_schema`、`pydantic_major`（恒为 `2`）。JSON Schema 由 Pydantic 直接
+`input_schema`、`output_schema`。JSON Schema 由 Pydantic 直接
 生成，例如：
 
 ```python
@@ -505,7 +505,7 @@ PostGIS 图层这类说不出本地路径的层算越界，同样会让整次打
 | --- | --- | --- |
 | 7.3 打开含坏图层的工程应 `PROJECT_OPEN_FAILED` | 返回 `SUCCEEDED` + `invalid_layer_count > 0` | 按 AT-18B 实现：读成功就是成功，但不谎称全部数据源可用 |
 | 7.4 成功样例 `is_dirty: false` | 返回 `project.write()` 之后的真实值 | 通常情况下仍是 `false`，但这是读出来的，不是写死的 |
-| 6.1 “兼容 Pydantic v1/v2” | 只支持 v2，`pydantic_major` 恒为 2 | 已记录偏差；非 v2 的 pydantic 在插件导入时直接 `RuntimeError` |
+| 6.1 “兼容 Pydantic v1/v2”、6.3 的 `pydantic_major` 字段 | 只支持 v2，`OperationSpec` 不再带 `pydantic_major` | 非 v2 的 pydantic 在插件导入时直接 `RuntimeError`（`test_package.py` 守着）；既然只有一个 major，那个字段只会在契约上多一个恒值，没有决策价值 |
 | 11.1 `error.details` | 字段存在但永远是 `null` | `FrameworkError` 只带 `code` + `message`，没有 details 通路 |
 | 7.3 / 11.2 “含无法加载的图层 → `PROJECT_OPEN_FAILED`” | `SUCCEEDED` + `invalid_layer_count > 0` | 同一份 PRD 里这两句与 AT-18B（`read()` 为真但有坏图层 → 成功 + 计数）互斥。**以 AT-18B 与这里的代码为准**：读成功就是成功，坏图层只计数、不谎称可用。评审时不要按 7.3/11.2 那两句改代码 |
 | 7.3 未提工程内数据源 | `project.open` 在 `read()` 前拒远程数据源，`read()` 后逐层校验数据源，越界则移除该层并整体 `PATH_NOT_ALLOWED` | 比 PRD 更严：PRD 2.3/10.2 要的是数据白名单，而数据源是工程文件替调用方写的路径，所以它们也得过 `allowed_data_roots`（已实测，见 `PROJECT_OPEN_FAILED` 之外的这条码）。读前那一半只是尽力而为的清单，边界见 §1.2 |

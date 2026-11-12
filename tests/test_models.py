@@ -188,7 +188,9 @@ def test_progress_stays_between_zero_and_hundred(progress: float) -> None:
         record(progress=progress)
 
 
-def test_operation_spec_has_exactly_the_prd_fields() -> None:
+def test_operation_spec_has_exactly_the_documented_fields() -> None:
+    # No ``pydantic_major``: v2 is the only major this build supports and
+    # ``plugin.require_supported_pydantic`` refuses any other at import (OPERATIONS.md §12).
     assert set(OperationSpec.model_fields) == {
         "name",
         "description",
@@ -197,7 +199,6 @@ def test_operation_spec_has_exactly_the_prd_fields() -> None:
         "destructive",
         "input_schema",
         "output_schema",
-        "pydantic_major",
     }
 
 
