@@ -37,8 +37,14 @@ hc run --bg --name f5-impl --cwd 'D:\core\workspace\mine\wt\aof\f5-qgstask' `
 规则（都是踩过的坑）：
 
 - **任务文本短，细节进文档**。argv 里塞长文会遇到引号/换行地狱；把要求写进 `docs/delegate/<F>-task.md`，消息只指向它。
+- **起完再发任务**。实测：`hc run ... -- pi '<长文本>'` 只把第一个词交给了 pi（`hc get <t>` 的 `argv` 是
+  `["pi", "Read "]`），agent 起来后空等。可靠做法是两条命令：`hc run --bg --name <n> --cwd <wt> -- pi`
+  （不带任务），然后 `hc send <n> '<任务>'`；`send` 返回 `started: true` 才算送到。
+- **主 agent 不在 `hc` 终端里时没有可寻址的地址**（`$env:HC_TERMINAL_ID` 为空、`hc wait --children`
+  报 `needs_target`）。这种情况下让子 agent 把结论写进 handoff 文档、在屏幕上打印 `DONE <路径>`，
+  你 `hc wait <t>` 收工再读文件；不要要求它 `hc send` 你。
 - **名字用小写**：`[a-z0-9][a-z0-9._-]{0,31}`，形如终端 id（`t7`）的名字会被拒。约定 `<feature>-impl` / `<feature>-review-r<n>` / `<feature>-merge`。
-- **只用 ASCII 标点**。消息里出现 `“ ” ；（）` 之类全角符号时，PowerShell/`hc` 的参数解析会被拆开（实测：`unexpected argument`）。中文可以，标点用 `, ; : ( )`。
+- **只用 ASCII 标点**。消息里出现 `“ ” ；（）` 之类全角符号时，PowerShell/`hc` 的参数解析会被拆开（实测：`unexpected argument`）。中文可以，标点用 `, ; : ( )`。`#` 也会被拆开（`hc send` 实测：`unexpected argument '中文'`），消息里别用它。
 - 收消息：`hc send <t> '<一句话>；详见 docs/delegate/X.md'`；需要等它处理完再加 `--wait`。
 - 等待：`hc wait <t>`（失活/退出/有消息即返回）、`hc wait <t> --output ready`、`hc wait --children any`。
   **绝不 sleep / 忙轮询**。`reason: timeout` 是例行检查，不是失败，继续等。
