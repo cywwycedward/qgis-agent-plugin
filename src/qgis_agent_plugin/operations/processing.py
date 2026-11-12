@@ -1,8 +1,30 @@
-"""The three ``processing.*`` operations (design §1).
+"""三个 ``processing.*`` 操作。
 
-All three run on the main thread: QGIS's processing framework works on the project
-and the layers it holds, and a run hands result layers to that project, so it cannot
-move to a worker (PRD §2, D5).
+三者都跑在主线程：QGIS 的 processing 框架直接操作工程和它持有的图层，一次运行会把结果图层
+交给那个工程，所以它挪不到后台线程。
+
+这里没有算法白名单，也没有 ``runnable`` 字段：``list_algorithms`` 报告注册表里的每个算法，
+``get_algorithm_info`` 读算法自己的原生定义（``algorithmHelp()`` 打印的那些字段，转成 JSON），
+``run_algorithm`` 是所有算法共同的唯一入口。
+
+``run_algorithm`` 不重新实现 QGIS。它只把调用交给 ``qgis.processing.run()``，外加一个会留住
+运行消息的 feedback，于是算法是否存在、参数值是否可接受、processing 上下文怎么建、算法怎么
+执行，全部由 QGIS 决定。没声明的参数键由 QGIS 忽略，路径或远程 URI 由 QGIS 解析，本模块没
+归类的参数原样到达算法。失败就是 ``qgis.processing.run()`` 抛出的异常：feedback 记录和异常
+进本地日志，异常原样抛出，于是引擎按它报告意外失败的唯一方式报告它；这里不把异常文本翻成
+插件的错误码。
+
+本模块仍然守着的边界是 JSON。``parameters`` 是一棵有限的 JSON 树，键为原生参数名：非字符串键、
+NaN、无穷、bytes 或 QGIS/Qt 对象在 QGIS 看到之前就被拒；没有无损 JSON 形式的运行结果同样被拒，
+而不是 ``str()`` 一下。唯一被翻译的值是结果图层——``qgis.processing.run()`` 返回真实的
+``QgsMapLayer`` 对象，不属任何工程，所以每个都加进引擎的工程并按 id 报告；结果无法返回时，
+这次调用加进去的图层会被移除，但不声称算法的其它副作用被撤销。
+
+QGIS 在使用它的方法内部 import，所以本模块在裸解释器里也能加载，契约不依赖运行中的 QGIS。
+
+All three operations run on the main thread: QGIS's processing framework works on
+the project and the layers it holds, and a run hands result layers to that project,
+so it cannot move to a worker.
 
 There is no algorithm allow-list and no ``runnable`` field: ``list_algorithms``
 reports every registered algorithm, ``get_algorithm_info`` reads the native
@@ -13,13 +35,13 @@ definitions -- the fields ``algorithmHelp()`` prints, as JSON -- and
 ``qgis.processing.run()`` with nothing but a feedback that keeps the run's messages,
 so whether the algorithm exists, whether its parameter values are acceptable, how
 the processing context is built and how the algorithm executes are all decided by
-QGIS (design §5.2-§5.5).  An undeclared parameter key is QGIS's to ignore, a path or
-a remote URI is QGIS's to resolve, and a parameter this module never classifies
-reaches the algorithm exactly as it arrived.  A failure is an exception from
+QGIS.  An undeclared parameter key is QGIS's to ignore, a path or a remote URI is
+QGIS's to resolve, and a parameter this module never classifies reaches the
+algorithm exactly as it arrived.  A failure is an exception from
 ``qgis.processing.run()``: the feedback records and the exception go to the local
 log and the exception is raised unchanged, so the engine reports it the one way it
-reports an unexpected failure (design §5.6).  Nothing here classifies an exception
-text into a plugin error code.
+reports an unexpected failure.  Nothing here classifies an exception text into a
+plugin error code.
 
 The boundary this module still owns is the JSON one.  ``parameters`` is a finite
 JSON tree keyed by native parameter names; a non-string key, a NaN, an infinity,
@@ -28,8 +50,7 @@ lossless JSON form is refused rather than ``str()``-ed.  A result layer is the o
 value translated: ``qgis.processing.run()`` hands back real ``QgsMapLayer`` objects
 that belong to no project, so each is added to the engine's project and reported by
 its id; the layers this call added are removed again when its result cannot be
-returned, and nothing claims the algorithm's own side effects were undone (design
-§5.7).
+returned, and nothing claims the algorithm's own side effects were undone.
 
 QGIS is imported inside the methods that use it, so this module loads in a bare
 interpreter and its contracts stay testable without a running QGIS.
@@ -53,12 +74,17 @@ from ..core.models import INTERNAL_ERROR, INVALID_INPUT, FrameworkError, Params,
 
 _LOGGER = logging.getLogger(__name__)
 
+# 没能产出的 JSON 映像，用来和合法的 ``None`` 区分开。
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
 
 
 def _json_image(value: Any) -> Any:
-    """The JSON form of ``value``, or ``_NO_JSON`` when there is no lossless one.
+    """``value`` 的 JSON 形式；没有无损形式时返回 ``_NO_JSON``。
+
+    只有精确的 JSON 类型能通过。``bool``、``int``、``float`` 故意按精确类型比较：某些构建里
+    Qt 枚举是 ``int`` 的子类，而任意数字子类本身也不是 JSON。容器被复制成普通的 list 与 dict，
+    于是 tuple 或 mapping 子类照样能出来，其它类型的对象则根本没有映像。
 
     Only the exact JSON types pass.  ``bool``, ``int`` and ``float`` are compared by
     exact type on purpose: a Qt enum is an ``int`` subclass in some builds and an
@@ -89,11 +115,16 @@ def _json_image(value: Any) -> Any:
 
 
 def _require_json(value: Any) -> Any:
-    """``value`` as a JSON tree, or a ``ValueError`` for the model to report."""
+    """``value`` 作为 JSON 树；不是的话抛 ``ValueError`` 交给模型去报。
+
+    ``value`` as a JSON tree, or a ``ValueError`` for the model to report.
+    """
 
     try:
         image = _json_image(value)
     except RecursionError:
+        # 环状或过深的树是调用方的错，不是插件的错：不接住它就会以 INTERNAL_ERROR 逃出去，
+        # 而不是 INVALID_INPUT。
         # A cyclic or absurdly deep tree is the caller's mistake, not a plugin one:
         # left alone it escapes as an INTERNAL_ERROR instead of INVALID_INPUT.
         image = _NO_JSON
@@ -103,7 +134,10 @@ def _require_json(value: Any) -> Any:
 
 
 class AlgorithmSummary(BaseModel):
-    """One registered algorithm, in the terms the caller can act on (PRD §3.1.1)."""
+    """一个已注册算法，说成调用方能够据此行动的样子。
+
+    One registered algorithm, in the terms the caller can act on.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -113,7 +147,10 @@ class AlgorithmSummary(BaseModel):
 
 
 class AlgorithmDetails(BaseModel):
-    """The algorithm itself, as its own definition states it (design §3.2, §3.5)."""
+    """算法本身，照它自己的定义陈述的样子。
+
+    The algorithm itself, as its own definition states it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -124,7 +161,11 @@ class AlgorithmDetails(BaseModel):
 
 
 class AlgorithmParameter(BaseModel):
-    """One visible native parameter definition (design §3.3, §3.5).
+    """一个可见的原生参数定义。
+
+    ``options`` 只是枚举的展示列表；基类定义根本没有 ``options()``，所以用 ``None`` 陈述这个
+    事实，而不是编一个空列表。``accepted_types`` 是参数类型对象说可以传进去的东西，注册表里没有
+    它的类型对象时为空列表。
 
     ``options`` is only an enum's display list; the base definition has no
     ``options()`` at all, so ``None`` states that instead of a fabricated empty list.
@@ -143,7 +184,10 @@ class AlgorithmParameter(BaseModel):
 
 
 class AlgorithmOutput(BaseModel):
-    """One declared output; not a value a run produced (design §3.4, §3.5)."""
+    """一个声明的输出；不是某次运行产出的值。
+
+    One declared output; not a value a run produced.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -153,18 +197,27 @@ class AlgorithmOutput(BaseModel):
 
 
 class ProcessingMessage(BaseModel):
-    """One message a run kept, at the level of the feedback method that took it."""
+    """一次运行留下的一条消息，级别就是接收它的那个 feedback 方法。
+
+    One message a run kept, at the level of the feedback method that took it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    # info/debug/command/console/formatted/warning/error: the seven feedback methods.
+    # 级别取 feedback 的方法名：info/debug/command/console/formatted/warning/error，七个方法，
+    # 不多不少。
+    # The level is one of the feedback's seven methods:
+    # info/debug/command/console/formatted/warning/error.
     level: StrictStr
     text: StrictStr
     fatal: StrictBool = False
 
 
 class ProcessingListAlgorithmsParams(Params):
-    """Empty on purpose: the current registry is the only input (PRD §3.1.1)."""
+    """故意为空：当前注册表就是唯一的输入。
+
+    Empty on purpose: the current registry is the only input.
+    """
 
 
 class ProcessingListAlgorithmsResult(Result):
@@ -182,11 +235,16 @@ class ProcessingGetAlgorithmInfoResult(Result):
 
 
 class ProcessingRunAlgorithmParams(Params):
-    """A native algorithm id and its native parameter map (design §5.2)."""
+    """一个原生算法 id 和它的原生参数表。
+
+    A native algorithm id and its native parameter map.
+    """
 
     algorithm_id: StrictStr = Field(min_length=1)
-    # Strict: the top level is pydantic's dict, so this is the only place the
-    # documented "no non-string key" rule can reach it; the walk checks the rest.
+    # 键类型必须严格：顶层是 pydantic 的 dict，所以这是「不许非字符串键」唯一能到的位置，
+    # 其余交给那趟遍历。
+    # Strict keys: the top level is pydantic's dict, so this is the only place the
+    # no-non-string-key rule can reach; the walk checks the rest.
     parameters: dict[StrictStr, Any]
 
     @field_validator("parameters")
@@ -196,7 +254,10 @@ class ProcessingRunAlgorithmParams(Params):
 
 
 class ProcessingRunAlgorithmResult(Result):
-    """The id that ran, every output under its native key, and the run's messages."""
+    """跑的是哪个 id、每个输出在它的原生键下、以及运行留下的消息。
+
+    The id that ran, every output under its native key, and the run's messages.
+    """
 
     algorithm_id: StrictStr
     outputs: dict[str, Any]
@@ -209,7 +270,10 @@ class ProcessingRunAlgorithmResult(Result):
 
 
 def algorithm_summary(algorithm: Any) -> AlgorithmSummary:
-    """The list's one summary shape: what the registry says about an algorithm."""
+    """列表用的唯一摘要形状：注册表对这个算法的说法。
+
+    The list's one summary shape: what the registry says about an algorithm.
+    """
 
     return AlgorithmSummary(
         id=algorithm.id(),
@@ -219,7 +283,10 @@ def algorithm_summary(algorithm: Any) -> AlgorithmSummary:
 
 
 def _parameter_info(definition: Any, registry: Any) -> AlgorithmParameter:
-    """One visible definition as the six design fields, in its native wording."""
+    """一个可见定义折成六个字段，措辞保持原生。
+
+    One visible definition as the six fields, in its native wording.
+    """
 
     from qgis.core import QgsProcessingParameterEnum
 
@@ -239,7 +306,11 @@ def _parameter_info(definition: Any, registry: Any) -> AlgorithmParameter:
 
 
 def _json_result(project: Any, value: Any, added: set[str]) -> Any:
-    """One result value as JSON, with every result layer added to ``project``.
+    """一个结果值转成 JSON，顺便把每个结果图层加进 ``project``。
+
+    ``qgis.processing.run()`` 交出的图层带着所有权但不属任何工程，所以每个只加一次并按 id
+    报告；这次调用已经加过的图层解析成同一个 id。其余的值要么是 JSON，要么是失败：没有无损映像
+    的值被拒，绝不用 ``str()`` 描述一下了事。
 
     ``qgis.processing.run()`` hands the layers it produced over with their ownership
     and no project, so each one is added once and reported by its id; a layer this
@@ -275,7 +346,10 @@ class ProcessingListAlgorithms(
     BaseQuery[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
     MainThreadOperationMixin[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
 ):
-    """Every registered algorithm, unfiltered and in id order (PRD §3.1.1)."""
+    """每个已注册算法，不筛选，按 id 排序。
+
+    Every registered algorithm, unfiltered and in id order.
+    """
 
     name = "processing.list_algorithms"
     description = "List every algorithm currently registered with QGIS Processing"
@@ -299,7 +373,10 @@ class ProcessingGetAlgorithmInfo(
     BaseQuery[ProcessingGetAlgorithmInfoParams, ProcessingGetAlgorithmInfoResult],
     MainThreadOperationMixin[ProcessingGetAlgorithmInfoParams, ProcessingGetAlgorithmInfoResult],
 ):
-    """The native definition of one algorithm, in the order QGIS declares it."""
+    """一个算法的原生定义，按 QGIS 声明它的顺序。
+
+    The native definition of one algorithm, in the order QGIS declares it.
+    """
 
     name = "processing.get_algorithm_info"
     description = "Read one registered algorithm's native parameters and outputs"
@@ -314,11 +391,13 @@ class ProcessingGetAlgorithmInfo(
         registry = QgsApplication.processingRegistry()
         algorithm = registry.algorithmById(request.algorithm_id)
         if algorithm is None:
-            # A valid call naming an unknown algorithm is a caller input mistake; it
-            # is not an unknown plugin operation (design §3.5).
+            # 合法调用说出未知算法是调用方的输入错误，不是未知的插件操作。
+            # A valid call naming an unknown algorithm is a caller input mistake; it is not
+            # an unknown plugin operation.
             raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
 
-        # ``algorithmHelp()`` skips a hidden parameter, and so does this (design §3.3).
+        # ``algorithmHelp()`` 会跳过隐藏参数，这里也一样。
+        # ``algorithmHelp()`` skips a hidden parameter, and so does this.
         hidden = QgsProcessingParameterDefinition.FlagHidden
         return ProcessingGetAlgorithmInfoResult(
             algorithm=AlgorithmDetails(
@@ -347,14 +426,18 @@ class ProcessingRunAlgorithm(
     BaseCommand[ProcessingRunAlgorithmParams, ProcessingRunAlgorithmResult],
     MainThreadOperationMixin[ProcessingRunAlgorithmParams, ProcessingRunAlgorithmResult],
 ):
-    """Run one registered algorithm through QGIS, and keep what it reported."""
+    """通过 QGIS 跑一个已注册算法，并留下它报告的东西。
+
+    Run one registered algorithm through QGIS, and keep what it reported.
+    """
 
     name = "processing.run_algorithm"
     description = "Run any algorithm currently registered with QGIS Processing"
     input_model = ProcessingRunAlgorithmParams
     output_model = ProcessingRunAlgorithmResult
-    # The name stands for a group of algorithms that may change data or the project,
-    # so the risk label cannot depend on the particular call (PRD §2).
+    # 名字代表的是一组算法，它们可能改动数据或工程，所以风险标签要整个名字一起定。
+    # The name stands for a group of algorithms that may change data or the project, so the
+    # risk label cannot depend on the particular call.
     destructive = True
 
     def execute_main(
@@ -364,7 +447,10 @@ class ProcessingRunAlgorithm(
         from qgis.core import QgsProcessingFeedback
 
         class ProcessingRunFeedback(QgsProcessingFeedback):
-            """The base class's own logging, plus one record per message (design §4)."""
+            """基类自己的日志，外加每条消息一条记录。
+
+            The base class's own logging, plus one record per message.
+            """
 
             def __init__(self) -> None:
                 super().__init__()
@@ -411,13 +497,16 @@ class ProcessingRunAlgorithm(
 
         feedback = ProcessingRunFeedback()
         try:
-            # Only the feedback: QGIS creates the context, checks the parameters and
-            # runs the algorithm itself (design §5.2-§5.5).
+            # 只给 feedback：上下文由 QGIS 建、参数由 QGIS 校验、算法由 QGIS 自己跑。
+            # Only the feedback: QGIS creates the context, checks the parameters and runs the
+            # algorithm itself.
             results = processing.run(request.algorithm_id, request.parameters, feedback=feedback)
         except Exception:
-            # The native messages and the exception may quote a path or a host, so
-            # they reach the local log and not the record; the caller gets the
-            # engine's own unexpected-failure verdict (design §5.6).
+            # 原生消息和异常可能带上路径或主机名，所以只进本地日志、不进记录；调用方拿到的是
+            # 引擎对意外失败的判定。
+            # The native messages and the exception may quote a path or a host, so they reach
+            # the local log and not the record; the caller gets the engine's own
+            # unexpected-failure verdict.
             for record in feedback.records:
                 _LOGGER.warning(
                     "processing %s reported %s: %s", request.algorithm_id, record.level, record.text
@@ -429,20 +518,22 @@ class ProcessingRunAlgorithm(
         try:
             return ProcessingRunAlgorithmResult(
                 algorithm_id=request.algorithm_id,
+                # ``None`` 是 QGIS 的「没有结果」，在这里当成一个空结果。
                 # ``None`` is QGIS's "no result", which is an empty one here.
                 outputs=_json_result(ctx.project, {} if results is None else results, added),
                 messages=feedback.records,
             )
-        except Exception:  # noqa: BLE001 - the layers this call added must go again
-            # Only what this call added is undone: the algorithm's own external side
-            # effects are not claimed to be rolled back (design §5.7).
+        except Exception:  # noqa: BLE001
+            # 只撤掉这次调用加进去的图层 / only what this call added is undone,
+            # 算法的外部副作用不声称回滚 / not the algorithm's own external side effects.
             for layer_id in added:
                 ctx.project.removeMapLayer(layer_id)
             raise
 
 
-# The module's one tuple: ``operations/__init__.py`` imports it and must not define
-# a second copy.
+# 本模块唯一的元组：``operations/__init__.py`` import 它，不许再写一份。
+# The module's one tuple: ``operations/__init__.py`` imports it and must not define a
+# second copy.
 PROCESSING_OPERATIONS = (
     ProcessingListAlgorithms,
     ProcessingGetAlgorithmInfo,

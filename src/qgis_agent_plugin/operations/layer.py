@@ -1,4 +1,22 @@
-"""The layer operations: load a local file, list and inspect layers, toggle visibility.
+"""图层操作：载入本地文件、列出与查看图层、切开关可见性。
+
+除 ``layer.sum_numeric_field`` 外，这里每个操作都跑在主线程并经 ``ctx.project``，读的是引擎持有的
+工程，不是全局单例。QGIS 图层从不离开建它的方法：出去的只有 id、名字、provider、CRS 和两个
+可见性标志，因为这些是调用方能据以行动的値，也是序列化后仍然存活的那些。
+
+字段求和是唯一的后台操作，所以它的读法分散在三个阶段：数字在主线程拷出来，在后台在纯 float 元组
+上求和，回来时再和工程代数核对一次。
+
+``visible`` 与 ``effective_visible`` 故意分成两个字段。一个图层自己的勾选可以为真而父分组把它
+藏着，两件事报成一个数会让一次切换看起来像失败。
+
+样式读取（``layer.list_style_categories``、``layer.get_qml``、
+``layer.list_available_renderers``、``layer.get_renderer``）描述图层已经带着什么，不改它。
+哪些分类适用是一张固定清单，不是从 XML 反读出来的；QML 来自图层自己的原生导出；两份渲染器清单
+都来自活的 QGIS 注册表，不是这里维护的表。
+
+渲染器设值是这个文件里唯一替换状态的操作。它先把整个原生渲染器建好再碰图层，然后用一次调用装
+上去，所以被拒的配置不会给图层留下半套或零套样式。
 
 Every operation here but ``layer.sum_numeric_field`` runs on the main thread and
 works through ``ctx.project``, so it reads the project the engine holds rather than
@@ -8,24 +26,22 @@ the values a caller can act on and the only ones that survive serialisation.
 
 The field sum is the one background operation, so its reading is split across the
 three stages: the numbers are copied out on the main thread, summed off it over a
-tuple of plain floats, and checked against the project generation on the way back
-(PRD 6.2, 7.10).
+tuple of plain floats, and checked against the project generation on the way back.
 
 ``visible`` and ``effective_visible`` are deliberately two fields.  A layer's own
 check state can be true while its parent group hides it, and reporting one number
-for both would make a toggle look like it failed (PRD 7.7, AT-21B).
+for both would make a toggle look like it failed.
 
 The style reads (``layer.list_style_categories``, ``layer.get_qml``,
 ``layer.list_available_renderers``, ``layer.get_renderer``) describe what a layer
-already carries without changing it.  Which categories apply is the PRD's fixed
-list, not something read back out of the XML; the QML itself comes from the
-layer's own native export; and both renderer lists come from the live QGIS
-registries rather than a table kept here.
+already carries without changing it.  Which categories apply is a fixed list, not
+something read back out of the XML; the QML itself comes from the layer's own native
+export; and both renderer lists come from the live QGIS registries rather than a
+table kept here.
 
 The renderer setter is the one operation here that replaces state.  It builds the
 whole native renderer before the layer is touched, then installs it in one call,
-so a refused configuration cannot leave the layer with half a style or with none
-(PRD v2 5.4).
+so a refused configuration cannot leave the layer with half a style or with none.
 """
 
 from __future__ import annotations
@@ -69,13 +85,17 @@ from ..core.models import (
 )
 from ..core.security import resolve_path
 
-# What a caller may ask to load; ``other`` exists only on the reading side.
+# 调用方可以请求载入什么 / what a caller may ask to load; ``other`` 只在读的那一侧 /
+# 只在读的一侧 / ``other`` exists only on the reading side.
 LayerKind = Literal["vector", "raster"]
 LayerSummaryKind = Literal["vector", "raster", "other"]
 
 
 class LayerAddParams(Params):
-    """One local file to load, under a name the caller chooses (PRD 7.6)."""
+    """一个要载入的本地文件，名字由调用方定。
+
+    One local file to load, under a name the caller chooses.
+    """
 
     kind: LayerKind
     source_path: StrictStr = Field(min_length=1)
@@ -99,7 +119,10 @@ class LayerAddResult(Result):
 
 
 class LayerSummary(BaseModel):
-    """One registered layer in the terms a caller can act on (PRD 7.7)."""
+    """一个已注册图层，说成调用方能据以行动的样子。
+
+    One registered layer in the terms a caller can act on.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -149,7 +172,14 @@ class LayerSetVisibilityResult(Result):
 
 
 def layer_source_uri(source: Path, sub_layer: str | None) -> str:
-    """Return the provider URI for an already-validated local file.
+    """返回一个已经校验过的本地文件的 provider URI。
+
+    路径已经过 ``resolve_path``，所以它是一个真实的本地文件，这里拼的不是不可信字符串。子图层
+    仍然要靠 ogr provider 自己的编码器：它的 URI 怎么把路径和图层名拼在一起、每一段怎么转义，是
+    provider 的规则——自己照 ``path|layername=name`` 重建形状，就是对那条规则的猜测。
+
+    shortcut: 这里只审调用方点名的文件，不审该文件自己点名的源——本地 ``.vrt`` 里可能装着
+    ``/vsicurl/`` 或 WMS 源，不可信 VRT 变成输入时得升级。
 
     The path has been through ``resolve_path``, so it is a real local file and no
     untrusted string is being assembled here.  A sub-layer still needs the ogr
@@ -175,7 +205,10 @@ def layer_source_uri(source: Path, sub_layer: str | None) -> str:
 
 
 def layer_kind(layer: Any) -> LayerSummaryKind:
-    """Classify a registered layer; anything QGIS can hold is listed, not refused."""
+    """给一个已注册图层分类；QGIS 能装的东西都列出来，不拒。
+
+    Classify a registered layer; anything QGIS can hold is listed, not refused.
+    """
 
     from qgis.core import QgsRasterLayer, QgsVectorLayer
 
@@ -187,16 +220,21 @@ def layer_kind(layer: Any) -> LayerSummaryKind:
 
 
 def layer_tree_node(project: Any, layer_id: str) -> Any | None:
-    """The layer's node in the current project's tree, or ``None`` if it has none."""
+    """图层在当前工程树里的节点；没有节点就是 ``None``。
+
+    The layer's node in the current project's tree, or ``None`` if it has none.
+    """
 
     return project.layerTreeRoot().findLayer(layer_id)
 
 
 def layer_visibility(project: Any, layer_id: str) -> tuple[bool, bool | None, bool | None]:
-    """``(in_layer_tree, visible, effective_visible)`` for one layer.
+    """一个图层的 ``(in_layer_tree, visible, effective_visible)``。
+
+    没有节点的图层没有自己的可见性，所以两个标志都是 ``None``，而不是假称它被隐藏了。
 
     A layer with no node has no visibility of its own, so both flags are ``None``
-    rather than a false claim that it is hidden (PRD 7.7).
+    rather than a false claim that it is hidden.
     """
 
     node = layer_tree_node(project, layer_id)
@@ -206,7 +244,10 @@ def layer_visibility(project: Any, layer_id: str) -> tuple[bool, bool | None, bo
 
 
 def layer_summary(project: Any, layer_id: str, layer: Any) -> LayerSummary:
-    """The one place a summary is built, so list and get_info cannot disagree."""
+    """摘要唯一生成的地方，所以 list 与 get_info 不可能说法不一致。
+
+    The one place a summary is built, so list and get_info cannot disagree.
+    """
 
     in_layer_tree, visible, effective_visible = layer_visibility(project, layer_id)
     return LayerSummary(
@@ -224,7 +265,10 @@ class LayerAdd(
     BaseCommand[LayerAddParams, LayerAddResult],
     MainThreadOperationMixin[LayerAddParams, LayerAddResult],
 ):
-    """Load a local vector or raster file into the current project."""
+    """把一个本地矢量或栅格文件载入当前工程。
+
+    Load a local vector or raster file into the current project.
+    """
 
     name = "layer.add"
     description = "Add a local vector or raster file to the project"
@@ -235,7 +279,8 @@ class LayerAdd(
         from qgis.core import QgsRasterLayer, QgsVectorLayer
 
         source = resolve_path(request.source_path, ctx.policy.allowed_data_roots, must_exist=True)
-        # The provider is a function of the declared kind: a caller cannot name one.
+        # provider 是声明类型算出来的：调用方点不了它 / the provider is a function of the
+        # declared kind, 所以没人能自己指定一个 / so a caller cannot name one.
         provider = "ogr" if request.kind == "vector" else "gdal"
         layer_class = QgsVectorLayer if request.kind == "vector" else QgsRasterLayer
         layer = layer_class(layer_source_uri(source, request.sub_layer), request.name, provider)
@@ -255,7 +300,10 @@ class LayerList(
     BaseQuery[LayerListParams, LayerListResult],
     MainThreadOperationMixin[LayerListParams, LayerListResult],
 ):
-    """Every registered layer, sorted by id so the output is stable."""
+    """每个已注册图层，按 id 排序，所以输出是稳定的。
+
+    Every registered layer, sorted by id so the output is stable.
+    """
 
     name = "layer.list"
     description = "List the layers registered in the project"
@@ -275,7 +323,10 @@ class LayerGetInfo(
     BaseQuery[LayerGetInfoParams, LayerGetInfoResult],
     MainThreadOperationMixin[LayerGetInfoParams, LayerGetInfoResult],
 ):
-    """One layer's identity and state, including whether its source still loads."""
+    """一个图层的身份与状态，包括它的源现在还载不载得进。
+
+    One layer's identity and state, including whether its source still loads.
+    """
 
     name = "layer.get_info"
     description = "Read one layer's identity, validity and visibility"
@@ -298,7 +349,10 @@ class LayerSetVisibility(
     BaseCommand[LayerSetVisibilityParams, LayerSetVisibilityResult],
     MainThreadOperationMixin[LayerSetVisibilityParams, LayerSetVisibilityResult],
 ):
-    """Toggle one layer's own check state; a parent group stays as it is."""
+    """切一个图层自己的勾选状态；父分组保持原样。
+
+    Toggle one layer's own check state; a parent group stays as it is.
+    """
 
     name = "layer.set_visibility"
     description = "Check or uncheck one layer in the layer tree"
@@ -329,7 +383,12 @@ class SumNumericFieldParams(Params):
 
 
 class SumNumericFieldResult(Result):
-    """The sum of a snapshot, which is not the layer's value when the task ends.
+    """一份快照的和，不是任务结束时图层上的值。
+
+    shortcut: 值按 float64 求和，所以值超过 2**53 的 QInt64 字段在 ``total`` 里会丢精度；
+    需要精确整数和时再补一条整数路径。
+
+    The sum of a snapshot, which is not the layer's value when the task ends.
 
     shortcut: the values are summed as float64, so a QInt64 field with values above
     2**53 loses precision in ``total``; add an integer path when an exact integer
@@ -346,7 +405,10 @@ class SumNumericFieldResult(Result):
 
 @dataclass(frozen=True)
 class FieldValues:
-    """A copied-out field: plain floats, so no QGIS object reaches the worker."""
+    """拷出来的一份字段：纯 float，所以没有 QGIS 对象进后台线程。
+
+    A copied-out field: plain floats, so no QGIS object reaches the worker.
+    """
 
     layer_id: str
     field_name: str
@@ -357,7 +419,10 @@ class FieldValues:
 
 @dataclass(frozen=True)
 class FieldSum:
-    """What the worker computed, with the generation it was computed from."""
+    """后台算出来的东西，连同它据以计算的工程代数。
+
+    What the worker computed, with the generation it was computed from.
+    """
 
     count: int
     total: float
@@ -369,11 +434,14 @@ class LayerSumNumericField(
     BaseQuery[SumNumericFieldParams, SumNumericFieldResult],
     BackgroundOperationMixin[SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum],
 ):
-    """Sum one numeric field off the main thread, over a snapshot (PRD 7.10).
+    """在主线程之外、在一份快照上求一个数值字段的和。
+
+    任务声明了 ``dependent_layer_ids``，于是适配层能把它交给 ``QgsTask.setDependentLayers``：
+    移除图层就会取消任务，就像 QGIS 对任何依赖任务做的那样。
 
     The task declares ``dependent_layer_ids`` so the adapter can hand it to
     ``QgsTask.setDependentLayers``: removing the layer then cancels the task, as
-    QGIS does for any dependent task (PRD 8.4).
+    QGIS does for any dependent task.
     """
 
     name = "layer.sum_numeric_field"
@@ -399,22 +467,26 @@ class LayerSumNumericField(
         skipped = 0
         for seen, feature in enumerate(layer.getFeatures(), start=1):
             if seen > limit:
-                # Never truncate quietly: a partial sum that looks complete is worse
-                # than a refusal (PRD 7.10).
+                # 从不静悄悄截断 / never truncate quietly: 一个看起来完整的部分和比一次拒绝更糟 /
+                # 部分和比拒绝更糟 / a partial sum that looks complete is worse than a refusal.
                 raise FrameworkError(
                     SNAPSHOT_LIMIT_EXCEEDED, f"the layer has more than {limit} features"
                 )
             value = feature[index]
-            # QGIS hands a null attribute back as its own NULL singleton (a QVariant),
-            # and some builds return None instead; both are the "skipped null" case.
+            # QGIS 把空属性交回它自己的 NULL 单例（一个 QVariant）/ QGIS hands a null
+            # attribute back as its own NULL singleton (a QVariant), 有些构建则返回 None /
+            # and some builds return None instead; 两者都算跳过的空值 / both are the
+            # 跳过的空值 / "skipped null" case.
             if value is None or value == NULL:
                 skipped += 1
                 continue
             number = float(value)
             if not math.isfinite(number):
-                # A record whose ``total`` is NaN or Infinity is not JSON an RFC 8259
-                # parser reads (measured: json.dumps(..., allow_nan=False) raises), so
-                # the sum refuses rather than deliver a result the caller cannot parse.
+                # ``total`` 是 NaN 或 Infinity 的记录 / a record whose ``total`` is NaN or
+                # Infinity 不是 RFC 8259 解析器能读的 JSON / is not JSON an RFC 8259 parser
+                # reads（实测 ``json.dumps(..., allow_nan=False)`` 会报错 / measured: it
+                # raises）, 所以求和宁可直接拒 / so the sum refuses rather than deliver a
+                # 不交解不开的结果 / result the caller cannot parse.
                 raise FrameworkError(
                     INVALID_FIELD_TYPE, "the field holds a non-finite (NaN or infinite) value"
                 )
@@ -435,17 +507,20 @@ class LayerSumNumericField(
         for position, value in enumerate(values, start=1):
             if position % step == 0:
                 if control.is_cancelled():
-                    # Stopping here is the cooperative half of the cancel; the adapter
-                    # turns the partial run into CANCELLED and drops the numbers.
+                    # 在这里停是取消的协作那一半 / stopping here is the cooperative half of
+                    # the cancel; 适配层把部分运行变成 CANCELLED 并丢掉数字 / the adapter
+                    # 变成 CANCELLED / turns the partial run into CANCELLED and drops them.
                     break
                 control.set_progress(100.0 * position / len(values))
             total += value
             count += 1
         if not math.isfinite(total):
-            # Two finite values can still add up to Infinity (1e308 + 1e308), and a
-            # record whose ``total`` is Infinity is not JSON an RFC 8259 parser reads
-            # (measured: json.dumps(..., allow_nan=False) raises), so it is refused
-            # rather than delivered.
+            # 两个有限值也可能加出 Infinity（1e308 + 1e308）/ two finite values can still
+            # add up to Infinity (1e308 + 1e308), 而 ``total`` 是 Infinity 的记录不是
+            # RFC 8259 解析器能读的 / and a record whose ``total`` is Infinity is not JSON
+            # 能读的 JSON / an RFC 8259 parser reads（实测 / measured: ``json.dumps(...)
+            # allow_nan=False)`` 会报错 / raises）, 所以拒掉不交 / so it is refused rather
+            # 不交出去 / than delivered.
             raise FrameworkError(INVALID_FIELD_TYPE, "the sum of the field is not a finite number")
         return FieldSum(
             count=count,
@@ -474,12 +549,14 @@ class LayerSumNumericField(
         return [request.layer_id]
 
 
-# --- reading the style: categories, QML and renderer types -------------------
+# --- 读样式：分类、QML 与渲染器类型 / reading the style: categories, QML, renderers ---
 
-# The 18 QgsMapLayer.StyleCategory names in the order QGIS declares them, and the
-# subset QgsRasterLayer actually exports (PRD v2 4.1-4.2).  They are names here,
-# not flags: the bit flag is only built for a request, so this module still loads
-# without QGIS.
+# ``QgsMapLayer.StyleCategory`` 的 18 个名字，按 QGIS 声明它们的顺序 / the 18
+# ``QgsMapLayer.StyleCategory`` names in the order QGIS declares them, 以及
+# ``QgsRasterLayer`` 真正导出的那部分 / and the subset ``QgsRasterLayer`` really exports.
+# 这里它们是名字不是标志 / they are names here, not flags: 位标志只为一次请求才建 /
+# the bit flag is only built for a request, 所以本模块没有 QGIS 也能加载 / so this module
+# 无 QGIS 也能加载 / still loads without QGIS.
 StyleCategoryName = Literal[
     "LayerConfiguration",
     "Symbology",
@@ -537,7 +614,10 @@ RASTER_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
 
 
 def project_layer(project: Any, layer_id: str) -> Any:
-    """The layer behind an id, or ``LAYER_NOT_FOUND``; every reader starts here."""
+    """id 背后的图层，没有就是 ``LAYER_NOT_FOUND``；每个读取都从这里开始。
+
+    The layer behind an id, or ``LAYER_NOT_FOUND``; every reader starts here.
+    """
 
     layer = project.mapLayer(layer_id)
     if layer is None:
@@ -546,12 +626,15 @@ def project_layer(project: Any, layer_id: str) -> Any:
 
 
 def layer_for_style(project: Any, layer_id: str) -> Any:
-    """The layer behind an id, when it is a valid spatial vector or raster.
+    """id 背后的图层，前提它是一个有效的空间矢量或栅格。
+
+    整个读取侧只对这两种形体有定义。一个矢量表、一个无效图层或别人的图层类型都是
+    ``INVALID_LAYER`` 而不是空答案，因为「没有分类」和「不适用」是两个不同结果。
 
     The whole read side is defined only for those two shapes.  A vector table, an
     invalid layer or somebody else's layer type is ``INVALID_LAYER`` rather than
     an empty answer, because "no categories" and "not applicable" are different
-    results (PRD v2 4.2, 5.2).
+    results.
     """
 
     from qgis.core import Qgis
@@ -572,13 +655,19 @@ def layer_for_style(project: Any, layer_id: str) -> Any:
 
 
 def style_categories(layer: Any) -> tuple[StyleCategoryName, ...]:
-    """The categories that apply to an already-vetted layer, in PRD order."""
+    """适用一个已经审过的图层的分类，按固定顺序。
+
+    The categories that apply to an already-vetted layer, in the fixed order.
+    """
 
     return RASTER_STYLE_CATEGORIES if layer_kind(layer) == "raster" else VECTOR_STYLE_CATEGORIES
 
 
 def style_category_flag(names: Sequence[str]) -> Any:
-    """The native bit flag naming exactly ``names``, in their given order."""
+    """恰好点出 ``names`` 的原生位标志，按给定的顺序。
+
+    The native bit flag naming exactly ``names``, in their given order.
+    """
 
     from qgis.core import QgsMapLayer
 
@@ -628,7 +717,10 @@ class LayerListStyleCategories(
     BaseQuery[LayerListStyleCategoriesParams, LayerListStyleCategoriesResult],
     MainThreadOperationMixin[LayerListStyleCategoriesParams, LayerListStyleCategoriesResult],
 ):
-    """The QML categories this layer type has, whether or not they are populated."""
+    """这种图层类型有的 QML 分类，不管它们里面有没有东西。
+
+    The QML categories this layer type has, whether or not they are populated.
+    """
 
     name = "layer.list_style_categories"
     description = "List the QML style categories that apply to one layer"
@@ -649,7 +741,10 @@ class LayerGetQml(
     BaseQuery[LayerGetQmlParams, LayerGetQmlResult],
     MainThreadOperationMixin[LayerGetQmlParams, LayerGetQmlResult],
 ):
-    """One layer's style as the QML the layer itself exports, in memory only."""
+    """一个图层的样式，就是图层自己导出的 QML，只存在内存里。
+
+    One layer's style as the QML the layer itself exports, in memory only.
+    """
 
     name = "layer.get_qml"
     description = "Export one layer's current style as QML XML in memory"
@@ -673,16 +768,19 @@ class LayerGetQml(
 
         document = QDomDocument()
         try:
-            # 3.44's binding returns the export's error message (empty on success)
-            # and fills the document; it does not return (message, ok) as PRD v2 4.3
-            # says -- checked against this install's QgsMapLayer.exportNamedStyle.
+            # 3.44 的绑定返回导出错误信息（成功时为空）并填好文档 / 3.44's binding returns
+            # the export's error message (empty on success) and fills the document; 它不返回
+            # ``(message, ok)`` / it does not return ``(message, ok)``——这是对着本机安装的
+            # ``QgsMapLayer.exportNamedStyle`` 核过的 / checked against this install's
+            # 本安装的 ``QgsMapLayer.exportNamedStyle`` / own binding of that method.
             message = layer.exportNamedStyle(
                 document, QgsReadWriteContext(), style_category_flag(chosen)
             )
         except Exception as error:  # noqa: BLE001 - any exporter failure is one refusal
             raise FrameworkError(INTERNAL_ERROR, "the layer style could not be exported") from error
         if message:
-            # The native message may name a file, so it stays out of the record.
+            # 原生消息可能点出文件名，所以它不进记录 / the native message may name a file, so
+            # 不进记录 / it stays out of the record.
             raise FrameworkError(INTERNAL_ERROR, "the layer style could not be exported")
         return LayerGetQmlResult(layer_id=request.layer_id, qml=document.toString())
 
@@ -691,7 +789,10 @@ class LayerListAvailableRenderers(
     BaseQuery[LayerListAvailableRenderersParams, LayerListAvailableRenderersResult],
     MainThreadOperationMixin[LayerListAvailableRenderersParams, LayerListAvailableRenderersResult],
 ):
-    """The renderer type names the live QGIS registries offer for this layer."""
+    """活的 QGIS 注册表为这个图层提供的渲染器类型名。
+
+    The renderer type names the live QGIS registries offer for this layer.
+    """
 
     name = "layer.list_available_renderers"
     description = "List the renderer type names the QGIS registries offer for one layer"
@@ -705,10 +806,11 @@ class LayerListAvailableRenderers(
 
         layer = layer_for_style(ctx.project, request.layer_id)
         if layer_kind(layer) == "raster":
-            # QgsApplication.rasterRendererRegistry() is SIP_SKIP in 3.44 and the
-            # class does not bind instance(), so a registry object is the only
-            # Python path to the raster list (PRD v2 5.2 names the accessor that
-            # this build does not expose).
+            # 3.44 里 ``QgsApplication.rasterRendererRegistry()`` 是 SIP_SKIP / it is SIP_SKIP
+            # in 3.44, 而且类没绑 ``instance()`` / and the class does not bind instance(),
+            # 所以自建一个注册表对象是拿到栅格清单的唯一 Python 路径 / so a registry object is
+            # the only Python path to the raster list, 也是这个构建给的全部 API / and all this
+            # 构建给的全部 / build exposes.
             renderer_types = QgsRasterRendererRegistry().renderersList()
         else:
             renderer_types = QgsApplication.rendererRegistry().renderersList(layer)
@@ -719,7 +821,10 @@ class LayerGetRenderer(
     BaseQuery[LayerGetRendererParams, LayerGetRendererResult],
     MainThreadOperationMixin[LayerGetRendererParams, LayerGetRendererResult],
 ):
-    """The type name of the renderer the layer currently has, if any."""
+    """图层当前那个渲染器的类型名，有的话。
+
+    The type name of the renderer the layer currently has, if any.
+    """
 
     name = "layer.get_renderer"
     description = "Read the type name of one layer's current renderer"
@@ -737,10 +842,11 @@ class LayerGetRenderer(
         )
 
 
-# --- setting the renderer: the structured configurations (PRD v2 5.4-7.5) ---
+# --- 设渲染器：那几套结构化配置 / setting the renderer: the structured configurations ---
 
-# A colour is six RGB hex digits with no alpha and a length is millimetres:
-# those are the only shapes the simple-symbol API here accepts (PRD v2 5.5).
+# 颜色是六位 RGB 十六进制、无 alpha，长度单位是毫米 / a colour is six RGB hex digits
+# with no alpha and a length is millimetres: 这是简单符号 API 接受的唯二形状 / those are
+# 唯二形状 / the only shapes the simple-symbol API here accepts.
 type ColorHex = Annotated[StrictStr, Field(pattern=r"^#[0-9A-Fa-f]{6}$")]
 type FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 type PositiveMm = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -748,7 +854,10 @@ type Band = Annotated[StrictInt, Field(ge=1)]
 
 
 class MarkerSymbolConfig(BaseModel):
-    """A round marker, the only point symbol this version can configure."""
+    """一个圆点标记，是这一版唯一能配的点符号。
+
+    A round marker, the only point symbol this version can configure.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -758,7 +867,10 @@ class MarkerSymbolConfig(BaseModel):
 
 
 class LineSymbolConfig(BaseModel):
-    """A solid line: no dash pattern, no offset."""
+    """一条实线：没有虚线样式，没有偏移。
+
+    A solid line: no dash pattern, no offset.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -768,7 +880,10 @@ class LineSymbolConfig(BaseModel):
 
 
 class FillSymbolConfig(BaseModel):
-    """A flat fill with a simple outline; the outline cannot be hidden."""
+    """一块平面填充加一圈细边；轮廓不能隐藏。
+
+    A flat fill with a simple outline; the outline cannot be hidden.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -785,7 +900,10 @@ type SimpleSymbolConfig = Annotated[
 
 
 class NullSymbolRendererConfig(BaseModel):
-    """Draws no feature symbol; it is not the same as hiding the layer."""
+    """不画任何要素符号；它和隐藏图层不是一回事。
+
+    Draws no feature symbol; it is not the same as hiding the layer.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -800,7 +918,10 @@ class SingleSymbolRendererConfig(BaseModel):
 
 
 class CategoryConfig(BaseModel):
-    """One value of the key field and the symbol it is drawn with."""
+    """关键字段的一个取值和画它用的符号。
+
+    One value of the key field and the symbol it is drawn with.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -810,7 +931,10 @@ class CategoryConfig(BaseModel):
 
 
 class CategorizedRendererConfig(BaseModel):
-    """The caller supplies every category: nothing is derived from the data."""
+    """分类值全由调用方给出：不从数据里推任何东西。
+
+    The caller supplies every category: nothing is derived from the data.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -835,7 +959,10 @@ class RangeConfig(BaseModel):
 
 
 class GraduatedRendererConfig(BaseModel):
-    """The caller supplies every breakpoint; QGIS classifies nothing itself."""
+    """每个断点全由调用方给出；QGIS 自己不分类。
+
+    The caller supplies every breakpoint; QGIS classifies nothing itself.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -845,7 +972,8 @@ class GraduatedRendererConfig(BaseModel):
 
     @model_validator(mode="after")
     def _ranges_are_ordered(self) -> GraduatedRendererConfig:
-        # Adjacent ranges may share an endpoint; gaps are the caller's choice.
+        # 相邻区间可以共用一个端点；留空隙是调用方的选择 / adjacent ranges may share an
+        # endpoint, 留不留空隙由调用方定 / gaps are the caller's choice.
         for previous, current in zip(self.ranges, self.ranges[1:], strict=False):
             if current.lower < previous.upper:
                 raise ValueError("ranges must be ordered by lower and must not overlap")
@@ -853,7 +981,10 @@ class GraduatedRendererConfig(BaseModel):
 
 
 class RuleConfig(BaseModel):
-    """A flat rule: a filter expression or the single ELSE, plus its symbol."""
+    """一条平面规则：一个筛选表达式或唯一的 ELSE，加上它的符号。
+
+    A flat rule: a filter expression or the single ELSE, plus its symbol.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -864,7 +995,10 @@ class RuleConfig(BaseModel):
 
 
 class RuleRendererConfig(BaseModel):
-    """Rules keep the caller's order; nesting and scale limits are out of scope."""
+    """规则保留调用方的顺序；嵌套与比例尺限制不在范围内。
+
+    Rules keep the caller's order; nesting and scale limits are out of scope.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -900,7 +1034,10 @@ class SingleBandGrayConfig(BaseModel):
 
 
 class MultiBandColorConfig(BaseModel):
-    """The same band may name two or three channels."""
+    """同一个波段可以点两个或三个通道。
+
+    The same band may name two or three channels.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -955,14 +1092,16 @@ type RasterRendererConfig = Annotated[
     Field(discriminator="type"),
 ]
 
-# One union, so a type outside the nine listed is refused by the model itself.
+# 一个联合，所以榜上那九种之外的类型被模型自己拒掉 / one union, so a type outside the nine
+# 九种之外都被拒 / listed is refused by the model itself.
 type RendererConfig = Annotated[
     VectorRendererConfig | RasterRendererConfig,
     Field(discriminator="type"),
 ]
 
-# The shader ramp type per declared interpolation: values are the names of
-# ``QgsColorRampShader.Type`` members (PRD v2 7.3).
+# 每种声明的插值对应的 shader 斜坡类型 / the shader ramp type per declared interpolation:
+# 值就是 ``QgsColorRampShader.Type`` 成员的名字 / the values are the names of
+# 成员名 / ``QgsColorRampShader.Type`` members.
 PSEUDO_RAMP_TYPES = {"linear": "Interpolated", "discrete": "Discrete", "exact": "Exact"}
 
 
@@ -977,7 +1116,10 @@ class LayerSetRendererResult(Result):
 
 
 def expected_symbol_type(layer: Any) -> Literal["marker", "line", "fill"]:
-    """The simple symbol a layer's geometry takes; Multi* reports its base type."""
+    """一个图层的几何接受的简单符号；Multi* 报它的基础类型。
+
+    The simple symbol a layer's geometry takes; Multi* reports its base type.
+    """
 
     from qgis.core import Qgis
 
@@ -992,7 +1134,10 @@ def expected_symbol_type(layer: Any) -> Literal["marker", "line", "fill"]:
 
 
 def simple_symbol(config: SimpleSymbolConfig, expected: str) -> Any:
-    """One native symbol from the declared colour and size alone (PRD v2 5.5)."""
+    """只用声明的颜色和大小建一个原生符号。
+
+    One native symbol from the declared colour and size alone.
+    """
 
     if config.type != expected:
         raise FrameworkError(INVALID_INPUT, "the symbol does not match the layer geometry")
@@ -1016,7 +1161,10 @@ def simple_symbol(config: SimpleSymbolConfig, expected: str) -> Any:
 
 
 def layer_field(layer: Any, name: str) -> Any:
-    """The layer's own field, so a value is checked against its real type."""
+    """图层自己的字段，所以一个值是对着真实类型核的。
+
+    The layer's own field, so a value is checked against its real type.
+    """
 
     fields = layer.fields()
     index = fields.indexFromName(name)
@@ -1026,16 +1174,21 @@ def layer_field(layer: Any, name: str) -> Any:
 
 
 def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
-    """The key two categories are compared by, and the value the renderer stores.
+    """两个分类拿来比较的键，以及渲染器存下的那个值。
+
+    整数和浮点数算同一个数值分类。其它每个值先转成字段自己的类型：字段装不下的值被拒，而不是变成
+    一个永远匹配不上的分类；一个值的两种写法（``True`` 与 ``"true"``）就是同一个分类。整数
+    字段只收自己范围内的整数值，并按整数存——和它自己的值同形。Qt 是按数值比较分类值的
+    （``2`` 和 ``2.0`` 都能匹配要素值 2），所以存的形状关乎字段装得下什么，不关乎匹配。
 
     An integer and a float are the same numeric category.  Every other value is
     converted to the field's own type first: a value the field cannot hold is
     refused instead of becoming a category that can never match, and two spellings
-    of one value (``True`` and ``"true"``) are one category (PRD v2 6.3).  An
-    integer field takes only whole values inside its own range, and stores them as
-    integers -- the same shape its own values have.  Qt compares category values
-    numerically (``2`` and ``2.0`` both match a feature value of 2), so the stored
-    shape is about the value the field can hold, not about the match.
+    of one value (``True`` and ``"true"``) are one category.  An integer field takes
+    only whole values inside its own range, and stores them as integers -- the same
+    shape its own values have.  Qt compares category values numerically (``2`` and
+    ``2.0`` both match a feature value of 2), so the stored shape is about the value
+    the field can hold, not about the match.
     """
 
     if value is None:
@@ -1049,23 +1202,29 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
         try:
             number = float(value)
         except OverflowError:
-            # An integer the float cannot hold is not finite for this purpose, and it
-            # must not reach either the dedupe key or the native category.
+            # 浮点数装不下的整数在这里就不算有限值 / an integer the float cannot hold is not
+            # finite for this purpose, 而且它不能进去重键或原生分类 / and it must not reach
+            # 去重键或原生分类 / either the dedupe key or the native category.
             raise FrameworkError(
                 INVALID_INPUT, "a category value does not fit the field type"
             ) from None
         if field.type() in (QVariant.Int, QVariant.LongLong):
-            # A fraction on an integer field can never match a feature; a whole value is
-            # stored and deduped as an integer, so 2 and 2.0 are one category while the
-            # two int64 values a float cannot tell apart stay two.
-            # UInt/ULongLong are left out: no provider in this build makes such a field.
+            # 整数字段上的小数永远匹配不到要素 / a fraction on an integer field can never
+            # match a feature; 整数值按整数存与去重 / a whole value is stored and deduped as
+            # an integer, 所以 2 和 2.0 是一个分类 / so 2 and 2.0 are one category, 而 float
+            # 分不开的两个 int64 值仍是两个 / while two int64 values a float cannot tell
+            # apart stay two. UInt/ULongLong 不在此列 / are left out: 这个构建没有 provider
+            # 生产这种字段 / no provider in this build makes such a field.
             if not number.is_integer():
                 raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
             whole = int(value)
-            # An integer outside int32/int64 is not a value the field can hold (the memory
-            # provider refuses such an attribute, and PyQt overflows for int64), so its
-            # category would never match.  QgsField.convertCompatible wraps a LongLong
-            # overflow instead of refusing it (2**63 -> -2**63, measured), hence the bounds.
+            # 超出 int32/int64 的整数不是字段装得下的值 / an integer outside int32/int64 is
+            # not a value the field can hold（内存 provider 会拒这种属性，PyQt 对 int64 会
+            # 溢出 / the memory provider refuses such an attribute and PyQt overflows for
+            # int64）, 所以它的分类永远匹配不上 / so its category would never match.
+            # ``QgsField.convertCompatible`` 对 LongLong 溢出是包一圈而不是拒（2**63 -> -2**63，
+            # 实测）/ it wraps a LongLong overflow instead of refusing it (2**63 -> -2**63,
+            # measured), 所以这里得自己定界 / hence the bounds.
             if field.type() == QVariant.Int:
                 low, high = -(2**31), 2**31 - 1
             else:
@@ -1078,14 +1237,18 @@ def category_key(field: Any, value: Any) -> tuple[tuple[str, Any], Any]:
     variant = QVariant(value)
     if not variant.convert(field.type()):
         raise FrameworkError(INVALID_INPUT, "a category value does not fit the field type")
-    # The converted value -- a QDate for a date field, a bool for a boolean one -- is
-    # what the field can hold, so it is both the dedupe key and the native value.
+    # 转换后的值才是字段装得下的 / the converted value -- a QDate for a date field, a bool
+    # 日期字段的 QDate、布尔字段的 bool / for a boolean one -- is what the field can hold,
+    # 所以它同时是去重键和原生值 / so it is both the dedupe key and the native value.
     converted = variant.value()
     return ("value", converted), converted
 
 
 def raster_band(layer: Any, band: int) -> int:
-    """Bands are 1-based and only the layer's own bands are addressable."""
+    """波段从 1 开始，且只有图层自己的波段可以点。
+
+    Bands are 1-based and only the layer's own bands are addressable.
+    """
 
     if not 1 <= band <= layer.bandCount():
         raise FrameworkError(INVALID_INPUT, "a band is outside the raster's bands")
@@ -1101,7 +1264,10 @@ RASTER_RENDERER_CONFIGS = (
 
 
 def build_renderer(layer: Any, config: RendererConfig) -> Any:
-    """The complete native renderer; the layer is not touched here (PRD v2 5.4)."""
+    """完整的原生渲染器；这里不碰图层。
+
+    The complete native renderer; the layer is not touched here.
+    """
 
     if isinstance(config, RASTER_RENDERER_CONFIGS):
         if layer_kind(layer) != "raster":
@@ -1113,7 +1279,10 @@ def build_renderer(layer: Any, config: RendererConfig) -> Any:
 
 
 def vector_renderer(layer: Any, config: VectorRendererConfig) -> Any:
-    """Build one of the five vector renderers, symbols included."""
+    """建五个矢量渲染器之一，符号一并建好。
+
+    Build one of the five vector renderers, symbols included.
+    """
 
     from qgis.core import (
         QgsCategorizedSymbolRenderer,
@@ -1155,7 +1324,8 @@ def vector_renderer(layer: Any, config: VectorRendererConfig) -> Any:
         ]
         return QgsGraduatedSymbolRenderer(config.field, ranges)
 
-    # A rule's filter is only checked for syntax: its result is never evaluated here.
+    # 规则的筛选表达式只查语法：它的结果在这里从不求值 / a rule's filter is only checked
+    # for syntax: 求值留给 QGIS / its result is never evaluated here.
     for rule in config.rules:
         if not rule.else_rule and QgsExpression(rule.filter or "").hasParserError():
             raise FrameworkError(INVALID_INPUT, "a rule filter is not a valid expression")
@@ -1173,7 +1343,10 @@ def vector_renderer(layer: Any, config: VectorRendererConfig) -> Any:
 
 
 def raster_renderer(layer: Any, config: RasterRendererConfig) -> Any:
-    """Build one of the four raster renderers from the layer's own provider."""
+    """从图层自己的 provider 建四个栅格渲染器之一。
+
+    Build one of the four raster renderers from the layer's own provider.
+    """
 
     from qgis.core import (
         QgsColorRampShader,
@@ -1196,11 +1369,12 @@ def raster_renderer(layer: Any, config: RasterRendererConfig) -> Any:
     band = raster_band(layer, config.band)
     if isinstance(config, SingleBandGrayConfig):
         renderer = QgsSingleBandGrayRenderer(provider, band)
-        # The enhancement takes the band's own data type, or a float band's values
-        # would be clipped to an 8-bit range before the stretch sees them.
+        # 对比增强拿波段自己的数据类型 / the enhancement takes the band's own data type,
+        # 否则浮点波段的值在拉伸之前就被剪到 8 位范围 / or a float band's values would be
+        # 剪到 8 位 / clipped to an 8-bit range before the stretch sees them.
         enhancement = QgsContrastEnhancement(provider.dataType(band))
-        # The algorithm setter below builds the lookup table once; the two values
-        # only store their bounds (PRD v2 7.1).
+        # 下面的算法设置只建一次查找表 / the algorithm setter below builds the lookup table
+        # once; 这两个值只存边界 / the two values only store their bounds.
         enhancement.setMinimumValue(config.min, False)
         enhancement.setMaximumValue(config.max, False)
         enhancement.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum)
@@ -1225,7 +1399,9 @@ class LayerSetRenderer(
     BaseCommand[LayerSetRendererParams, LayerSetRendererResult],
     MainThreadOperationMixin[LayerSetRendererParams, LayerSetRendererResult],
 ):
-    """Replace one layer's whole renderer in a single call (PRD v2 5.4).
+    """用一次调用换掉一个图层的整个渲染器。
+
+    Replace one layer's whole renderer in a single call.
 
     Every refusal happens before ``setRenderer``: the old renderer is still the
     one installed.  Once installed, the layer owns the object; only its type name
@@ -1251,6 +1427,7 @@ class LayerSetRenderer(
         except FrameworkError:
             raise
         except Exception as error:  # noqa: BLE001 - one native failure is one refusal
-            # The native message may name a field or a file, so it stays out of the record.
+            # 原生消息可能点出字段或文件名 / the native message may name a field or a file,
+            # 所以它不进记录 / so it stays out of the record.
             raise FrameworkError(INTERNAL_ERROR, "the renderer could not be set") from error
         return LayerSetRendererResult(layer_id=request.layer_id, renderer_type=renderer_type)
