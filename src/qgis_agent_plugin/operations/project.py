@@ -53,108 +53,112 @@ from ..core.models import (
 )
 from ..core.security import resolve_path
 
-# 本插件只读写这两种格式 / the two formats this plugin reads and writes;
-# 别的都是调用方的错 / anything else is a caller mistake.
+# 本插件只读写这两种格式，别的都是调用方的错。
+# The two formats this plugin reads and writes; anything else is a caller mistake.
 PROJECT_SUFFIXES = (".qgs", ".qgz")
 
-# 超过这个大小的 ``.qgs``，或 ``.qgz`` 所有成员之和，直接拒掉不去读 / a ``.qgs``, or every
-# member of a ``.qgz`` together, above this size is refused rather than read: 扫描在主线程跑 /
-# the scan runs on the main thread, 而小归档里的成员能解压成几十亿字节 / and a small archive
-# 能装下解压后几十亿字节的成员 / can hold members that expand to gigabytes.
+# 超过这个大小的 ``.qgs``，或 ``.qgz``
+# 所有成员之和，直接拒掉不去读：扫描跑在主线程，而小归档里的成员能解压成几十亿字节。
+# A ``.qgs``, or every member of a ``.qgz`` together, above this size is refused rather than read:
+# the scan runs on the main thread, and a small archive can hold members that expand to gigabytes.
 MAX_PROJECT_BYTES = 16 * 1024 * 1024
 
-# XML 嵌套深度超过这个值就在 ``read()`` 之前被拒 / an XML nesting depth above this is
-# refused before ``read()``. 界限由时间定，不是由崩溃定 / the bound is set by time, not by
-# the crash: ``QgsProject.read()`` 递归解析工程，代价比深度增长更快 / it parses the project
-# recursively and its cost grows faster than the depth（QGIS 3.44.13、Windows x64 实测 /
-# measured on QGIS 3.44.13, Windows x64: 200 层嵌套图层树分组 0.28 s / 200 nested layer-tree
-# groups 0.28 s, 600 层 8.84 s / 600 groups 8.84 s, 900 层 30.11 s / 900 groups 30.11 s --
-# 而一个 4.2 MB 的平铺工程只读 0.14 s / while a flat 4.2 MB project read in 0.14 s, 所以那
-# 30 s 是深度造成的 / so those 30 s are the depth). 100 层嵌套分组是深度 105 / 100 nested
-# groups, a real project QGIS writes, are depth 105; 256 留了 2.4 倍余量 / 256 keeps 2.4 times
-# that, 按实测曲线约半秒 / and about half a second by the measured curve. 5500 层还能打开 /
-# 5500 levels still opened, 6000 层让进程以 0xC00000FD 死掉 / and 6000 killed the process with
-# 0xC00000FD, 而只耗时 30 s 的文件已经卡住主线程 / while a file that merely takes 30 s has
-# 已经停住了它 / stopped it already.
+# XML 嵌套深度超过这个值就在 ``read()`` 之前被拒。界限由时间定，不是由崩溃定：``QgsProject.read()``
+# 递归解析工程，代价比深度增长更快（QGIS 3.44.13、Windows x64 实测：200 层嵌套图层树分组 0.28 s，600
+# 层 8.84 s，900 层 30.11 s，而一个 4.2 MB 的平铺工程只读 0.14 s，所以那 30 s 是深度造成的）。100
+# 层嵌套分组（QGIS 真实写出的工程）是深度 105；256 留了 2.4 倍余量，按实测曲线约半秒。5500
+# 层还能打开，6000 层让进程以 0xC00000FD 死掉，而只耗时 30 s 的文件已经卡住主线程。
+# An XML nesting depth above this is refused before ``read()``. The bound is set by time, not by the
+# crash: ``QgsProject.read()`` parses the project recursively and its cost grows faster than the
+# depth (measured on QGIS 3.44.13, Windows x64: 200 nested layer-tree groups 0.28 s, 600 groups 8.84
+# s, 900 groups 30.11 s -- while a flat 4.2 MB project read in 0.14 s, so those 30 s are the depth).
+# 100 nested groups, a real project QGIS writes, are depth 105; 256 keeps 2.4 times that and about
+# half a second by the measured curve. 5500 levels still opened and 6000 killed the process with
+# 0xC00000FD, but a file that merely takes 30 s has stopped the main thread already.
 MAX_PROJECT_DEPTH = 256
 
-# 解析器最多被问这么多个标签 / the parser is asked about at most this many tags.
-# 每个元素有一个起始标签，所以 ``bytes.count(b"<")`` 是元素数的上界 / every element has one
-# start tag, so ``bytes.count(b"<")`` bounds the element count: 一次 memchr 就在解析前定界 /
-# one memchr pass bounds the parse before it starts（实测 40 万标签解析 0.12-0.19 s /
-# 400000 tags parse in 0.12-0.19 s, measured）. 一个普通的 16 MB 工程有 26-39 万个标签 /
-# an ordinary 16 MB project holds 260000-390000 tags（实测每标签 42.6-61 字节 /
-# 42.6 to 61 bytes per tag in the measured projects）, 所以这个界放得过真实工程 / so this
-# bound leaves a real project under it / 于是真实工程仍在界内;
-# 标签炸弹按计数拒掉，永不走一遍 / tag spam is refused by the count and never walked.
+# 解析器最多被问这么多个标签。每个元素有一个起始标签，所以 ``bytes.count(b"<")``
+# 是元素数的上界：一次 memchr 就在解析前定界（实测 40 万标签解析 0.12-0.19 s）。一个普通的 16 MB
+# 工程有 26-39 万个标签（实测每标签 42.6-61
+# 字节），所以这个界放得过真实工程；标签炸弹按计数拒掉，永不走一遍。
+# The parser is asked about at most this many tags. Every element has one start tag, so
+# ``bytes.count(b"<")`` is an upper bound on the element count: one memchr pass bounds the parse
+# before it starts (400000 tags parse in 0.12-0.19 s, measured). An ordinary 16 MB project holds
+# 260000-390000 tags -- 42.6 to 61 bytes per tag in the measured projects -- so this bound leaves a
+# real project under it; tag spam is refused by the count and never walked.
 MAX_PROJECT_TAGS = 400_000
 
-# 一个 ``.qgz`` 最多能有几个成员 / the most members a ``.qgz`` may hold. 字节预算数的是
-# 解压后的字节，空成员在那里不花钱 / the byte budget counts decompressed bytes, so an empty
-# member costs nothing there -- 但每个成员都要一次 ``ZipFile.open()`` / but every member costs
-# one ``ZipFile.open()``: 10.4 MB 归档里 10 万个空成员要 1.75 s / 100000 empty members in a
-# 10.4 MB archive took 1.75 s（实测 / measured）, 与数量线性 / linear in the count. 数量要等
-# ``zipfile`` 解析完整个中央目录才知道 / the count is only known after ``zipfile`` has parsed
-# the whole central directory, 这本身也要内存 / which costs memory as well（39 MB 归档里 40 万
-# 个空成员：2.92 s、222 MiB / 400000 empty members in a 39 MB archive: 2.92 s and 222 MiB）,
-# 所以归档自身的大小在打开前先限住 / so the archive's own size is bounded before it is
-# opened, 这个界兜住还塞得下的部分 / and this bound is the backstop for what still fits.
-# 工程归档就是一个 ``.qgs`` 加附件 / a project archive is a ``.qgs`` and its attachments,
-# 不是几千个条目 / not thousands of entries.
+# 一个 ``.qgz`` 最多能有几个成员。字节预算数的是解压后的字节，空成员在那里不花钱，但每个成员都要一次
+# ``ZipFile.open()``：10.4 MB 归档里 10 万个空成员要 1.75 s（实测），与数量线性。数量要等
+# ``zipfile`` 解析完整个中央目录才知道，这本身也要内存（39 MB 归档里 40 万个空成员：2.92 s、222
+# MiB），所以归档自身的大小在打开前先限住，这个界兜住还塞得下的部分。工程归档就是一个 ``.qgs``
+# 加附件，不是几千个条目。
+# The most members a ``.qgz`` may hold. The byte budget counts decompressed bytes, so an empty
+# member costs nothing there -- but every member costs one ``ZipFile.open()``: 100000 empty members
+# in a 10.4 MB archive took 1.75 s (measured), linear in the count. The count is only known after
+# ``zipfile`` has parsed the whole central directory, which costs memory as well (400000 empty
+# members in a 39 MB archive: 2.92 s and 222 MiB), so the archive's own size is bounded before it is
+# opened and this bound is the backstop for what still fits. A project archive is a ``.qgs`` and its
+# attachments, not thousands of entries.
 MAX_ARCHIVE_MEMBERS = 1000
 
-# ``QgsProject.read()`` 对 ``.qgz`` 的做法：整个归档都解开 / what ``QgsProject.read()``
-# does with a ``.qgz``: it unpacks the whole archive, 所以它解不出的成员 / so a member it
-# 不是扫描能跳过的 / cannot extract is not a member the scan may skip.
-# 加密成员和 QGIS 不读的压缩方式在 ``read()`` 之前就拒 / so encrypted members and compression
-# 方法也一并拒掉 / methods QGIS does not read are refused before it sees the file.
+# ``QgsProject.read()`` 对 ``.qgz``
+# 的做法是把整个归档都解开，所以它解不出的成员不是扫描能跳过的。加密成员和 QGIS 不读的压缩方式在
+# ``read()`` 看到文件之前就被拒。
+# What ``QgsProject.read()`` does with a ``.qgz``: it unpacks the whole archive, so a member it
+# cannot extract is not a member the scan may skip. Encrypted members and compression methods QGIS
+# does not read are refused before ``read()`` sees the file.
 _ZIP_ENCRYPTED = 0x1
 _UNPACKABLE = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 
-# 从归档成员里读一次 / one read from an archive member: 预算按解压字节算 / the budget counts
-# decompressed bytes, 不信清单声称的大小 / never the size the manifest claims.
+# 从归档成员里读一次。预算按解压出来的字节算，从不信清单声称的大小。
+# One read from an archive member. The budget counts these bytes as they are decompressed, never the
+# size the manifest claims.
 _CHUNK = 1024 * 1024
 
-# 只看一个值的开头 / only the start of a value is judged, 所以元素文本只留前导空白之后的
-# 这么多字符 / so an element's text is kept up to this many characters past its leading
-# whitespace. 最长的标记是 scheme 加 ``://``（``https://`` 八个字符）/ the longest marker is
-# a scheme plus ``://`` (``https://`` is eight), 于是每种真实 scheme 都有余地 / which leaves
-# every real scheme room; 这个界省掉每层重拼一次 16 MB 文本 / it saves re-joining a 16 MB
-# 文本，嵌套 256 层也一样 / text once per nesting level, 256 levels deep included.
+# 只看一个值的开头，所以元素文本只留前导空白之后的这么多字符。最长的标记是 scheme 加
+# ``://``（``https://`` 八个字符），于是每种真实 scheme 都有余地；这个界让嵌套 256 层的 16 MB
+# 文本不必每层重新拼一次。
+# Only the start of a value is judged, so an element's text is kept up to this many characters after
+# its leading whitespace. The longest marker is a scheme plus ``://`` (``https://`` is eight), which
+# leaves every real scheme room; the bound is what keeps a 16 MB text nested 256 levels deep from
+# being re-joined once per level.
 # shortcut: scheme 超过 59 字符的值看不见, 有 provider 真这么拼就该升级
-# 英文：a value whose scheme is longer than 59 characters is not seen / upgrade once a
-# provider starts spelling one: 这就是升级条件 / that is the trigger.
+# 英文：a value whose scheme is longer than 59 characters is not seen, so upgrade when a
+# provider starts spelling one.
 _VALUE_HEAD = 64
 
-# 值最开头的一个 scheme / a scheme at the very start of a value. ``EPSG:4326`` 和
-# ``C:/data`` 有冒号但没有 ``//`` / they carry a colon but no ``//``, 而两者都是 QGIS 会写进
-# 工程的值 / and both are values QGIS writes into a project.
+# 值最开头的一个 scheme。``EPSG:4326`` 和 ``C:/data`` 有冒号但没有 ``//``，而两者都是 QGIS
+# 会写进工程的值。
+# A scheme at the very start of a value. ``EPSG:4326`` and ``C:/data`` carry a colon but no ``//``,
+# and both are values QGIS writes into a project.
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
-# 一个 GDAL 子数据集源，``decodeUri`` 会整串返回 / a GDAL subdataset source, which
-# ``decodeUri`` 返回整串（见 ``_subdataset_path``）/ returns it whole (see ``_subdataset_path``):
-# 大写驱动名前缀 / an upper-case driver prefix, 然后是被引号包住或跟在 ``WORD:<index>:`` 后的
-# 文件 / then the file, quoted or behind a ``WORD:<index>:`` prefix.
+# 一个 GDAL 子数据集源，``decodeUri`` 会整串返回（见
+# ``_subdataset_path``）：大写驱动名前缀，然后是被引号包住或跟在 ``WORD:<index>:`` 后面的文件。
+# A GDAL subdataset source, which ``decodeUri`` returns whole (see ``_subdataset_path``): an
+# upper-case driver prefix, then the file quoted or behind a ``WORD:<index>:`` prefix.
 _SUBDATASET = re.compile(r"\A[A-Z][A-Z0-9_]+:")
 _SUBDATASET_INDEX = re.compile(r"\A(?:\d+|off):", re.IGNORECASE)
 _ABSOLUTE_PATH = re.compile(r"\A(?:[A-Za-z]:[\\/]|[\\/])")
 
-# 数据源是唯一按包含关系判断的值 / a data source is the one value judged by containment:
-# GDAL 在自己的本地语法里拼一个远程文件 / GDAL spells a remote file inside its own local
-# syntax (``NETCDF:"/vsicurl/http://…":var``), 而标记可能落在这个扫描保留的开头之后 / and
-# the marker can sit past the head this scan keeps. ``_MARKER_TAIL`` 是保留的末尾字符数 /
-# the number of trailing characters kept, 而它让跨两个字符事件的标记照样看得见 / and it keeps
-# 跨事件的标记不漏 / a marker split across two character-data events visible.
+# 数据源是唯一按包含关系判断的值：GDAL
+# 在自己的本地语法里拼一个远程文件（``NETCDF:"/vsicurl/http://…":var``），而标记可能落在这个扫描保留的开头之后。``_MARKER_TAIL``
+# 是保留的末尾字符数，所以跨两个 character-data 事件的标记照样看得见。
+# A data source is the one value judged by containment: GDAL spells a remote file inside its own
+# local syntax (``NETCDF:"/vsicurl/http://…":var``) and the marker can sit past the head this scan
+# keeps. ``_MARKER_TAIL`` is how many characters of the value are kept, so a marker split across two
+# character-data events is still seen.
 _MARKER = "://"
 _MARKER_TAIL = len(_MARKER) - 1
 
-# ``read()`` 对无法解析的文件的说法 / what ``read()`` reports for a file it cannot parse;
-# 扫描用同一句话 / the scan uses the same sentence, 不自己发明另一个错误 / rather than
-# 发明一个自己的错误 / inventing an error of its own.
+# ``read()`` 对无法解析的文件的说法；扫描用同一句话，不自己发明另一个错误。
+# What ``read()`` reports for a file it cannot parse; the scan uses the same sentence rather than
+# inventing an error of its own.
 _READ_FAILED = "the project file could not be read; the current project may have changed"
 
-# 两条远程规则共用这句拒绝语 / the refusal both remote rules share: 哪个值点了主机名不进
-# 消息 / which value named the host stays out of it.
+# 两条远程规则共用这句拒绝语：哪个值点了主机名不进消息。
+# The refusal both remote rules share: which value named the host stays out of it.
 _REMOTE_SOURCE = "the project file names a remote data source; it was not opened"
 
 
@@ -195,9 +199,9 @@ class ProjectOpenResult(Result):
     file_path: StrictStr
     crs_authid: StrictStr
     layer_count: int
-    # 一个有图层加载不了的工程照样读进来 / a project whose layers cannot load is read, 但不
-    # 报成完全可用 / but it is not reported as fully usable, 也不悄悄算失败 / and it is not
-    # 当成失败 / silently called a failure either.
+    # 一个有图层加载不了的工程照样读进来，但不报成完全可用，也不悄悄算失败。
+    # A project whose layers cannot load is read, but it is not reported as fully usable, and it is
+    # not silently called a failure either.
     invalid_layer_count: int
 
 
@@ -238,24 +242,26 @@ class ProjectCreate(
     ) -> ProjectCreateResult:
         from qgis.core import QgsCoordinateReferenceSystem
 
-        # 无法使用的 CRS 是调用方的错 / an unusable CRS is a caller mistake,
-        # 在碰到当前工程之前就拒掉 / refused before the current project is touched.
+        # 无法使用的 CRS 是调用方的错，在碰到当前工程之前就拒掉。
+        # An unusable CRS is a caller mistake, and it is refused before the current project is
+        # touched.
         crs = QgsCoordinateReferenceSystem(request.crs_authid)
         if not crs.isValid():
             raise FrameworkError(INVALID_CRS, f"{request.crs_authid} is not a usable CRS")
         _refuse_replacement_unless_discarding(ctx, request.discard_current)
 
         if not ctx.iface.newProject(promptToSaveFlag=False):
-            # QGIS 拒绝建工程既不是调用方的错 / QGIS declining to create a project is not a
-            # 也不是图层或路径问题 / caller mistake, and not a layer or path problem,
-            # 所以归内部错误 / so it is an internal error.
+            # QGIS 拒绝建工程既不是调用方的错，也不是图层或路径问题，所以归内部错误。
+            # QGIS declining to create a project is not a caller mistake and not a layer or path
+            # problem, so it is an internal error.
             raise FrameworkError(INTERNAL_ERROR, "QGIS did not create a new project")
 
         ctx.project.setCrs(crs)
         return ProjectCreateResult(
-            # 调用方给的字符串可能是合法别名（``epsg:4326``）/ the caller's string may be a
-            # valid alias (``epsg:4326``); 这里报工程现在持有的规范 authid / so report the
-            # canonical authid the project now holds, 与 ``open``/``get_info`` 一致 / as they do.
+            # 调用方给的字符串可能是合法别名（``epsg:4326``），这里报工程现在持有的规范 authid，与
+            # ``open`` / ``get_info`` 一致。
+            # The caller's string may be a valid alias (``epsg:4326``); report the canonical authid
+            # the project now holds, as ``open``/``get_info`` do.
             crs_authid=crs.authid(),
             file_path=ctx.project.fileName() or None,
             layer_count=len(ctx.project.mapLayers()),
@@ -277,9 +283,10 @@ class ProjectOpen(
         _refuse_replacement_unless_discarding(ctx, request.discard_current)
         _refuse_remote_datasources(path)
 
-        # 用 ``read()`` 而不是可能弹窗的 ``iface.addProject()`` / ``read()`` rather than
-        # ``iface.addProject()``, which may prompt: 拒绝必须是错误码 / a refusal has to be an
-        # error code, 永远不是模态对话框 / never a modal dialog.
+        # 用 ``read()`` 而不是可能弹窗的
+        # ``iface.addProject()``：拒绝必须是错误码，永远不是模态对话框。
+        # ``read()`` rather than ``iface.addProject()``, which may prompt: a refusal has to be an
+        # error code, never a modal dialog.
         if not ctx.project.read(str(path)):
             raise FrameworkError(
                 PROJECT_OPEN_FAILED,
@@ -289,10 +296,10 @@ class ProjectOpen(
         layers = ctx.project.mapLayers()
         outside = _sources_outside_the_allowed_roots(ctx, layers)
         if outside:
-            # 这些源是工程文件自己点的名 / the project file named these sources, 所以
-            # ``read()`` 已经碰到它们 / so ``read()`` already reached them; 移除它们才能让新工程
-            # 留在调用方被承诺的策略之内 / removing them is what keeps the new project inside
-            # 那条策略 / the policy the caller was promised.
+            # 这些源是工程文件自己点的名，``read()``
+            # 已经碰到它们；移除它们才能让新工程留在调用方被承诺的策略之内。
+            # The project file named these sources, so ``read()`` already reached them; removing
+            # them is what keeps the new project inside the policy the caller was promised.
             for layer_id in outside:
                 ctx.project.removeMapLayer(layer_id)
             raise FrameworkError(
@@ -327,9 +334,9 @@ class ProjectSave(
             )
 
         path = resolve_path(target, ctx.policy.allowed_project_roots, must_exist=False)
-        # 关联文件也算在内 / the associated file counts too: 覆盖它是一个丢文件的决定 /
-        # overwriting it is a file loss decision, 得由调用方明确做出 / which the caller has
-        # 明确给出 / to make explicitly.
+        # 关联文件也算在内：覆盖它是一个丢文件的决定，必须由调用方明确做出。
+        # The associated file counts too: overwriting it is a file loss decision the caller has to
+        # make explicitly.
         if path.exists() and not request.overwrite:
             raise FrameworkError(
                 TARGET_EXISTS, "the target file exists; pass overwrite=true to replace it"
@@ -340,9 +347,9 @@ class ProjectSave(
                 PROJECT_SAVE_FAILED,
                 "the project could not be written; the target file may be partially written",
             )
-        # ``write()`` 成功后会清掉脏标记 / ``write()`` clears the dirty flag on success,
-        # 所以这里报的是 QGIS 留下的状态 / so this reports the project as QGIS left it,
-        # 而不是照抄一份示例输出 / not an echoed sample.
+        # ``write()`` 成功后会清掉脏标记，所以这里报的是 QGIS 留下的状态，而不是照抄一份示例输出。
+        # ``write()`` clears the dirty flag on success, so this reports the project as QGIS left it
+        # rather than echoing a sample output.
         return ProjectSaveResult(file_path=str(path), is_dirty=project.isDirty())
 
 
@@ -390,14 +397,15 @@ def _refuse_remote_datasources(path: Path) -> None:
     except FrameworkError:
         raise
     except (OSError, zipfile.BadZipFile):
-        # 这个扫描打不开的文件，正是 ``read()`` 会报成 PROJECT_OPEN_FAILED 的那种 / a file
-        # this scan cannot open is what ``read()`` reports as PROJECT_OPEN_FAILED, 扫描不是新
-        # 的失败来源 / and the scan is not a new failure source of its own.
+        # 这个扫描打不开的文件，正是 ``read()`` 会报成 PROJECT_OPEN_FAILED
+        # 的那种；扫描不是新的失败来源。
+        # A file this scan cannot open is what ``read()`` reports as PROJECT_OPEN_FAILED; the scan
+        # is not a new failure source of its own.
         return
     except Exception:  # noqa: BLE001 - a zipfile failure the checks did not predict
-        # 调用方拿到的仍是 ``read()`` 会给出的码 / the caller still gets the code ``read()``
-        # would have produced, 而不是像插件缺陷的 INTERNAL_ERROR / not an INTERNAL_ERROR
-        # 那种读起来像插件缺陷的东西 / that reads like a plugin defect.
+        # 调用方拿到的仍是 ``read()`` 会给出的码，而不是读起来像插件缺陷的 INTERNAL_ERROR。
+        # The caller still gets the code ``read()`` would have produced, not an INTERNAL_ERROR that
+        # reads like a plugin defect.
         raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
 
 
@@ -419,14 +427,15 @@ def _project_documents(path: Path) -> list[bytes]:
     a per-member check and were held twice over (measured, 200 MB).
     """
 
-    # 归档自身的大小在 ``zipfile`` 建出来之前就问 / the archive's own size is asked before
-    # ``zipfile`` is built: 成员预算数的是解压后的字节 / the member budget counts decompressed
-    # bytes, 所以 40 万个空成员不花它一分钱 / so 400000 empty members cost it nothing, 而它们
-    # 需要的中央目录要 2.92 s、222 MiB 才解析完，然后同样被拒 / while the central directory
-    # they need took 2.92 s and 222 MiB to parse and was then refused（实测 / measured）.
-    # 一个 16 MB 归档约装 16 万成员 / a 16 MB archive holds about 160000 members, 所以这个界
-    # 钉住的是打开一个归档的代价 / so this bound is what pins the cost of opening one, 不管它
-    # 的清单怎么说 / whatever its manifest says.
+    # 归档自身的大小在 ``zipfile`` 建出来之前就问：成员预算数的是解压后的字节，所以 40
+    # 万个空成员不花它一分钱，而它们需要的中央目录要 2.92 s、222 MiB
+    # 才解析完，然后同样被拒（实测）。一个 16 MB 归档约装 16
+    # 万成员，所以这个界钉住的是打开一个归档的代价，不管它的清单怎么说。
+    # The archive's own size is asked before ``zipfile`` is built: the member budget counts
+    # decompressed bytes, so 400000 empty members cost it nothing while the central directory they
+    # need took 2.92 s and 222 MiB to parse and was then refused (measured). A 16 MB archive holds
+    # about 160000 members, so this bound is what pins the cost of opening one, whatever its
+    # manifest says.
     _refuse_if_too_large(path.stat().st_size)
 
     if path.suffix.lower() != ".qgz":
@@ -454,9 +463,9 @@ def _project_documents(path: Path) -> list[bytes]:
                         if kept is not None:
                             kept.extend(chunk)
             except (RuntimeError, NotImplementedError, zipfile.BadZipFile):
-                # 清单没标成读不了的成员也不给 ``read()`` / nor is a member the manifest did
-                # not announce as unreadable / 加密，或自己的流不认声明的大小 / encrypted, or a
-                # 不认自己声明大小的流 / size its own stream does not honour.
+                # 清单没标成读不了的成员（加密，或自己的流不认声明的大小）也不交给 ``read()``。
+                # A member the manifest did not announce as unreadable (encrypted, or a size its own
+                # stream does not honour) is not handed to ``read()``.
                 raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED) from None
             if kept is not None:
                 documents.append(bytes(kept))
@@ -506,8 +515,8 @@ def _scan_project_xml(text: bytes) -> None:
         )
 
     scan = _ProjectScan()
-    # 开启命名空间处理 / namespace processing: ``<qgs:datasource>`` 就是 ``<datasource>`` 那个
-    # 元素 / the element ``<datasource>`` is.
+    # 开启命名空间处理，于是 ``<qgs:datasource>`` 就是 ``<datasource>`` 那个元素。
+    # Namespace processing, so ``<qgs:datasource>`` is the element ``<datasource>`` is.
     parser = expat.ParserCreate(namespace_separator="}")
     parser.StartElementHandler = scan.start
     parser.EndElementHandler = scan.end
@@ -536,14 +545,14 @@ class _Head:
 
     def __init__(self) -> None:
         self.text = ""
-        # 值的第一个非空白字符是否已留下 / whether the value's first non-whitespace character
-        # 已经留下 / has been kept already.
+        # 值的第一个非空白字符是否已经留下。
+        # Whether the value's first non-whitespace character has been kept already.
         self.started = False
-        # 留下的末尾字符，于是跨两个事件的标记照样看得见 / the last characters kept, so a
-        # 跨事件的标记也看得见 / marker split across two events is still seen.
+        # 留下的末尾字符，于是跨两个事件的标记照样看得见。
+        # The last characters kept, so a marker split across two events is still seen.
         self.tail = ""
-        # 开头之后那部分值里是否有远程标记 / whether the part of the value that is past the
-        # 头之外那部分 / head holds a remote marker.
+        # 开头之后那部分值里是否有远程标记。
+        # Whether the part of the value that is past the head holds a remote marker.
         self.saw_marker = False
 
     def add(self, data: str) -> None:
@@ -610,8 +619,8 @@ class _ProjectScan:
 
     def __init__(self) -> None:
         self.depth = 0
-        # 每个还开着的元素文本的开头，最外层在前 / the start of the text of every element
-        # 还开着的、最外层在前 / still open, outermost first.
+        # 每个还开着的元素文本的开头，最外层在前。
+        # The start of the text of every element still open, outermost first.
         self.open: list[_Head] = []
 
     def start(self, name: str, attributes: Any) -> None:
@@ -786,8 +795,8 @@ def _local_path_of(text: str) -> str | None:
         authority = rest[2:]
         return authority if authority.startswith("/") else None
     if scheme == "attachment":
-        # ``attachment:///name`` 和 ``attachment:name`` 是同一个相对名 / both spell the same
-        # 相对名 / relative name.
+        # ``attachment:///name`` 和 ``attachment:name`` 是同一个相对名。
+        # ``attachment:///name`` and ``attachment:name`` are the same relative name.
         return rest.lstrip("/")
     return None
 
@@ -865,13 +874,14 @@ def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, 
         if not raw:
             outside.append(layer_id)
             continue
-        # 白名单要看子数据集点名的文件，不是它那个拼法 / the allow-list has to see the file a
-        # 子数据集点名的文件 / subdataset names, not its spelling.
+        # 白名单要看子数据集点名的文件，不是它那个拼法。
+        # The allow-list has to see the file a subdataset names, not its spelling.
         raw = _subdataset_path(raw) or raw
         try:
-            # 故意按保存式解析：工程点名一个已经不在的源不是踩白名单，而是读得进 / save-shaped
-            # on purpose: a project naming a source that is gone is read, 只是 invalid_layer_count
-            # 大于 0 / just with ``invalid_layer_count`` above zero.
+            # 故意按保存式解析：工程点名一个已经不在的源不是踩白名单，而是读得进，只是
+            # ``invalid_layer_count`` 大于 0。
+            # Save-shaped on purpose: a project naming a source that is gone is read, just with
+            # ``invalid_layer_count`` above zero, not a breach of the roots.
             resolve_path(raw, ctx.policy.allowed_data_roots, must_exist=False, allow_directory=True)
         except FrameworkError:
             outside.append(layer_id)
