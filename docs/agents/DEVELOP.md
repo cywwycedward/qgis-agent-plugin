@@ -3,8 +3,10 @@
 本文档面向要修改或扩展 `qgis-agent-plugin` 的开发者，内容自包含：环境、目录、代码规范、
 基类与协议、Operation 的写法、测试方式、提交规则都在这里给出，不需要再查其它文件。
 
-文中路径默认相对插件根目录（即包含 `package.json` 的 `qgis-agent-plugin` 目录）。命令都是
+文中路径默认相对仓库根目录（即包含 `package.json` 的 `qgis-agent-plugin` 目录）。命令都是
 PowerShell。代码标识符保持英文原文，因为它们就是代码里的名字。
+
+本文件住在 `docs/agents/`，同目录的 `TEST.md`、`ENVIRONMENT.md`、`DELEGATION.md` 是它的三份配套文档。
 
 ---
 
@@ -141,13 +143,19 @@ qgis-agent-plugin/
 ├── .gitattributes / .gitignore
 ├── .agents/ 与 skills-lock.json    代理工具的技能清单，不属于插件代码
 ├── AGENTS.md                     给编码代理的目录与分层索引（本文档自包含，不依赖它）
-├── DEVELOP.md                    本文档：唯一的开发规范
-├── TEST.md                       测试规范：两层测试、假对象、守卫、验收跑
-├── ENVIRONMENT.md                运行环境：两个解释器、依赖、uv、路径速查
 ├── scripts/
 │   ├── deploy.ps1                镜像 src/<包> 到 QGIS profile
 │   └── pytest.ps1                用 QGIS 解释器跑 pytest
-├── docs/                         面向操作者的说明（安装、Console 用法）与 agent 规则（agents/）
+├── docs/                         面向操作者的说明与开发/协作规范
+│   ├── INSTALL.md                安装、配置、排错、卸载
+│   ├── CONSOLE.md                Python Console 的实测样例
+│   ├── audit/                    生成的审计页面
+│   └── agents/                   规范文档（本目录）
+│       ├── DEVELOP.md            本文档：唯一的开发规范
+│       ├── TEST.md               测试规范：两层测试、假对象、守卫、验收跑
+│       ├── ENVIRONMENT.md        运行环境：两个解释器、依赖、uv、路径速查
+│       ├── DELEGATION.md         怎么把活派给别的 agent、五步流程
+│       └── domain.md / issue-tracker.md / triage-labels.md   领域文档、issue 与标签规则
 ├── src/qgis_agent_plugin/        插件包本体：这个目录就是 QGIS 看到的东西
 │   ├── __init__.py               classFactory（QGIS 按名字找的入口）
 │   ├── metadata.txt              插件元数据（必须与包根同级）

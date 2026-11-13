@@ -1,7 +1,7 @@
 # qgis-agent-plugin
 
-QGIS Agent 插件本体。契约、协议与写法以本仓库的 `DEVELOP.md` 为准（测试看 `TEST.md`，环境看
-`ENVIRONMENT.md`），本文件只做目录索引与摘要；构建、部署、测试入口见 `package.json`。
+QGIS Agent 插件本体。契约、协议与写法以本仓库的 `docs/agents/DEVELOP.md` 为准（测试看 `docs/agents/TEST.md`，环境看
+`docs/agents/ENVIRONMENT.md`），本文件只做目录索引与摘要；构建、部署、测试入口见 `package.json`。
 
 ## 目录
 
@@ -17,9 +17,9 @@ QGIS Agent 插件本体。契约、协议与写法以本仓库的 `DEVELOP.md` �
 | `src/qgis_agent_plugin/ui/theme.py` | 坞窗的唯一配色来源：从 `QApplication.palette()` 的角色算出颜色与 QSS，并提供对比度自检。不写任何十六进制颜色 |
 | `src/qgis_agent_plugin/metadata.txt` | 插件元数据（QGIS 插件管理器读的那个），QGIS 版本上下限在这里 |
 
-放置规则（完整版见 `DEVELOP.md` §4）：一个能力族一个文件；框架级 DTO、状态枚举、错误码只在
+放置规则（完整版见 `docs/agents/DEVELOP.md` §4）：一个能力族一个文件；框架级 DTO、状态枚举、错误码只在
 `core/models.py`；被两个以上能力共享、又不属任何领域的规则放 `core/`；`contracts.py` 与
-`engine.py` 的公开签名是冻结面（两个策略、三阶段后台，加第四个必须先改设计并同步 `DEVELOP.md`）。
+`engine.py` 的公开签名是冻结面（两个策略、三阶段后台，加第四个必须先改设计并同步 `docs/agents/DEVELOP.md`）。
 
 ## 导入层摘要
 
@@ -32,7 +32,7 @@ QGIS Agent 插件本体。契约、协议与写法以本仓库的 `DEVELOP.md` �
 - 结果与错误只出 Pydantic DTO／基本类型；绝不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举
   或 traceback。
 - 守卫同时断言十七个 Operation 能在裸解释器里注册成功，且每个的 `kind`/`strategy`/`destructive`
-  与 `DEVELOP.md` §1 的表一致。
+  与 `docs/agents/DEVELOP.md` §1 的表一致。
 
 `tests/` 镜像机制层：`test_{contracts,models,registry,security}`、`test_{context,engine,execution_store}`、
 `test_operations_{project,layer,processing}`、`test_{qgs_task,background}`、`test_plugin_lifecycle`、
@@ -40,11 +40,11 @@ QGIS Agent 插件本体。契约、协议与写法以本仓库的 `DEVELOP.md` �
 headless 验收跑，不是 pytest 用例。
 
 运行时的两个观察面：Python Console 里 `iface.agent_registry` / `iface.agent_engine`（插件加载期间
-存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，七项见 `DEVELOP.md` §6.12。
+存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，七项见 `docs/agents/DEVELOP.md` §6.12。
 
 ## Git branches
 
-Git flow；完整说明见 `DEVELOP.md` §11。
+Git flow；完整说明见 `docs/agents/DEVELOP.md` §11。
 
 | Branch | Cut from | Merged into |
 | --- | --- | --- |
@@ -67,7 +67,7 @@ branch that carried it is deleted.
 ### Delegation (`hc` + `herdr-app`)
 
 How to hand work to other agents, how they exchange results, and the five steps a feature goes through.
-See `docs/agents/delegation.md`.
+See `docs/agents/DELEGATION.md`.
 
 ### Issue tracker
 
