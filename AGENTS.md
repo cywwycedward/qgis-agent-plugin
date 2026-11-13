@@ -9,8 +9,19 @@ QGIS Agent 插件本体。本文件只做索引与摘要，规范在 `docs/agent
 | `docs/agents/ENVIRONMENT.md` | 跑任何 Python、装依赖、找路径之前 | 两个解释器各自的职责、依赖现状、uv 的坑、路径与版本 |
 | `docs/agents/DELEGATION.md` | 要把活派给别的 agent 时 | `hc` + `herdr-app`、一个功能的五步、交接文档命名 |
 
-构建、部署、测试入口都在 `package.json`：`npm run check` 一次跑完 lint、格式检查与单测；
-`npm run deploy` 把 `src/qgis_agent_plugin` 镜像进 QGIS profile。
+构建、部署、测试入口都在 `package.json`：`npm run deploy` 把 `src/qgis_agent_plugin` 镜像进
+QGIS profile。
+
+## 改完代码必跑
+
+```powershell
+npm run check                                                       # lint + 格式 + 单测
+& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests    # 裸解释器：导入层没坏
+& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py
+```
+
+三条都绿才算改完。按改动类型要加跑什么、每条输出怎么读（裸解释器少 3 个用例属预期、验收退出码 2
+是拒绝目录），见 `docs/agents/DEVELOP.md` §2.3。
 
 ## 目录
 

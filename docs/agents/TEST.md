@@ -7,7 +7,8 @@
 | 单元测试 | `npm run test`（`scripts\pytest.ps1` → `python-qgis-ltr.bat -m pytest -q tests`） | 契约、状态机、适配器记账；QGIS 与 Qt 用假对象 | 秒级 |
 | 验收跑 | `python-qgis-ltr.bat tests\qgis_integration\run_acceptance.py` | 真实 PyQGIS 行为：真 headless `QgsApplication`、真 `QgsProject`/`QgsTaskManager`、现场生成的数据 | 数十秒 |
 
-单测证明契约，验收跑证明真实 QGIS 里也成立。不要用替身断言真实 PyQGIS 行为（`read()` 是否真的
+单测证明契约，验收跑证明真实 QGIS 里也成立。**改完代码要跑哪些、按改动加跑哪些**，见
+`DEVELOP.md` §2.3 的检查清单；本文只讲这两层怎么设计。不要用替身断言真实 PyQGIS 行为（`read()` 是否真的
 填充图层树、`QgsTask` 是否真的被调度），也不要用验收跑替代针对边界条件的单测。
 
 ## 1 解释器

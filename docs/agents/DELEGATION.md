@@ -133,13 +133,8 @@ herdr-app do tab.rename --id $tab --name 'F5 qgstask impl'
 
 ## 6. 门禁（每个功能、每次合并都要过）
 
-```powershell
-npm run test                                                    # QGIS 解释器下的 pytest
-& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests # 裸解释器（会多 skip）
-npm run lint                                                    # ruff check
-ruff format --check .
-& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py
-```
+命令与判据只有一份，在 `DEVELOP.md` §2.3 的检查清单：`npm run check`、裸解释器 `pytest`、
+验收跑，三条都绿，按改动类型再加跑。子 agent 报告里贴**实际输出**，不贴“应该能过”。
 
 除此之外，每条修复都要有**“不修就红”的证明**（写进 fix 报告）：改之前该用例红、改之后绿。
 

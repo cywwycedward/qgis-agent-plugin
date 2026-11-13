@@ -118,7 +118,46 @@ npm run deploy:list   # 只列会拷贝什么，不落盘
 - `robocopy /MIR`，排除 `__pycache__`、`.ruff_cache`；robocopy 的 `1` 是"复制成功"，只有 `>= 8` 才当失败。
 - 部署是镜像：目标里源没有的文件会被删掉。部署完要重启 QGIS。
 
-### 2.3 工具配置
+### 2.3 改动之后的检查
+
+**每次改完代码，三条都跑**，由快到慢；前一条红就停下来修，别在红的树上跑下一条：
+
+```powershell
+npm run check                                                       # ruff check + ruff format --check + 单测
+& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests    # 裸解释器：证明导入层没坏
+& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py
+```
+
+通过的判据（三条都要，别只挑一条）：
+
+| 命令 | 通过长什么样 | 耗时 |
+| --- | --- | --- |
+| `npm run check` | 退出码 0；`All checks passed`、`N files already formatted`、单测全绿 | 约 35 s |
+| 裸解释器 `pytest` | `732 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 | 约 20 s |
+| 验收跑 | 打印 `summary: PASS …, FAIL 0, SKIP n`，退出码 0 | 约 40 s |
+
+**按改了什么再加跑**（核心三条之外）：
+
+| 改动 | 加跑或加改 |
+| --- | --- |
+| 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块，漏了它就不会红 |
+| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 |
+| 改注释或 docstring | 已在 `npm run check` 里（`tests/test_comments.py`）；它同时禁止把文档引用写进注释 |
+| 改 `ui/` | `tests/test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器那条能看见它 |
+| 改文档 | `tests/test_docs.py`（索引与相对链接）已在 check 里；`ruff format --check` 也管 Markdown 里的 python 代码块 |
+| 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS |
+| 改耗时阈值或做性能优化 | 重跑验收跑；本文档里的耗时与字节数只在这个 QGIS 版本上测过 |
+| 装依赖 | 先经用户批准（同一 QGIS 全局环境，见 `ENVIRONMENT.md`），装完把上一条 `ENVIRONMENT.md` 的清单同步 |
+
+**不算通过的情形**（都踩过）：
+
+- 裸解释器的绿色少三个用例，不能按条数比；**按解释器判断跑没跑过**。
+- 验收跑退出码 `2` 是"拒绝使用给定的工作目录"，不是失败；换个空目录，或让脚本自己建。
+- PowerShell 里 `$LASTEXITCODE` 会被管道上一条命令污染，以单独跑一次的输出为准。
+- 机器忙时时间阈值会偶发红（`.qgz` 成员数那条 1.5 s 的上限），先单跑那条，再判断是不是负载。
+- "应该能过"不算结论：报告里贴实际输出，红的就是红的。
+
+### 2.4 工具配置
 
 | 文件 | 作用 |
 | --- | --- |
