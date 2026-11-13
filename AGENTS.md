@@ -15,13 +15,12 @@ QGIS profile。
 ## 改完代码必跑
 
 ```powershell
-npm run check                                                       # lint + 格式 + 单测
-& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests    # 裸解释器：导入层没坏
-& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py
+npm run check      # lint + 格式 + 规范组测试（12 条，约 5 s）
 ```
 
-三条都绿才算改完。按改动类型要加跑什么、每条输出怎么读（裸解释器少 3 个用例属预期、验收退出码 2
-是拒绝目录），见 `docs/agents/DEVELOP.md` §2.3。
+规范组断言的是全仓规则（注释双语、导入位置、文档索引、注册面），**每次改完都要绿**。其余按需：
+`npm run test`（全量 785）、裸解释器 `pytest`（导入层）、`run_acceptance.py`（真实 QGIS，98 条）。
+判据、按改动类型的对应表、以及"裸解释器少 3 个用例属预期"这类坑，见 `docs/agents/DEVELOP.md` §2.3。
 
 ## 目录
 

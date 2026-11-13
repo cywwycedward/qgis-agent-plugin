@@ -20,6 +20,10 @@ import pytest  # pyright: ignore[reportMissingImports]
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 这一组是成文规则本身，每次改完代码都要跑。
+# This group is the written rules themselves; it runs after every change.
+pytestmark = pytest.mark.conformance
+
 _GUARD = """
 import re
 import sys
@@ -125,7 +129,7 @@ def test_package_and_contracts_import_without_qgis() -> None:
 
 
 def test_a_pydantic_major_other_than_two_is_a_dependency_error() -> None:
-    from qgis_agent_plugin import plugin
+    from qgis_agent_plugin import plugin  # pyright: ignore[reportMissingImports]
 
     with pytest.raises(RuntimeError, match="requires pydantic 2.x"):
         plugin.require_supported_pydantic("1.10.26")

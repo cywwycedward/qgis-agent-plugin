@@ -16,6 +16,12 @@ import re
 import tokenize
 from pathlib import Path
 
+import pytest  # pyright: ignore[reportMissingImports]
+
+# 这一组是成文规则本身，每次改完代码都要跑。
+# This group is the written rules themselves; it runs after every change.
+pytestmark = pytest.mark.conformance
+
 ROOT = Path(__file__).resolve().parents[1]
 
 CJK = re.compile(r"[\u4e00-\u9fff]")

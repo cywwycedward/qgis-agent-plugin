@@ -8,7 +8,17 @@
 | 验收跑 | `python-qgis-ltr.bat tests\qgis_integration\run_acceptance.py` | 真实 PyQGIS 行为：真 headless `QgsApplication`、真 `QgsProject`/`QgsTaskManager`、现场生成的数据 | 数十秒 |
 
 单测证明契约，验收跑证明真实 QGIS 里也成立。**改完代码要跑哪些、按改动加跑哪些**，见
-`DEVELOP.md` §2.3 的检查清单；本文只讲这两层怎么设计。不要用替身断言真实 PyQGIS 行为（`read()` 是否真的
+`DEVELOP.md` §2.3 的检查清单；本文只讲这两层怎么设计。
+
+单测内部再分两组，按「是不是全仓规则」切：
+
+| 组 | 成员 | 何时跑 | 命令 |
+| --- | --- | --- | --- |
+| 规范组 | `test_comments`、`test_source_rules`、`test_docs`、`test_package`（`pytestmark = pytest.mark.conformance`） | **每次改完代码** | `npm run test:rules`（2 s，12 条） |
+| 功能组 | 其余全部（契约、状态机、引擎、适配器、操作、坞窗） | 按需，合并前必跑 | `npm run test`（33 s，785 条） |
+
+新写测试默认为功能组；只有当它断言"对整个仓库都成立、读源码/文档、不需要 QGIS"时才加
+`pytestmark = pytest.mark.conformance`，否则别把它拖进每次必跑的那 2 秒里。不要用替身断言真实 PyQGIS 行为（`read()` 是否真的
 填充图层树、`QgsTask` 是否真的被调度），也不要用验收跑替代针对边界条件的单测。
 
 ## 1 解释器

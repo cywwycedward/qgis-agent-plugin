@@ -13,6 +13,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest  # pyright: ignore[reportMissingImports]
+
+# 这一组是成文规则本身，每次改完代码都要跑。
+# This group is the written rules themselves; it runs after every change.
+pytestmark = pytest.mark.conformance
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 PACKAGE = SRC / "qgis_agent_plugin"

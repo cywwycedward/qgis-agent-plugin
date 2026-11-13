@@ -120,34 +120,38 @@ npm run deploy:list   # 只列会拷贝什么，不落盘
 
 ### 2.3 改动之后的检查
 
-**每次改完代码，三条都跑**，由快到慢；前一条红就停下来修，别在红的树上跑下一条：
+单测分两组，跑法不同：
+
+| 组 | 断的是什么 | 什么时候跑 | 命令 | 条数与耗时 |
+| --- | --- | --- | --- | --- |
+| **规范组**（`conformance`） | 整个仓库的成文规则：注释双语、导入位置、文档索引、注册面 | **每次改完代码都跑** | `npm run test:rules` | 12 条，约 2 s |
+| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 785 条，约 33 s |
+
+一条测试属于规范组，当且仅当三件事都成立：它断言的是**对整个仓库都成立**的规则（不是某条行为）、
+它**读源码或文档**而不是驱动代码、它**不需要 QGIS**。文件顶部写 `pytestmark = pytest.mark.conformance`
+即入组（marker 已在 `pyproject.toml` 注册，`-m conformance` 就是这一组）。
+
+**每次改完代码，跑这一条**（约 5 s，必须绿）：
 
 ```powershell
-npm run check                                                       # ruff check + ruff format --check + 单测
-& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests    # 裸解释器：证明导入层没坏
-& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py
+npm run check      # ruff check + ruff format --check + npm run test:rules
 ```
 
-通过的判据（三条都要，别只挑一条）：
+通过的判据（三行都要在输出里）：`All checks passed`、`N files already formatted`、
+`12 passed, 773 deselected`。
 
-| 命令 | 通过长什么样 | 耗时 |
+**按需加跑**（碰了什么跑什么）：
+
+| 改动 | 加跑 | 通过长什么样 |
 | --- | --- | --- |
-| `npm run check` | 退出码 0；`All checks passed`、`N files already formatted`、单测全绿 | 约 35 s |
-| 裸解释器 `pytest` | `732 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 | 约 20 s |
-| 验收跑 | 打印 `summary: PASS …, FAIL 0, SKIP n`，退出码 0 | 约 40 s |
-
-**按改了什么再加跑**（核心三条之外）：
-
-| 改动 | 加跑或加改 |
-| --- | --- |
-| 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块，漏了它就不会红 |
-| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 |
-| 改注释或 docstring | 已在 `npm run check` 里（`tests/test_comments.py`）；它同时禁止把文档引用写进注释 |
-| 改 `ui/` | `tests/test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器那条能看见它 |
-| 改文档 | `tests/test_docs.py`（索引与相对链接）已在 check 里；`ruff format --check` 也管 Markdown 里的 python 代码块 |
-| 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS |
-| 改耗时阈值或做性能优化 | 重跑验收跑；本文档里的耗时与字节数只在这个 QGIS 版本上测过 |
-| 装依赖 | 先经用户批准（同一 QGIS 全局环境，见 `ENVIRONMENT.md`），装完把上一条 `ENVIRONMENT.md` 的清单同步 |
+| `src/` 里任何逻辑 | `npm run test`（全量） | `785 passed` |
+| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `732 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
+| 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
+| 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
+| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
+| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `785 passed` |
+| 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
+| 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
 
 **不算通过的情形**（都踩过）：
 
@@ -237,10 +241,10 @@ qgis-agent-plugin/
     ├── test_background.py        后台端到端：快照、取消、换代、卸载（假任务）
     ├── test_plugin_lifecycle.py  会话装配、信号连接、epoch、Supervisor、重复加载
     ├── test_ui_dock.py           坞窗：选择器、表单、状态、配色对比度、两条引擎路径
-    ├── test_package.py           裸解释器导入守卫 + 十七个 Operation 注册 + dock 源码守则
-    ├── test_comments.py          注释与 docstring：双语、不引用文档、shortcut 标记存活
-    ├── test_source_rules.py      导入位置、__future__、日志器名、主题不写十六进制颜色
-    ├── test_docs.py              文档索引与相对链接：每份规范都被索引、没指向已删文档
+    ├── test_package.py           [规范组] 裸解释器导入守卫 + 十七个 Operation 注册 + dock 源码守则
+    ├── test_comments.py          [规范组] 注释与 docstring：双语、不引用文档、shortcut 标记存活
+    ├── test_source_rules.py      [规范组] 导入位置、__future__、日志器名、主题不写十六进制颜色
+    ├── test_docs.py              [规范组] 文档索引与相对链接：每份规范都被索引、没指向已删文档
     └── qgis_integration/         真实 QGIS 验收跑（非 pytest 用例）
         ├── run_acceptance.py     入口：临时目录、临时 profile、打印逐条结果与汇总
         ├── cases.py              每条验收用例（返回一行证据，失败抛 AssertionError）
@@ -362,7 +366,7 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
 `pytest`、`pydantic` 与 `qgis` 装在本机的 QGIS 解释器里，静态分析器看不到，所以那几行 import 带
 `# pyright: ignore[reportMissingImports]`；真正的验证是测试里跑真解释器，不是分析器的绿点。
 
-门禁是一行：`npm run check`（= `lint` + `format:check` + `test`）。`ruff format --check` 单独
+门禁是一行：`npm run check`（= `lint` + `format:check` + `test:rules`，只跑规范组）。`ruff format --check` 单独
 跑不覆盖 Markdown 里的 ```python 代码块以外的散文，但会格式化这些代码块，所以文档也算门禁。
 
 `.editorconfig` 的规则：UTF-8、LF、文件末尾保留一个换行、行尾空格删除、4 空格缩进；
@@ -1421,7 +1425,8 @@ class LayerSumNumericField(
 - [ ] 新增了模块的话，它已加进 `tests/test_package.py` 的导入列表。
 - [ ] `metadata.txt` 与本文档里的 Operation 计数已同步。
 - [ ] 测试覆盖成功、输入失败、业务失败；需要真实 QGIS 的部分进验收跑。
-- [ ] `npm run check`（lint + 格式检查 + 单测）与验收跑通过。
+- [ ] `npm run check`（lint + 格式 + 规范组）与 `npm run test`（全量）通过；碰了真实 PyQGIS
+      行为时再加验收跑。
 
 ---
 
