@@ -92,7 +92,7 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 ### 操作坞窗（手工测试入口）
 
 插件启用后多一个坞窗，标题 **QGIS Agent 操作**，停靠在主窗口右侧（视图 → 面板里勾它）。给人工
-验证十七个 Operation 用，不属于框架面；控件、状态与两条属于坞窗的合同见 `qgis\DEVELOP.md` §10。
+验证十七个 Operation 用，不属于框架面；控件、状态与两条属于坞窗的合同见 `DEVELOP.md` §10。
 
 一次测试三步：**选操作 → 填必要的参数 → 运行并读懂结果**。留空表示不提交、用模型默认值；
 `Ctrl+Return` 运行；后台操作运行期间可点“取消”。失败时错误区给 `CODE` + “发生了什么 +
@@ -104,11 +104,11 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 ## 4. 配置（七项）
 
 键名一律是 `qgis_agent_plugin/<键名>`（一个 QSettings 组，避免和别的插件撞名）。七个键的语义、
-默认值与"计数必须 ≥ 1"的规则只有一份，在 `qgis\DEVELOP.md` §6.12。这里只说怎么写、怎么生效。
+默认值与"计数必须 ≥ 1"的规则只有一份，在 `DEVELOP.md` §6.12。这里只说怎么写、怎么生效。
 
 `project.open` **两个键都要配**：工程文件用 `allowed_project_roots`，工程里每层数据源用
 `allowed_data_roots`，否则打开含图层的工程会 `PATH_NOT_ALLOWED`（且当前工程已被替换，见
-`qgis\DEVELOP.md` §7.2）。
+`DEVELOP.md` §7.2）。
 
 两种写法，二选一：
 
@@ -205,8 +205,8 @@ $ npm run test                                                       # QGIS 解�
 
 | 文件 | 内容 |
 | --- | --- |
-| `qgis\DEVELOP.md` | 唯一的开发规范：架构、协议、17 个 Operation 的契约、错误码、注释规范、Git 流程、已知边界 |
-| `qgis\TEST.md` | 两层测试怎么跑、假对象写法、坞窗与裸解释器守卫、验收跑的退出码 |
-| `qgis\ENVIRONMENT.md` | 两个解释器、依赖现状、uv、路径速查 |
+| `DEVELOP.md` | 唯一的开发规范：架构、协议、17 个 Operation 的契约、错误码、注释规范、Git 流程、已知边界 |
+| `TEST.md` | 两层测试怎么跑、假对象写法、坞窗与裸解释器守卫、验收跑的退出码 |
+| `ENVIRONMENT.md` | 两个解释器、依赖现状、uv、路径速查 |
 | `CONSOLE.md` | Python Console 样例，标注实测状态 |
 | `docs/agents/` | 委派、issue tracker、triage 标签、领域文档的 agent 规则 |
