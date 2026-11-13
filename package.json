@@ -9,6 +9,8 @@
     "lint": "ruff check .",
     "lint:fix": "ruff check --fix .",
     "format": "ruff format .",
+    "format:check": "ruff format --check .",
+    "check": "npm run lint && npm run format:check && npm run test",
     "test": "npm run test:unit",
     "test:unit": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\pytest.ps1",
     "test:verbose": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\pytest.ps1 -vv tests"

@@ -199,6 +199,9 @@ qgis-agent-plugin/
     ├── test_plugin_lifecycle.py  会话装配、信号连接、epoch、Supervisor、重复加载
     ├── test_ui_dock.py           坞窗：选择器、表单、状态、配色对比度、两条引擎路径
     ├── test_package.py           裸解释器导入守卫 + 十七个 Operation 注册 + dock 源码守则
+    ├── test_comments.py          注释与 docstring：双语、不引用文档、shortcut 标记存活
+    ├── test_source_rules.py      导入位置、__future__、日志器名、主题不写十六进制颜色
+    ├── test_docs.py              文档索引与相对链接：每份规范都被索引、没指向已删文档
     └── qgis_integration/         真实 QGIS 验收跑（非 pytest 用例）
         ├── run_acceptance.py     入口：临时目录、临时 profile、打印逐条结果与汇总
         ├── cases.py              每条验收用例（返回一行证据，失败抛 AssertionError）
@@ -317,13 +320,20 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
 | 启用的规则 | `E`（pycodestyle error）、`F`（pyflakes）、`W`（pycodestyle warning）、`I`（import 顺序）、`UP`（pyupgrade）、`B`（bugbear）、`SIM`（simplify）、`C4`（comprehension） |
 | 故意不启用 | `D`（docstring 规则）、`ANN`（注解完整性）、`ARG`（未使用参数，Qt slot 必须保留签名）、`RUF`（会把中文全角标点报成 ambiguous） |
 
+`pytest`、`pydantic` 与 `qgis` 装在本机的 QGIS 解释器里，静态分析器看不到，所以那几行 import 带
+`# pyright: ignore[reportMissingImports]`；真正的验证是测试里跑真解释器，不是分析器的绿点。
+
+门禁是一行：`npm run check`（= `lint` + `format:check` + `test`）。`ruff format --check` 单独
+跑不覆盖 Markdown 里的 ```python 代码块以外的散文，但会格式化这些代码块，所以文档也算门禁。
+
 `.editorconfig` 的规则：UTF-8、LF、文件末尾保留一个换行、行尾空格删除、4 空格缩进；
 `*.{json,yml,yaml,toml}` 用 2 空格；`*.md` 不删行尾空格（Markdown 的硬换行）；`*.{bat,cmd}`
 用 ASCII + CRLF（cmd.exe 对 UTF-8 注释和非 CRLF 都会解析错乱）。
 
 ### 5.2 写法约定
 
-- 每个模块以 `from __future__ import annotations` 开头（跟在模块 docstring 后面）。
+- 每个有代码的模块以 `from __future__ import annotations` 开头（跟在模块 docstring 后面；只有
+  docstring 的模块不需要）。`tests/test_source_rules.py` 逐文件断言这条。
 - `from __future__` 之后按 ruff 的顺序：标准库、第三方（`pydantic` 等）、本包（相对 import）。
 - 类型注解写全；`Any` 只出现在 QGIS/Qt 边界、Qt slot 签名与 JSON 载荷（`dict[str, Any]`）上。
 - 模块 docstring 写"为什么这样设计"，不写"这个模块是什么"的复述；公开类与函数一句话说明其
@@ -339,7 +349,8 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
 
 ### 5.3 日志
 
-- 会打日志的模块用 `_LOGGER = logging.getLogger(__name__)`（目前是 `plugin.py`、`engine.py`、
+- 模块级日志器只有一个写法：`_LOGGER = logging.getLogger(__name__)`，`tests/test_source_rules.py`
+  断言名字与参数。会打日志的模块用它（目前是 `plugin.py`、`engine.py`、
   `execution_store.py`、`runners/main_thread.py`、`runners/qgs_task.py`；`operations/` 里只有
   `processing.py` 打，其余模块不打日志）。
 - 状态迁移由 `ExecutionStore` 统一记 `INFO`：`execution <id> <op> <strategy> <from> -> <to>`
@@ -382,6 +393,10 @@ GIS 开发者，和不懂中文的下一个 agent；两种人都要一句话看�
 7. 宽度：任何一行 ≤ 100 列（`ruff check` 的 `E501`；`ruff format` 只管代码缩进，不管中文
    注释的长度）。
 8. 不翻译：标识符、错误码、QGIS/Qt API 名（`QgsTask`、`project_epoch`、`INVALID_INPUT`）。
+
+这七条不是约定而是断言：`tests/test_comments.py` 逐文件检查双语与来源引用，并把 `shortcut:`
+标记当作必须存活的东西（`ponytail-debt` 靠它检索）。它只扫 `src/` 与 `tests/`，所以别把 Python
+放进 `docs/`。
 9. 术语统一：epoch=工程代数，snapshot=快照，main thread=主线程，worker=后台线程，
    record=记录，execution=执行，destructive=破坏性。
 10. 删掉把代码再念一遍的注释（"初始化""设置""处理数据"）；但原因型注释不因为"读代码能
@@ -1367,7 +1382,7 @@ class LayerSumNumericField(
 - [ ] 新增了模块的话，它已加进 `tests/test_package.py` 的导入列表。
 - [ ] `metadata.txt` 与本文档里的 Operation 计数已同步。
 - [ ] 测试覆盖成功、输入失败、业务失败；需要真实 QGIS 的部分进验收跑。
-- [ ] `npm run lint` 与 `npm run test:unit` 通过。
+- [ ] `npm run check`（lint + 格式检查 + 单测）与验收跑通过。
 
 ---
 
@@ -1437,7 +1452,8 @@ class LayerSumNumericField(
   关闭坞窗时先停轮询再让引擎继续卸载。
 - 颜色只有一个来源：`ui/theme.py`。它从 `QApplication.palette()` 的角色派生颜色，遵守 WCAG
   对比度下限（正文 4.5、大字号与状态胶囊 3.0），浅色/深色主题共用一份 QSS 模板。**任何地方
-  都不写十六进制颜色**；语义色（ok/warn/danger）只用于状态胶囊与错误条，不用于装饰。
+  都不写十六进制颜色**（`tests/test_source_rules.py` 扫 `ui/` 的字符串常量）；语义色
+  （ok/warn/danger）只用于状态胶囊与错误条，不用于装饰。
 - `ui/dock.py` 可以模块级 import Qt，但**不得**模块级 import qgis；`ui/theme.py` 连 Qt 都只在
   函数体内 import；`ui/__init__.py` 保持空壳。
 

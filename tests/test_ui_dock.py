@@ -23,6 +23,8 @@ module that imports Qt at module level, so this whole module skips rather than f
 bare interpreter.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -32,7 +34,7 @@ import types
 from collections import Counter
 from typing import Any
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # 离屏平台自己没有字体库，没有它就一个字形都画不出来，下面的像素探针就只是在量空白控件
@@ -45,10 +47,10 @@ for _fonts in (r"C:\Windows\Fonts", "/usr/share/fonts"):
 
 pytest.importorskip("qgis.PyQt.QtWidgets", reason="the operation dock needs Qt")
 
-from qgis.PyQt.QtCore import QPoint, Qt
-from qgis.PyQt.QtGui import QColor, QPalette
-from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import (
+from qgis.PyQt.QtCore import QPoint, Qt  # pyright: ignore[reportMissingImports]
+from qgis.PyQt.QtGui import QColor, QPalette  # pyright: ignore[reportMissingImports]
+from qgis.PyQt.QtTest import QTest  # pyright: ignore[reportMissingImports]
+from qgis.PyQt.QtWidgets import (  # pyright: ignore[reportMissingImports]
     QApplication,
     QCheckBox,
     QComboBox,

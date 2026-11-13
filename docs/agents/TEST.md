@@ -36,6 +36,10 @@
 - 新用例先在缺陷存在时确认是红的，再让它绿。
 - 新操作的用例进 `tests/test_operations_{project,layer,processing}.py`；框架层的进对应
   `test_{contracts,models,registry,context,engine,execution_store,security}.py`。
+- 有三条用例不测行为，而是把成文规则变成断言，改代码时要让它们继续绿：`test_comments.py`
+  （注释与 docstring 双语、不引用文档）、`test_source_rules.py`（导入位置、`__future__`、
+  日志器名、主题不写十六进制颜色）、`test_docs.py`（每份规范都被索引、相对链接能解析、
+  不指向已删文档）。它们只读源码与文档，秒级完成，不需要 QGIS。
 
 ## 3 坞窗测试（Qt offscreen）
 

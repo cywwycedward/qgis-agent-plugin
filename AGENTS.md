@@ -1,7 +1,16 @@
 # qgis-agent-plugin
 
-QGIS Agent 插件本体。契约、协议与写法以本仓库的 `docs/agents/DEVELOP.md` 为准（测试看 `docs/agents/TEST.md`，环境看
-`docs/agents/ENVIRONMENT.md`），本文件只做目录索引与摘要；构建、部署、测试入口见 `package.json`。
+QGIS Agent 插件本体。本文件只做索引与摘要，规范在 `docs/agents/` 下，动手前读对应那份。
+
+| 文档 | 何时读 | 内容 |
+| --- | --- | --- |
+| `docs/agents/DEVELOP.md` | 动手改代码之前（唯一的开发规范） | 分层与导入规则、代码与注释规范、协议与状态机、十七个 Operation 的契约、错误码、Git、已知边界 |
+| `docs/agents/TEST.md` | 写或跑测试时 | 两层测试、假对象写法、坞窗与裸解释器守卫、验收跑的目录守卫与退出码 |
+| `docs/agents/ENVIRONMENT.md` | 跑任何 Python、装依赖、找路径之前 | 两个解释器各自的职责、依赖现状、uv 的坑、路径与版本 |
+| `docs/agents/DELEGATION.md` | 要把活派给别的 agent 时 | `hc` + `herdr-app`、一个功能的五步、交接文档命名 |
+
+构建、部署、测试入口都在 `package.json`：`npm run check` 一次跑完 lint、格式检查与单测；
+`npm run deploy` 把 `src/qgis_agent_plugin` 镜像进 QGIS profile。
 
 ## 目录
 
@@ -17,50 +26,37 @@ QGIS Agent 插件本体。契约、协议与写法以本仓库的 `docs/agents/D
 | `src/qgis_agent_plugin/ui/theme.py` | 坞窗的唯一配色来源：从 `QApplication.palette()` 的角色算出颜色与 QSS，并提供对比度自检。不写任何十六进制颜色 |
 | `src/qgis_agent_plugin/metadata.txt` | 插件元数据（QGIS 插件管理器读的那个），QGIS 版本上下限在这里 |
 
-放置规则（完整版见 `docs/agents/DEVELOP.md` §4）：一个能力族一个文件；框架级 DTO、状态枚举、错误码只在
-`core/models.py`；被两个以上能力共享、又不属任何领域的规则放 `core/`；`contracts.py` 与
-`engine.py` 的公开签名是冻结面（两个策略、三阶段后台，加第四个必须先改设计并同步 `docs/agents/DEVELOP.md`）。
+放置规则（完整版见 `docs/agents/DEVELOP.md` §4）：一个能力族一个文件；框架级 DTO、状态枚举、错误码
+只在 `core/models.py`；被两个以上能力共享、又不属任何领域的规则才进 `core/`；`contracts.py` 与
+`engine.py` 的公开签名是冻结面（两个策略、三阶段后台，加第四个必须先改设计）。
 
-## 导入层摘要
+## 导入层
 
-`tests/test_package.py` 在无 QGIS 的子进程里强制这些规则：
+两条守卫：`tests/test_package.py`（子进程里真导入，证明裸解释器能加载）与
+`tests/test_source_rules.py`（读源码，证明没人把 import 放错位置）。
 
 - `core/*`、`operations/*`、`plugin.py` 必须能在裸解释器 import：**QGIS 只能在函数体内 import**。
-- Qt 默认也在函数体内；模块级 Qt 的许可只给 `plugin.py`、`core/runners/*` 与 `ui/dock.py`
-  （目前只有 `ui/dock.py` 真的用了）。`ui/dock.py` 可以模块级 import Qt，**不得**模块级 import
-  qgis；`ui/__init__.py` 保持空壳。守卫因此读 `ui/dock.py` 的源码，而不是查 `sys.modules`。
-- 结果与错误只出 Pydantic DTO／基本类型；绝不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举
-  或 traceback。
-- 守卫同时断言十七个 Operation 能在裸解释器里注册成功，且每个的 `kind`/`strategy`/`destructive`
-  与 `docs/agents/DEVELOP.md` §1 的表一致。
+- Qt 的模块级许可只给 `plugin.py`、`core/runners/*`、`ui/dock.py`；`ui/dock.py` 只能从 `qgis.PyQt`
+  取，不得 import `qgis.core`／`qgis.gui`；`ui/__init__.py` 保持空壳（只有 docstring）。
+- 结果与错误只出 Pydantic DTO／基本类型；不返回 `QgsMapLayer`、`QgsProject`、QObject、Qt 枚举或
+  traceback。
+
+## 测试结构
 
 `tests/` 镜像机制层：`test_{contracts,models,registry,security}`、`test_{context,engine,execution_store}`、
 `test_operations_{project,layer,processing}`、`test_{qgs_task,background}`、`test_plugin_lifecycle`、
-`test_ui_dock`（Qt offscreen，裸解释器里整模块 skip）、`test_package`；`tests/qgis_integration/` 是
-headless 验收跑，不是 pytest 用例。
+`test_ui_dock`（Qt offscreen，裸解释器里整模块 skip）、`test_package`（裸解释器守卫）；
+`test_comments`／`test_source_rules`／`test_docs` 把 `docs/agents/` 里的成文规则变成断言；
+`tests/qgis_integration/` 是 headless 验收跑，不是 pytest 用例。
 
 运行时的两个观察面：Python Console 里 `iface.agent_registry` / `iface.agent_engine`（插件加载期间
-存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，七项见 `docs/agents/DEVELOP.md` §6.12。
+存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，七项见
+`docs/agents/DEVELOP.md` §6.12。
 
 ## Git branches
 
-Git flow；完整说明见 `docs/agents/DEVELOP.md` §11。
-
-| Branch | Cut from | Merged into |
-| --- | --- | --- |
-| `feature/<name>`, `fix/<name>`, `docs/<name>` | `develop` | `develop` |
-| `release/<version>` | `develop` | `main`, then back into `develop` |
-| `hotfix/<name>` | `main` | `main`, then into `develop` |
-
-A change lands like this:
-
-1. Cut a branch from `develop`: `git switch -c feature/<name> develop`.
-2. Commit there, and merge with `--no-ff` so the branch stays visible in `git log`.
-3. Merge it into `develop` and delete the branch.
-4. For a release, merge `develop` into `main` (`--no-ff`) and push `main`.
-
-Done means the change is on `develop` through a merge commit (`git log --merges -1 develop`) and the
-branch that carried it is deleted.
+Git flow；分支表与发布路径见 `docs/agents/DEVELOP.md` §11。一次改动：从 `develop` 切分支 →
+提交 → `git merge --no-ff` 进 `develop` → 删分支；`develop` 只靠合并前进，不直接提交。
 
 ## Agent skills
 

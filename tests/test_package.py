@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
 ROOT = Path(__file__).resolve().parents[1]
 
