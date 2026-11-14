@@ -238,18 +238,18 @@ engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz", "discar
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz"})
 ```
 
-已实测（headless，`allowed_project_roots` 指向 `C:\temp\projects`）：
+已实测（headless）：
 
 ```text
 save #1   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}
 save #2   -> FAILED     TARGET_EXISTS | the target file exists; pass overwrite=true to replace it
-open 缺失 -> FAILED     PATH_NOT_ALLOWED | path is not an allowed local file
+open 缺失 -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project may have changed
 open 损坏 -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project may have changed
 open 不 discard -> FAILED  PROJECT_REPLACE_REQUIRED | ... pass discard_current=true to replace it
 ```
 
-“缺失文件”归 `PATH_NOT_ALLOWED` 而不是 `PROJECT_OPEN_FAILED`：路径策略在读之前就要求文件存在。
-`PROJECT_OPEN_FAILED` 的 `message` 明说当前工程可能已经改变——不承诺回滚。
+“缺失文件”归 `PROJECT_OPEN_FAILED`：插件不预检存在性，`read()` 打不开就是打不开。它的 `message`
+明说当前工程可能已经改变——不承诺回滚。
 
 ```python
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz", "discard_current": True})
@@ -261,14 +261,9 @@ engine.run_sync("project.create", {"crs_authid": "epsg:3857", "discard_current":
 `demo.qgz` 里是一个图层，数据源在 `C:\temp\data`：
 
 ```text
-两键都配（allowed_project_roots=C:\temp\projects，allowed_data_roots=C:\temp\data）
-open demo.qgz   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
+open demo.qgz（数据源在 C:\temp\data，与工程文件不同目录）
+                -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
                                "invalid_layer_count": 0}   ；lifecycle epoch 0 -> 1，记录 epoch 仍是 0
-
-只配 allowed_project_roots，allowed_data_roots 留空
-open demo.qgz   -> FAILED     PATH_NOT_ALLOWED | 1 layer data source(s) are outside
-                               allowed_data_roots; they were removed and the project was replaced
-                  之后：fileName() 已是 ...\demo.qgz，mapLayers() 为空，isDirty() = false
 
 create          -> SUCCEEDED  {"crs_authid": "EPSG:3857", "file_path": null, "layer_count": 0}
                                ；lifecycle epoch 1 -> 2，记录 epoch 仍是 1
@@ -276,9 +271,9 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
                         "layer_count": 0, "project_epoch": 2}
 ```
 
-第二段是旧版文档没写的那一半：`project.open` 要两个键（工程文件用 `allowed_project_roots`，
-工程里每一层的数据源用 `allowed_data_roots`），而且这一步失败**不回滚**——工程文件已经
-`read()` 进去了，只留下“去掉越界层之后的剩货”，`message` 也这么写。
+工程点名的数据源不再由插件审：在任何目录、不存在、甚至写成远程，工程照样打开，加载不出来的层
+只让 `invalid_layer_count` 变大。插件在 `read()` 之前挡的是那一次网络往返（见
+`docs/agents/DEVELOP.md` §7.2），不是目录归属。
 
 三条要注意的事：
 
@@ -288,7 +283,7 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
   里实际注册的图层数。
 - `create` 之后 `is_dirty` 是 `true`：新建工程设了 CRS 就会变脏，不代表没建成功。
 
-四个失败路径照旧有效（`open` 缺失文件归 `PATH_NOT_ALLOWED`、损坏文件 `PROJECT_OPEN_FAILED`、
+四个失败路径照旧有效（`open` 缺失文件归 `PROJECT_OPEN_FAILED`、损坏文件 `PROJECT_OPEN_FAILED`、
 不传 `discard_current` 是 `PROJECT_REPLACE_REQUIRED`，`create` 的无效 CRS 是 `INVALID_CRS`）。
 
 ## 9. 常见错误速览
@@ -301,7 +296,7 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
 | `get("no-such-id")` | 抛 `FrameworkError: EXECUTION_NOT_FOUND` |
 | 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
 | `layer.add` 传 `add_to_legend="true"` | `FAILED` `INVALID_INPUT` at `add_to_legend` |
-| `layer.add` 的路径不在 `allowed_data_roots` 内 | `FAILED` `PATH_NOT_ALLOWED` |
+| `layer.add` 的路径是相对路径 | `FAILED` `PATH_NOT_ALLOWED` |
 | `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
 | `layer.add(kind="raster", sub_layer="x", ...)` | `FAILED` `INVALID_INPUT` at `<root>` |
 | `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |

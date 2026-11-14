@@ -230,22 +230,13 @@ def context(
     project_: FakeProject,
     *,
     iface: FakeIface | None = None,
-    roots: tuple[Path, ...] = (),
-    data_roots: tuple[Path, ...] | None = None,
     epoch: int = 0,
 ) -> OperationContext:
     return OperationContext(
         iface=iface or FakeIface(project_),
         project=project_,
         lifecycle=FakeLifecycle(epoch),
-        policy=Settings(
-            allowed_project_roots=roots,
-            # 多数用例两个键共用一个根。
-            # project.open 的用例要把数据根分开。
-            # Most cases allow one root for both keys.
-            # The open cases need the data roots apart.
-            allowed_data_roots=roots if data_roots is None else data_roots,
-        ),
+        policy=Settings(),
     )
 
 
@@ -626,42 +617,6 @@ def test_create_reports_a_refused_new_project(qgis: types.ModuleType) -> None:
 # --- project.open：打开工程 / opening a project ----------------------------
 
 
-def test_open_refuses_a_path_outside_the_allowed_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    root = project_dir(tmp_path)
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    target = outside / "a.qgs"
-    target.write_text("", encoding="utf-8")
-    # 工程里故意留一个图层。
-    # 白名单必须先拒掉这个路径。
-    # 否则读到的会是 PROJECT_REPLACE_REQUIRED。
-    # 而那个路径根本不能用。
-    # The project holds a layer on purpose.
-    # The allow-list has to refuse the path first.
-    # Otherwise it reads PROJECT_REPLACE_REQUIRED.
-    # For a path they may not use at all.
-    loaded = FakeProject(layers={"kept": FakeLayer()})
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    refused(PATH_NOT_ALLOWED, lambda: project.ProjectOpen().execute_main(ctx, request))
-    assert loaded.read_path is None
-
-
-def test_open_refuses_a_missing_file(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    ctx = context(FakeProject(), roots=(root,))
-
-    refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(root / "missing.qgs"))
-        ),
-    )
-
-
 def test_open_refuses_to_replace_a_project_with_content(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
@@ -669,7 +624,7 @@ def test_open_refuses_to_replace_a_project_with_content(
     target = root / "a.qgs"
     target.write_text("", encoding="utf-8")
     loaded = FakeProject(dirty=True)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
     request = project.ProjectOpenParams(path=str(target))
 
     refused(PROJECT_REPLACE_REQUIRED, lambda: project.ProjectOpen().execute_main(ctx, request))
@@ -687,7 +642,7 @@ def test_open_refuses_to_reopen_the_associated_file_without_discarding(
     target = root / "current.qgs"
     target.write_text("", encoding="utf-8")
     loaded = FakeProject(file_name=str(target), dirty=True)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
     request = project.ProjectOpenParams(path=str(target))
 
     refused(PROJECT_REPLACE_REQUIRED, lambda: project.ProjectOpen().execute_main(ctx, request))
@@ -699,7 +654,7 @@ def test_open_reports_a_failed_read(qgis: types.ModuleType, tmp_path: Path) -> N
     target = root / "a.qgs"
     target.write_text("not a project", encoding="utf-8")
     loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
     request = project.ProjectOpenParams(path=str(target))
 
     failed = refused(PROJECT_OPEN_FAILED, lambda: project.ProjectOpen().execute_main(ctx, request))
@@ -716,7 +671,7 @@ def test_open_replaces_a_stateful_project_when_explicitly_allowed(
     root = project_dir(tmp_path)
     target = qgs_file(root, "a.qgs", str(root / "a.gpkg"))
     loaded = FakeProject(layers={"old": FakeLayer()}, file_name="C:/maps/old.qgs", dirty=True)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(
         ctx, project.ProjectOpenParams(path=str(target), discard_current=True)
@@ -727,26 +682,22 @@ def test_open_replaces_a_stateful_project_when_explicitly_allowed(
     assert result.layer_count == 0
 
 
-def test_open_uses_the_normalised_path(qgis: types.ModuleType, tmp_path: Path) -> None:
-    # 路径由 ``resolve_path`` 审。
-    # 所以 QGIS 和输出拿到的是它的结果。
-    # 不是调用方原样递进来的那个字符串。
-    # The path is vetted by ``resolve_path``.
-    # So QGIS and the output see its result.
-    # Not the raw string the caller passed.
+def test_open_reports_the_path_it_was_given(qgis: types.ModuleType, tmp_path: Path) -> None:
+    # 路径只过绝对路径检查，不解析：``sub/..`` 原样传到 QGIS 与输出。
+    # The path is checked for being absolute and not resolved: ``sub/..`` reaches QGIS and the
+    # output as it arrived.
     root = project_dir(tmp_path)
     (root / "sub").mkdir()
     target = root / "a.qgz"
     target.write_text("", encoding="utf-8")
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
+    raw = str(root / "sub" / ".." / "a.qgz")
 
-    result = project.ProjectOpen().execute_main(
-        ctx, project.ProjectOpenParams(path=str(root / "sub" / ".." / "a.qgz"))
-    )
+    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=raw))
 
-    assert loaded.read_path == str(target.resolve())
-    assert Path(result.file_path) == target.resolve()
+    assert loaded.read_path == str(Path(raw))
+    assert result.file_path == str(Path(raw))
 
 
 def test_open_succeeds_and_counts_the_layers_that_cannot_load(
@@ -768,7 +719,7 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
         },
         crs_authid="EPSG:3857",
     )
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -779,53 +730,7 @@ def test_open_succeeds_and_counts_the_layers_that_cannot_load(
     assert result.crs_authid == "EPSG:3857"
 
 
-def test_open_refuses_a_project_that_points_outside_the_allowed_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # 工程文件里写着它的图层来源。
-    # 所以 ``read()`` 会去碰它们。
-    # 哪怕调用方敲的每个路径都是允许的。
-    # A project file names its layers' sources.
-    # So ``read()`` reaches them.
-    # Even when each typed path was allowed.
-    root = project_dir(tmp_path)
-    target = root / "leak.qgz"
-    target.write_text("", encoding="utf-8")
-    secret = tmp_path / "elsewhere" / "secret.gpkg"
-    secret.parent.mkdir()
-    secret.write_text("x", encoding="utf-8")
-    loaded = FakeProject(
-        layers_after_read={"leaked": FakeLayer(source=f"{secret}|layername=secret")}
-    )
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(ctx, request),
-    )
-
-    # 图层不只是被报告：它也不许留在工程里。
-    # The layer is not merely reported: it may not stay.
-    assert loaded.removed == ["leaked"]
-    assert loaded.layers == {}
-    assert "1 layer data source(s)" in failed.message
-    # ``read()`` 已经把工程换下去了。
-    # 所以消息不能说“没打开”。
-    # 谁信了就会在已不存在的工程上干活。
-    # ``read()`` already replaced the project.
-    # So the message may not claim otherwise.
-    # Believing it means working on a gone project.
-    assert "was replaced" in failed.message
-    assert "not opened" not in failed.message
-    # 消息从不复述它拒掉的那个路径。
-    # The message never repeats the path it refused.
-    assert "secret.gpkg" not in failed.message
-
-
-def test_open_keeps_a_layer_whose_source_is_gone_but_inside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
+def test_open_keeps_a_layer_whose_source_is_gone(qgis: types.ModuleType, tmp_path: Path) -> None:
     # 根目录内被删掉的数据源只是部分加载。
     # 不算越界。
     # 所以这里刻意不问数据源是否存在。
@@ -838,7 +743,7 @@ def test_open_keeps_a_layer_whose_source_is_gone_but_inside_the_roots(
     loaded = FakeProject(
         layers_after_read={"gone": FakeLayer(valid=False, source=str(root / "gone.gpkg"))}
     )
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -867,144 +772,12 @@ def test_open_reads_a_project_whose_layer_is_a_local_subdataset(
     source = spelling.format(path=root / "pages.tif")
     target = qgs_file(root, "subdataset.qgs", source)
     loaded = FakeProject(layers_after_read={"pages": FakeLayer(source=source, provider="gdal")})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
     assert result.layer_count == 1
     assert loaded.removed == []
-
-
-def test_open_refuses_a_subdataset_whose_file_is_outside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # 白名单问的是写法里的那个文件。
-    # 越界依旧要删层。
-    # The file inside the spelling is what is asked.
-    # A breach still removes the layer.
-    root = project_dir(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    source = f"GTIFF_DIR:1:{outside / 'pages.tif'}"
-    target = qgs_file(root, "outside.qgs", source)
-    loaded = FakeProject(layers_after_read={"pages": FakeLayer(source=source, provider="gdal")})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.removed == ["pages"]
-    assert "1 layer data source(s)" in failed.message
-
-
-def test_open_refuses_a_layer_whose_provider_names_no_local_path(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # 解不出路径的数据源，策略担保不了。
-    # A source nobody can decode is not one to vouch for.
-    root = project_dir(tmp_path)
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
-    loaded = FakeProject(
-        layers_after_read={"remote": FakeLayer(source="memory?geometry=Point", provider="memory")}
-    )
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(ctx, request),
-    )
-
-    assert loaded.removed == ["remote"]
-    assert "1 layer data source(s)" in failed.message
-
-
-def test_open_refuses_a_layer_whose_provider_cannot_decode_its_uri(
-    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # 一个 provider 抛异常，不能抹掉别的图层的答案。
-    # 判不清的那层按根外处理。
-    # 而不是把整次检查变成内部错误。
-    # One failure may not erase other answers.
-    # The unclear layer counts as outside.
-    # Not an internal error for the whole check.
-    class ExplodingMetadata:
-        def decodeUri(self, uri: str) -> dict[str, str]:  # noqa: N802 - a PyQGIS name
-            raise RuntimeError("this provider cannot decode its own URI")
-
-    root = project_dir(tmp_path)
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
-    monkeypatch.setitem(FakeProviderRegistry.instance().metadata, "boom", ExplodingMetadata())
-    loaded = FakeProject(
-        layers_after_read={
-            "boom": FakeLayer(source="whatever", provider="boom"),
-            "inside": FakeLayer(source=str(root / "a.gpkg")),
-        }
-    )
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(ctx, request),
-    )
-
-    assert loaded.removed == ["boom"]
-    assert loaded.layers.keys() == {"inside"}
-    assert "1 layer data source(s)" in failed.message
-
-
-def test_open_accepts_a_directory_shaped_source_inside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # ESRI FileGDB 是个目录。
-    # 装着它的工程仍是普通工程。
-    # 策略只问它在哪儿。
-    # 不问它是不是普通文件。
-    # An ESRI FileGDB is a directory.
-    # A project holding one is ordinary.
-    # The policy asks where it lives.
-    # Not whether it is a regular file.
-    root = project_dir(tmp_path)
-    gdb = root / "roads.gdb"
-    gdb.mkdir()
-    target = qgs_file(root, "gdb.qgs", str(gdb))
-    loaded = FakeProject(layers_after_read={"gdb": FakeLayer(source=str(gdb))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert loaded.removed == []
-
-
-def test_open_refuses_a_directory_shaped_source_outside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    root = project_dir(tmp_path)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    gdb = elsewhere / "roads.gdb"
-    gdb.mkdir()
-    target = qgs_file(root, "gdb.qgs", str(gdb))
-    loaded = FakeProject(layers_after_read={"gdb": FakeLayer(source=str(gdb))})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.removed == ["gdb"]
-    assert "1 layer data source(s)" in failed.message
 
 
 @pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
@@ -1032,7 +805,7 @@ def test_open_refuses_a_remote_source_before_the_project_is_read(
     write = qgs_file if suffix == ".qgs" else qgz_file
     target = write(root, f"remote{suffix}", remote)
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=remote)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1091,7 +864,7 @@ def test_open_refuses_a_datasource_that_carries_a_url(
     root = project_dir(tmp_path)
     target = qgs_file(root, "tiles.qgs", source)
     loaded = FakeProject(layers_after_read={"tiles": FakeLayer(source=source)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1121,7 +894,7 @@ def test_open_refuses_a_utf16_project_before_the_project_is_read(
     root = project_dir(tmp_path)
     target = encoded_project(root, f"encoded{suffix}", REMOTE_SOURCE)
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1153,7 +926,7 @@ def test_open_sees_a_datasource_tag_with_whitespace(
         target = root / f"spaced{suffix}"
         target.write_text(xml, encoding="utf-8")
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1184,7 +957,7 @@ def test_a_qgs_over_the_scan_limit_is_refused_without_reading_it(
         raise AssertionError("the project file was read before it was measured")
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    ctx = context(FakeProject(), roots=(root,))
+    ctx = context(FakeProject())
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1224,7 +997,7 @@ def test_a_qgz_member_over_the_scan_limit_is_refused_while_it_is_unpacked(
         return data
 
     monkeypatch.setattr(zipfile.ZipExtFile, "read", counting)
-    ctx = context(FakeProject(), roots=(root,))
+    ctx = context(FakeProject())
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1266,7 +1039,7 @@ def test_a_qgz_over_the_total_scan_budget_is_refused_before_members_are_unpacked
         raise AssertionError(f"the archive member {name} was unpacked before it was measured")
 
     monkeypatch.setattr(zipfile.ZipFile, "read", read)
-    ctx = context(FakeProject(), roots=(root,))
+    ctx = context(FakeProject())
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1293,7 +1066,7 @@ def test_an_unclosed_datasource_project_is_refused_in_milliseconds(
     target = unclosed_project(root, "unclosed.qgs")
     assert target.stat().st_size > 900_000
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     failed = refused(
@@ -1323,7 +1096,7 @@ def test_a_deeply_nested_project_is_refused_before_it_is_read(
     root = project_dir(tmp_path)
     target = nested_project(root, "deep.qgs", DEEP_NESTING)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_OPEN_FAILED,
@@ -1349,7 +1122,7 @@ def test_a_project_nested_up_to_the_depth_bound_is_still_read(
     root = project_dir(tmp_path)
     target = nested_project(root, "nested.qgs", project.MAX_PROJECT_DEPTH - 1)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -1371,7 +1144,7 @@ def test_a_one_megabyte_flat_project_is_scanned_linearly(
     assert target.stat().st_size > 1024 * 1024
     assert target.read_bytes().count(b"<") < project.MAX_PROJECT_TAGS
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
@@ -1392,7 +1165,7 @@ def test_a_project_with_more_tags_than_the_scan_will_parse_is_refused(
     target = root / "spam.qgs"
     target.write_bytes(b"<qgis>" + b"<a></a>" * (project.MAX_PROJECT_TAGS // 2 + 1))
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     failed = refused(
@@ -1466,7 +1239,7 @@ def test_open_refuses_depth_hidden_by_cdata_a_comment_or_an_attribute(
         target = root / f"hidden{suffix}"
         target.write_bytes(body)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     failed = refused(
@@ -1513,7 +1286,7 @@ def test_open_sees_a_datasource_whose_attribute_hides_its_tag_end(
         target = root / f"hidden{suffix}"
         target.write_text(xml, encoding="utf-8")
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=remote)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1543,7 +1316,7 @@ def test_open_refuses_a_remote_uri_wherever_the_project_keeps_it(
     target = root / "renamed.qgs"
     target.write_text(xml, encoding="utf-8")
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1571,7 +1344,7 @@ def test_open_refuses_a_datasource_in_a_namespace(qgis: types.ModuleType, tmp_pa
         encoding="utf-8",
     )
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1597,7 +1370,7 @@ def test_a_project_that_is_not_well_formed_xml_is_refused_before_read(
     target = root / "broken.qgs"
     target.write_bytes(b"<qgis><projectlayers></qgis>")
     loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_OPEN_FAILED,
@@ -1636,7 +1409,7 @@ def test_open_refuses_a_remote_source_that_a_child_element_carries_in_its_tail(
         target = root / f"tail{suffix}"
         target.write_text(xml, encoding="utf-8")
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1675,7 +1448,7 @@ def test_open_refuses_a_source_split_across_several_child_elements(
         target = root / f"split{suffix}"
         target.write_text(xml, encoding="utf-8")
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1712,7 +1485,7 @@ def test_open_refuses_a_project_that_declares_xml_entities(
         target = root / f"entities{suffix}"
         target.write_text(xml, encoding="utf-8")
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     tracemalloc.start()
     try:
@@ -1749,7 +1522,7 @@ def test_a_project_with_the_doctype_qgis_writes_is_still_read(
         encoding="utf-8",
     )
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -1786,7 +1559,7 @@ def test_open_reads_a_project_whose_text_only_contains_vsi(
         encoding="utf-8",
     )
     loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -1813,7 +1586,7 @@ def test_open_reads_a_project_whose_datasource_is_a_file_uri(
     # The provider resolves it before the check.
     # The fake layer names the file the URI points to.
     loaded = FakeProject(layers_after_read={"points": FakeLayer(source=str(root / "points.csv"))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -1834,7 +1607,7 @@ def test_open_refuses_a_file_uri_that_names_a_host(
     root = project_dir(tmp_path)
     target = qgs_file(root, "hosted.qgs", source)
     loaded = FakeProject(layers_after_read={"never": FakeLayer(source=source)})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1866,7 +1639,7 @@ def test_open_reads_a_project_whose_layer_metadata_quotes_a_url(
         encoding="utf-8",
     )
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -1898,7 +1671,7 @@ def test_open_refuses_a_metadata_value_that_is_a_url(
         encoding="utf-8",
     )
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1933,7 +1706,7 @@ def test_open_refuses_a_layout_picture_that_names_a_remote_file(
     )
     target = write_project_xml(root, f"picture{suffix}", xml)
     loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     failed = refused(
@@ -1969,7 +1742,7 @@ def test_open_refuses_a_layout_html_source_that_is_a_remote_url(
     )
     target = write_project_xml(root, f"html{suffix}", xml)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -1998,7 +1771,7 @@ def test_open_refuses_an_attribute_value_that_starts_with_a_remote_marker(
     xml = layout_project(root / "a.gpkg", f'<LayoutItem type="65640" file="{value}"/>')
     target = write_project_xml(root, "attribute.qgs", xml)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PATH_NOT_ALLOWED,
@@ -2045,7 +1818,7 @@ def test_open_reads_a_project_of_local_paths_and_a_quoted_url(
         encoding="utf-8",
     )
     loaded = FakeProject(layers_after_read={"points": FakeLayer(source=str(root / "points.csv"))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -2080,7 +1853,7 @@ def test_a_project_of_repeated_and_oversized_attributes_is_refused_in_millisecon
     )
     assert target.stat().st_size < project.MAX_PROJECT_BYTES
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     failed = refused(
@@ -2124,7 +1897,7 @@ def test_a_large_text_nested_deep_is_not_rejoined_at_every_level(
         encoding="utf-8",
     )
     loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
@@ -2157,7 +1930,7 @@ def test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked(
 
     monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     started = time.monotonic()
     failed = refused(
@@ -2202,7 +1975,7 @@ def test_a_qgz_over_the_size_budget_is_refused_before_its_directory_is_read(
         archive.writestr("padding.bin", b" " * (6 * 1024 * 1024))
     assert target.stat().st_size > project.MAX_PROJECT_BYTES
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     tracemalloc.start()
     try:
@@ -2255,7 +2028,7 @@ def test_the_depth_bound_is_the_one_read_time_measured(
     root = project_dir(tmp_path)
     target = nested_project(root, "at the bound.qgs", project.MAX_PROJECT_DEPTH)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_OPEN_FAILED,
@@ -2291,7 +2064,7 @@ def test_open_reads_a_project_with_the_attributes_qgis_itself_writes(
         b"</maplayer></projectlayers></qgis>"
     )
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -2314,7 +2087,7 @@ def test_open_refuses_an_archive_whose_sibling_member_is_encrypted(
         archive.writestr("extra.db", b"a sibling member read() also unpacks")
     set_encryption_flag(target, "extra.db")
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_OPEN_FAILED,
@@ -2343,7 +2116,7 @@ def test_open_refuses_a_member_compressed_in_a_way_qgis_does_not_read(
     with zipfile.ZipFile(target, "w", zipfile.ZIP_BZIP2) as archive:
         archive.writestr("project.qgs", project_xml(str(root / "a.gpkg")))
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_OPEN_FAILED,
@@ -2383,7 +2156,7 @@ def test_a_member_that_lies_about_its_size_is_not_read_in_one_piece(
     assert target.stat().st_size < project.MAX_PROJECT_BYTES // 8
     lie_about_member_size(target, 100)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     tracemalloc.start()
     try:
@@ -2416,7 +2189,7 @@ def test_open_still_reads_a_project_whose_datasource_is_a_relative_path(
     source = root / "nested" / ".." / "data.gpkg"
     target = qgs_file(root, "relative.qgs", "../data.gpkg")
     loaded = FakeProject(layers_after_read={"relative": FakeLayer(source=str(source))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -2445,7 +2218,7 @@ def test_open_reports_an_encrypted_member_as_a_read_failure(
     target = qgz_file(root, "locked.qgz", str(root / "a.gpkg"))
     set_encryption_flag(target)
     loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_OPEN_FAILED,
@@ -2476,7 +2249,7 @@ def test_open_keeps_a_layer_whose_source_directory_is_gone(
         else qgs_file(root, f"moved{suffix}", str(source))
     )
     loaded = FakeProject(layers_after_read={"moved": FakeLayer(valid=False, source=str(source))})
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -2491,7 +2264,7 @@ def test_open_still_reads_a_project_whose_sources_are_local(
     root = project_dir(tmp_path)
     target = qgs_file(root, "local.qgs", str(root / "a.gpkg"))
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
@@ -2511,7 +2284,7 @@ def test_open_reports_a_corrupt_archive_as_a_read_failure(
     target = root / "corrupt.qgz"
     target.write_bytes(b"this is not zipped project data")
     loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     refused(
         PROJECT_OPEN_FAILED,
@@ -2542,7 +2315,7 @@ def test_save_refuses_to_overwrite_an_existing_target(
     target = root / "out.qgs"
     target.write_text("original", encoding="utf-8")
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     refused(
         TARGET_EXISTS,
@@ -2565,7 +2338,7 @@ def test_save_refuses_to_overwrite_the_associated_file(
     target = root / "current.qgs"
     target.write_text("original", encoding="utf-8")
     loaded = FakeProject(file_name=str(target))
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     refused(
         TARGET_EXISTS,
@@ -2579,7 +2352,7 @@ def test_save_writes_a_new_file(qgis: types.ModuleType, tmp_path: Path) -> None:
     root = project_dir(tmp_path)
     target = root / "out.qgz"
     loaded = FakeProject(dirty=True)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectSave().execute_main(ctx, project.ProjectSaveParams(path=str(target)))
 
@@ -2599,7 +2372,7 @@ def test_save_overwrites_when_explicitly_allowed(qgis: types.ModuleType, tmp_pat
     # An explicit `path` has to win.
     # The associated file is only the fallback.
     loaded = FakeProject(file_name=str(root / "current.qgs"))
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     project.ProjectSave().execute_main(
         ctx, project.ProjectSaveParams(path=str(target), overwrite=True)
@@ -2613,42 +2386,17 @@ def test_save_falls_back_to_the_associated_file(qgis: types.ModuleType, tmp_path
     target = root / "current.qgs"
     target.write_text("original", encoding="utf-8")
     loaded = FakeProject(file_name=str(target))
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     result = project.ProjectSave().execute_main(ctx, project.ProjectSaveParams(overwrite=True))
 
     assert Path(result.file_path) == target.resolve()
 
 
-def test_save_refuses_a_target_outside_the_allowed_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    root = project_dir(tmp_path)
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    # 目标故意存在。
-    # 白名单必须先拒，覆盖守卫才轮到。
-    # 否则根外的存在性会泄露出去。
-    # The target exists on purpose.
-    # The allow-list has to refuse the path first.
-    # Otherwise existence outside the roots leaks out.
-    (outside / "out.qgs").write_text("keep", encoding="utf-8")
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectSave().execute_main(
-            ctx, project.ProjectSaveParams(path=str(outside / "out.qgs"))
-        ),
-    )
-    assert loaded.writes == []
-
-
 def test_save_reports_a_failed_write(qgis: types.ModuleType, tmp_path: Path) -> None:
     root = project_dir(tmp_path)
     loaded = FakeProject(write_result=False)
-    ctx = context(loaded, roots=(root,))
+    ctx = context(loaded)
 
     failed = refused(
         PROJECT_SAVE_FAILED,

@@ -125,7 +125,7 @@ npm run deploy:list   # 只列会拷贝什么，不落盘
 | 组 | 断的是什么 | 什么时候跑 | 命令 | 条数与耗时 |
 | --- | --- | --- | --- | --- |
 | **规范组**（`conformance`） | 整个仓库的成文规则：注释双语、导入位置、文档索引、注册面 | **每次改完代码都跑** | `npm run test:rules` | 12 条，约 2 s |
-| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 785 条，约 33 s |
+| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 744 条，约 33 s |
 
 一条测试属于规范组，当且仅当三件事都成立：它断言的是**对整个仓库都成立**的规则（不是某条行为）、
 它**读源码或文档**而不是驱动代码、它**不需要 QGIS**。文件顶部写 `pytestmark = pytest.mark.conformance`
@@ -138,18 +138,18 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 ```
 
 通过的判据（三行都要在输出里）：`All checks passed`、`N files already formatted`、
-`12 passed, 773 deselected`。
+`12 passed, 732 deselected`。
 
 **按需加跑**（碰了什么跑什么）：
 
 | 改动 | 加跑 | 通过长什么样 |
 | --- | --- | --- |
-| `src/` 里任何逻辑 | `npm run test`（全量） | `785 passed` |
+| `src/` 里任何逻辑 | `npm run test`（全量） | `744 passed` |
 | 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `732 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
 | 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
 | 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
 | 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
-| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `785 passed` |
+| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `744 passed` |
 | 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
 | 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
 
@@ -211,8 +211,8 @@ qgis-agent-plugin/
 │   │   ├── engine.py             OperationEngine：run_sync/submit/get/cancel/shutdown/on_project_replaced
 │   │   ├── execution_store.py    ExecutionStore：记录快照、状态机、保留策略
 │   │   ├── context.py            ProjectLifecycle（epoch）与 require_main_thread
-│   │   ├── config.py             Settings（七项配置）与 from_mapping
-│   │   ├── security.py           is_remote_uri / resolve_path（路径白名单）
+│   │   ├── config.py             Settings（五项配置）与 from_mapping
+│   │   ├── security.py           absolute_path（只要求绝对路径）
 │   │   └── runners/
 │   │       ├── __init__.py       只有 docstring
 │   │       ├── main_thread.py    MainThreadRunner：把回调投到事件循环，跳过已终止的执行
@@ -230,7 +230,7 @@ qgis-agent-plugin/
     ├── test_contracts.py         协议：策略与阶段声明、校验拒绝
     ├── test_models.py            记录状态组合、错误码集合、输入模型规则
     ├── test_registry.py          名字格式、重复注册、spec 快照不可编辑
-    ├── test_security.py          路径白名单、远程/UNC/vsi 拒绝、软链接
+    ├── test_security.py          绝对路径规则与 Settings 计数
     ├── test_context.py           epoch 与线程判定
     ├── test_execution_store.py   快照、状态机、保留与淘汰
     ├── test_engine.py            控制面异常 vs FAILED 记录、排队、取消、epoch、容量
@@ -278,8 +278,8 @@ qgis-agent-plugin/
 | | `BackgroundRunner`、`BackgroundCanceller` | 后台适配器的两个注入点（类型别名） |
 | `core/execution_store.py` | `ExecutionStore`、`TERMINAL_STATUSES` | 唯一的记录写入者 |
 | `core/context.py` | `ProjectLifecycle`、`require_main_thread` | epoch 与线程 |
-| `core/config.py` | `Settings` | 七项配置的 frozen dataclass |
-| `core/security.py` | `is_remote_uri`、`resolve_path` | 路径策略的唯一入口 |
+| `core/config.py` | `Settings` | 五项配置的 frozen dataclass |
+| `core/security.py` | `absolute_path` | 路径参数的唯一规则：必须是绝对路径 |
 | `core/runners/main_thread.py` | `MainThreadRunner` | `post(execution_id, callback)` |
 | `core/runners/qgs_task.py` | `OperationTaskRunner`、`task_class()` | 后台适配器与 `QgsTask` 子类 |
 | `operations/__init__.py` | `register_all(registry)`、`OPERATIONS` | 唯一的注册入口 |
@@ -311,7 +311,7 @@ qgis-agent-plugin/
    不按名字引用任何 Operation（它只调用 `register_all`）。
 2. 一个能力族一个文件：`project.*` 在 `operations/project.py`，`layer.*` 在
    `operations/layer.py`。领域模型跟着领域走（`LayerSummary` 在 layer 模块），只有被两个以上
-   能力共享、又不属于任何领域的规则才进 `core/`（路径白名单、工程代数、线程判定）。
+   能力共享、又不属于任何领域的规则才进 `core/`（工程代数、线程判定）。
 3. 框架级 DTO、状态枚举、错误码只在 `core/models.py`。QGIS/Qt 对象永远不进 DTO。
 4. `core/contracts.py` 与 `core/engine.py` 的公开签名是冻结面：主线程只有一个阶段
    `execute_main`，后台只有 `prepare_main` / `execute_worker` / `finalize_main` 三个阶段，
@@ -440,8 +440,7 @@ GIS 开发者，和不懂中文的下一个 agent；两种人都要一句话看�
 这七条不是约定而是断言：`tests/test_comments.py` 逐文件检查双语与来源引用，并把 `shortcut:`
 标记当作必须存活的东西（`ponytail-debt` 靠它检索）。它只扫 `src/` 与 `tests/`，所以别把 Python
 放进 `docs/`。
-9. 术语统一：epoch=工程代数，snapshot=快照，main thread=主线程，worker=后台线程，
-   record=记录，execution=执行，destructive=破坏性。
+9. 术语统一：词汇与要避免的同义词以 `GLOSSARY.md` 为唯一来源，不在注释里另立说法；在它里查不到的词，要么换成它已有的词，要么先把它补上。
 10. 删掉把代码再念一遍的注释（"初始化""设置""处理数据"）；但原因型注释不因为"读代码能
     看懂"就删。
 
@@ -579,7 +578,7 @@ class OperationContext:
     iface: Any  # QGIS 的 iface，或验收用的替身；headless 里可能是 None
     project: Any  # 当前 QgsProject 实例；headless 里是替身
     lifecycle: Any  # ProjectLifecycle 实例（工程代数）；契约层只透传，不依赖它的具体类型
-    policy: Settings  # 七项配置（frozen）
+    policy: Settings  # 五项配置（frozen）
 ```
 
 `OperationContext` 只交给主线程阶段，**永远不进 worker**。
@@ -831,8 +830,8 @@ class OperationTask(QgsTask):
 
 `initGui()` 的顺序是固定的：
 
-1. `read_settings()`：从 `QgsSettings` 读 `qgis_agent_plugin/<七项键>`，`Settings.from_mapping`
-   转成 frozen dataclass。没写的键保持默认；两个根目录默认空 = 一个文件都不许碰。
+1. `read_settings()`：从 `QgsSettings` 读 `qgis_agent_plugin/<五项键>`，`Settings.from_mapping`
+   转成 frozen dataclass。没写的键保持默认。
 2. `ProjectLifecycle()`。
 3. 为本插件单独建一个 `QgsTaskManager()`（不用全局的，`cancelAll()` 会波及别的插件）。
 4. `OperationTaskRunner(task_manager=manager)`。
@@ -866,18 +865,18 @@ class OperationTask(QgsTask):
 
 | 键 | 默认 | 语义 |
 | --- | --- | --- |
-| `allowed_data_roots` | 空列表 | `layer.add` 能读的目录；也是 `project.open` 检查每层数据源的目录。空 = 一个都不许 |
-| `allowed_project_roots` | 空列表 | `project.open` / `project.save` 能读写的目录。空 = 一个都不许 |
 | `max_active_background` | 2 | 同时活动的后台任务数 |
 | `max_pending` | 32 | 排队上限（主线程 + 后台合计） |
 | `max_terminal_records` | 200 | 终态记录保留条数 |
 | `terminal_ttl_seconds` | 1800 | 终态记录保留秒数 |
 | `max_snapshot_features` | 10000 | 后台快照要素上限 |
 
-`Settings.from_mapping` 的规则：键缺失或为 `None` 都算"没设置"，保留默认；根目录接受单个
-字符串或序列；计数接受数字字符串但**拒绝小于 1 的值**（`max_active_background=0` 会让后台调用
-永远等不到槽位），所以插件会直接加载失败并报出键名，而不是静默排队。相对路径的根目录不是
-配置错误、只是永远不匹配（它会让策略依赖工作目录，所以不许）。
+`Settings.from_mapping` 的规则：键缺失或为 `None` 都算"没设置"，保留默认；这个版本不认识的键
+（旧配置里留下的 `allowed_data_roots` 之类）直接忽略，不让加载失败；计数接受数字字符串，但
+**拒绝小于 1 的值**（`max_active_background=0` 会让后台调用永远等不到槽位），所以插件会直接
+加载失败并报出键名，而不是静默排队。
+
+
 
 ---
 
@@ -908,23 +907,23 @@ spec.input_schema["required"]  # ['kind', 'source_path', 'name']
 spec.output_schema["required"]  # ['layer_id', 'name', 'kind', 'provider', 'crs_authid']
 ```
 
-### 7.2 路径与安全
+### 7.2 路径
 
-所有文件访问都经过 `core/security.resolve_path`，它是唯一入口：
+路径只有一条规则，在 `core/security.absolute_path` 里：
 
 ```python
-resolve_path(raw, roots, *, must_exist: bool, allow_directory: bool = False) -> Path
+absolute_path(raw: str) -> Path
 ```
 
 | 情形 | 规则 |
 | --- | --- |
-| 任何情形 | `raw` 必须非空、无 NUL、是绝对路径；否则 `PATH_NOT_ALLOWED` |
-| 任何情形 | URL、provider URI（`scheme:` 且不是盘符）、`/vsi*`、UNC（`\\host\share`、`//host/share`、`\\?\`）在**任何 I/O 之前**拒绕 |
-| 读（`must_exist=True`） | 目标必须存在且是普通文件；软链接按最终目标判断 |
-| 写（`must_exist=False`） | 父目录必须存在且在根内；目标不能是目录；目标可以不存在 |
-| 工程内数据源（`allow_directory=True`） | 目标可以是目录；路径可以不存在（搬走的源也算"在根内"）；只比较解析后的路径 |
-| 根目录 | 绝对路径的根先 `Path.resolve()`；按路径组件比较，`..` 与软链接跳不出去；相对根目录不匹配任何路径 |
-| 错误消息 | 不含原始路径（可能带凭据），只说"不是允许的本地文件" |
+| 任何情形 | `raw` 必须非空、无 NUL；否则 `PATH_NOT_ALLOWED` |
+| 绝对字形 | `C:\…`、`\\host\share\…` 与 GDAL 的 `/vsi…` 都算绝对，原样返回 |
+| 相对字形 | `cities.gpkg`、`C:cities.gpkg`、`\cities.gpkg` 与 `https://…` 都被拒：它们要么依赖工作目录，要么根本不是路径 |
+| 不做的判断 | 存在、是不是文件、在不在某个目录内、本地还是远程——由 `read()` 与 provider 回答，它们的答案比预检新 |
+
+没有根目录白名单，也没有 `allowed_*_roots` 配置：一条路径可以是这台机器上进程能读写的任何位置。
+这是刻意的边界，记在 `12。
 
 `project.open` 在 `read()` 之前多一层扫描，因为 `QgsProject.read()` 会就地构造文件里写的每个图层、
 取布局里的图片：一个远程 URI 就是主线程上的一次 HTTP 请求或一次带 Windows 凭据的 SMB 连接，
@@ -972,11 +971,9 @@ resolve_path(raw, roots, *, must_exist: bool, allow_directory: bool = False) -> 
 
 这一层是**读前的尽力而为清单**，不是"QGIS 会取什么"的完备枚举：除了 `<datasource>` 里那个
 `://`，它只问每个值的开头，所以值中间才出现的远程形状它看不见；容器格式内部引用的远程文件
-也不看（见 §12）。`read()` 之后还有逐层检查：用 provider 的 `decodeUri()` 把每层数据源还原成
-路径，再过 `allowed_data_roots`（`allow_directory=True`、`must_exist=False`）——GDAL 子数据集
-（`NETCDF:"C:/x.nc":var`、`GTIFF_DIR:1:C:/x.tif`）要先拆出里面那个文件再判；拆不出本地路径的
-层、或路径在根外的层，先 `removeMapLayer()` 再整次 `PATH_NOT_ALLOWED`（**不回滚**：当前工程已
-被替换成"去掉越界层之后的剩货"）。数据源可以是目录（ESRI FileGDB），可以不存在（搬走的源）。
+也不看（见 `12）。`read()` 之后不再有逐层检查：工程点名的数据源可以是根外路径、目录、不存在的
+源或远程源，插件不判它们——那种工程会正常打开，加载不出来的层只让 `invalid_layer_count` 变大。
+它挡的是**主线程上的一次网络往返**，不是访问控制。
 
 ### 7.3 destructive 标记
 
@@ -1020,7 +1017,7 @@ resolve_path(raw, roots, *, must_exist: bool, allow_directory: bool = False) -> 
 | `PROJECT_SAVE_FAILED` | `write()` 返回假；文件可能已部分写入 | `project.save` |
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |
 | `TARGET_EXISTS` | 目标已存在且没有 `overwrite=true` | `project.save` |
-| `PATH_NOT_ALLOWED` | 路径不在白名单、是远程/UNC/vsi、工程文件或成员过大、声明 XML 实体、不是 UTF-8、远程数据源 | `resolve_path`、`project.open` 的前扫与逐层检查 |
+| `PATH_NOT_ALLOWED` | 路径不是绝对的，或不是本地路径字形；工程文件过大、声明 XML 实体、不是 UTF-8、点名远程数据源 | `absolute_path`、`project.open` 的读前扫描 |
 | `INVALID_LAYER` | 图层源加载不出有效图层，或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
 | `LAYER_NOT_FOUND` | 工程里没有这个 id | `layer.get_info/set_visibility/sum_numeric_field` 与样式读 |
 | `LAYER_NOT_IN_TREE` | 图层已注册但没有树节点（`add_to_legend=false`） | `layer.set_visibility` |
@@ -1053,7 +1050,7 @@ resolve_path(raw, roots, *, must_exist: bool, allow_directory: bool = False) -> 
 | `INVALID_OPERATION_DEFINITION`，消息 `<名字>: input_model must inherit Params` | 输入模型没继承 `Params`（只做了第 4 条的 `BaseModel`） | 改成继承 `Params`，不要自己写 `model_config` |
 | 记录 `FAILED(OUTPUT_VALIDATION_FAILED)` | 返回值与 `output_model` 不符：缺字段、多字段、类型错、含 `NaN`/`Infinity` | 按模型构造返回值 |
 | 记录 `FAILED(INTERNAL_ERROR)` 且日志有 traceback | 操作里抛了裸异常 | 用 `FrameworkError` 表达可预期失败 |
-| 所有文件操作都 `PATH_NOT_ALLOWED` | 两个允许目录是空的（默认） | 先配 `allowed_*_roots`（写法见 `plugins/qgis-agent-plugin/docs/INSTALL.md`） |
+| `PATH_NOT_ALLOWED` 且消息是 `the path must be an absolute path` | 路径是相对的，或者是个 URL | 给一条带盘符的完整路径 |
 
 ### 7.6 各 Operation 的契约
 
@@ -1100,7 +1097,7 @@ resolve_path(raw, roots, *, must_exist: bool, allow_directory: bool = False) -> 
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对、存在、普通文件、在 `allowed_data_roots` 内）、`name`（1–128）、`sub_layer`（仅 vector，`^[A-Za-z0-9_-]{1,64}$`）、`add_to_legend`（默认 `true`） |
+| 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对路径）、`name`（1–128）、`sub_layer`（仅 vector，`^[A-Za-z0-9_-]{1,64}$`）、`add_to_legend`（默认 `true`） |
 | 返回 | `layer_id`、`name`、`kind`、`provider`（`ogr` 或 `gdal`）、`crs_authid` |
 | 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（构造后 `isValid()` 为假） |
 | 行为 | provider 由 `kind` 决定，调用方不能指定；sub-layer 的 URI 由 OGR provider 的 `encodeUri` 生成，不手拼；`add_to_legend=false` 的图层没有树节点，之后 `set_visibility` 会得 `LAYER_NOT_IN_TREE` |
@@ -1275,7 +1272,7 @@ class LayerRenameParams(Params):
 - 形状校验（绝对路径、后缀、枚举值、互斥字段）放 `Annotated[..., AfterValidator(...)]` 或
   `model_validator(mode="after")`，让错误变成 `INVALID_INPUT` 而不是到 GIS 层才炸。
 - 能用纯校验表达的，不要进 `execute_main`；能进 `execute_main` 前置检查的（比如 CRS 是否有效、
-  路径是否在白名单），不要留到改动状态之后。
+  路径是不是绝对的），不要留到改动状态之后。
 - 模型的校验函数只做校验，不做 I/O、不读环境、不依赖调用顺序。
 - 后台操作与主线程操作一样：入参在 `submit` 返回前就校验完，被拒的调用不会占排队名额。
 
@@ -1405,7 +1402,7 @@ class LayerSumNumericField(
    同一处把 `metadata.txt` 的 `description`/`about` 里的计数改掉（现在是 "seventeen"），并搜一遍
    本文档的计数（§1 的表、§3.1 的目录树注释、§7.6 的契约），否则文字和代码开始互相矛盾。
 5. 写测试（见 §9）：至少覆盖成功路径、一个输入校验失败、一个业务失败（`LAYER_NOT_FOUND`）。
-   如果操作有路径参数，再加一个白名单外的用例。
+   如果操作有路径参数，再加一个相对路径被拒的用例。
 6. 如果是后台操作，`test_qgs_task.py`/`test_background.py` 的假适配器模式可直接复用；补一个
    "换代 → `STALE_PROJECT`" 与一个"取消 → `CANCELLED`"的用例。
 7. `npm run lint`、`npm run test:unit` 全绿。若操作触到真实 PyQGIS 行为，在
@@ -1419,7 +1416,7 @@ class LayerSumNumericField(
 - [ ] 输入继承 `Params`；严格类型；默认值在模型里。
 - [ ] 输出只含 JSON 安全值；新模型带 `extra="forbid"`。
 - [ ] QGIS/Qt 只在函数体内 import（`ui/dock.py` 除外）。
-- [ ] 文件访问只走 `resolve_path`，根目录选对，错误消息不带路径。
+- [ ] 路径参数只走 `absolute_path`，不自己做存在性预检。
 - [ ] 可预期失败用 `FrameworkError` + 既有错误码。
 - [ ] 后台操作：快照纯数据、带 epoch、执行中检查取消、超限拒绝、结果无 NaN/Inf。
 - [ ] 新增了模块的话，它已加进 `tests/test_package.py` 的导入列表。
@@ -1448,7 +1445,7 @@ class LayerSumNumericField(
 
 ### 9.2 检查点
 
-- 新操作覆盖成功路径、一个输入校验失败、一个业务失败；有路径参数再加一个白名单外的用例。
+- 新操作覆盖成功路径、一个输入校验失败、一个业务失败；有路径参数再加一个相对路径的用例。
 - 后台操作补一条"换代 → `STALE_PROJECT`"与一条"取消 → `CANCELLED`"。
 - 断言落在错误码、字段值、调用次数上；不断言日志文本与私有属性。
 - 触到真实 PyQGIS 行为的部分进 `tests/qgis_integration/cases.py`，用 `fixtures.py` 现场生成数据，
@@ -1480,8 +1477,7 @@ class LayerSumNumericField(
 - **留空 = 不提交，用模型默认值**。文本/数字/JSON 字段清空就不提交，schema 里的 `default` 以灰色
   提示文字显示在空框里；下拉框第一项是 `默认（值）`。两个例外：勾选框始终提交自己的状态；
   数组/对象填 JSON 文本，解析失败时错误区给 `INVALID_INPUT` 且**不调用引擎**。
-- **默认配置下第一条错误就是 `PATH_NOT_ALLOWED`**（两个允许目录为空），错误区直接提示去配
-  `allowed_data_roots`。
+- **路径参数写相对路径会被拒**（`PATH_NOT_ALLOWED`），错误区提示给一条带盘符的完整路径。
 
 键盘：`Ctrl+Return`/`Ctrl+Enter` 运行；`Tab` 顺序是 选择器 → 各参数 → "运行"；运行期间选择器
 与参数禁用，后台调用可点"取消"。
@@ -1527,13 +1523,14 @@ Git flow：
 
 ## 12. 已知边界与约束
 
-这些是当前实现的真实边界，不是待办清单；踩到它们时应先确认是不是设计如此。
+这些是当前实现的真实边界，不是待办清单；踩到它们时应先确认是不是设计如此。每条为什么这么定、被拒过
+哪些做法，见 `docs/adr/`；本表只记"现在是什么"。
 
 | 边界 | 现状 | 影响 |
 | --- | --- | --- |
-| 默认不允许任何文件 | 两个根目录默认空 | 新装环境下所有文件操作 `PATH_NOT_ALLOWED`；这是安全姿态，不是 bug |
-| `project.open` 需要两个根都配 | 工程文件在 `allowed_project_roots`，每层数据源在 `allowed_data_roots` | 只配一个时，打开含图层的工程会失败 |
-| `project.open` 的越界层处理 | 先移除越界层，再整次 `PATH_NOT_ALLOWED` | 失败时当前工程已被替换成"去掉越界层的剩货"，不回滚 |
+| 路径策略 | 只要求绝对路径，没有根目录白名单 | 操作能读写进程能读写的任何位置；调用方是 agent 时这就是一次能力决定，不是遗漏 |
+| 远程图层 | `layer.add` 接受 `/vsi…` 的绝对字形，也接受 provider 自己能解的其它源 | URL（`https://…`）不算 Windows 绝对路径，因此被拒；要加远程支持是新的设计，不是放宽一条规则 |
+| 工程内的数据源 | 不判：根外路径、目录、不存在的源、远程源都随工程读进来 | 加载不出来的层只让 `invalid_layer_count` 变大 |
 | `project.open` 的读前扫描 | 远端值、超大/过深/标签过多、XML 实体、非 UTF-8、可疑 `.qgz` 成员在 `read()` 前拒绝 | 是尽力而为的清单，不是"QGIS 会取什么"的完备枚举 |
 | 值本身就是 URL 的元数据 | 读前扫描会拒绝 | 这类工程打不开，是统一判据的已知误拒 |
 | 容器格式内部的远程源 | 不检查：只审调用方点名的文件，不审文件内部引用的源（例如本地 `.vrt` 里的 `/vsicurl/`） | 把这类文件当不可信输入时才需要升级这层检查（代码里的 `shortcut:` 注释写明了这个条件） |

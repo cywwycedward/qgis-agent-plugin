@@ -1,17 +1,16 @@
-"""引擎与路径策略读的配置，以及它们的出厂默认值。
+"""引擎读的配置，以及它们的出厂默认值。
 
-两个根目录列表故意为空：空列表拒绝任何文件，所以刚装好的插件在操作者指定目录之前既不能读也不能写。
-那个默认值是安全姿态，不是缺值，因此它和一起读的那些数字放在这里。
+五项都是计数：并发、排队、记录保留和一次后台快照的要素上限。没有路径策略的配置项——路径只要求是
+绝对路径，就在参数校验处判断。
 
 从 ``QgsSettings`` 里读设置属于插件生命周期；本模块只负责把普通 mapping 变成这些值，所以它在
 裸解释器里也能导入。
 
-The settings the engine and the path policy read, and their product defaults.
+The settings the engine reads, and their product defaults.
 
-The two root lists start empty on purpose: an empty list denies every file, so a
-fresh install cannot read or write anything until an operator names a directory.
-That default is the security posture, not a missing value, which is why it lives
-here next to the numbers it is read with.
+Five counts: concurrency, queueing, record retention and the feature cap of one
+background snapshot.  There is no path-policy setting: a path only has to be
+absolute, which is decided where arguments are validated.
 
 Reading the settings out of ``QgsSettings`` belongs to the plugin lifecycle; this
 module only turns a plain mapping into the values, so it stays importable in a
@@ -22,23 +21,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from pathlib import Path
 from typing import Any
-
-# 映射里可能出现的键名：两个根目录是路径，其余都是计数。
-# The names a mapping may carry; the two roots are paths, the rest are counts.
-_ROOT_KEYS = ("allowed_data_roots", "allowed_project_roots")
 
 
 @dataclass(frozen=True)
 class Settings:
-    """一份解析好的配置；``allowed_*_roots=()`` 意味着不允许任何文件访问。
+    """一份解析好的配置：五个计数。
 
-    One resolved configuration; ``allowed_*_roots=()`` means no file access.
+    One resolved configuration: five counts.
     """
 
-    allowed_data_roots: tuple[Path, ...] = ()
-    allowed_project_roots: tuple[Path, ...] = ()
     max_active_background: int = 2
     max_pending: int = 32
     max_terminal_records: int = 200
@@ -50,28 +42,25 @@ class Settings:
         """从映射构建设置，每个已声明的默认值都保留。
 
         一个键可以缺席或为 ``None`` —— 这就是类 QSettings 存储对没人写过的键返回的东西 —— 两者都
-        表示「没设过」，于是 dataclass 的默认值留下。计数可能以字符串形式到达，根目录列表可能是存储
-        返回的单个值，所以两者都在这里统一转一次，而不是让每个调用方各转一遍。
+        表示「没设过」，于是 dataclass 的默认值留下。计数可能是存储返回的字符串，所以在这里统一转
+        一次，而不是让每个调用方各转一遍。
 
         Build the settings from a mapping, keeping every declared default.
 
         A key may be absent or ``None`` -- that is what a QSettings-like store
         returns for something nobody wrote -- and both mean "not set", so the
-        dataclass default stays.  A count may arrive as a string and a root list
-        as the single value the store returns, which is why both are converted
-        here, once, instead of in every caller.
+        dataclass default stays.  A count may arrive as a string, which is why it
+        is converted here, once, instead of in every caller.
         """
 
         set_values = {key: value for key, value in values.items() if value is not None}
-        resolved: dict[str, Any] = {}
-        for field in fields(cls):
-            if field.name not in set_values:
-                continue
-            value = set_values[field.name]
-            resolved[field.name] = (
-                _roots(value) if field.name in _ROOT_KEYS else _count(field.name, value)
-            )
-        return cls(**resolved)
+        return cls(
+            **{
+                field.name: _count(field.name, set_values[field.name])
+                for field in fields(cls)
+                if field.name in set_values
+            }
+        )
 
 
 def _count(key: str, value: Any) -> int:
@@ -96,16 +85,3 @@ def _count(key: str, value: Any) -> int:
     if count < 1:
         raise RuntimeError(f"{key} must be at least 1, not {count}")
     return count
-
-
-def _roots(value: Any) -> tuple[Path, ...]:
-    """单个根目录可能以一条路径的形式到达：QSettings 就是那样返回单个值的。
-
-    One root may arrive as a single path: QSettings returns one value that way.
-    """
-
-    if not value:
-        return ()
-    if isinstance(value, (str, Path)):
-        return (Path(value),)
-    return tuple(Path(root) for root in value)

@@ -53,7 +53,6 @@ __all__ = [
     "DuplicateProjectInfo",
     "FakeIface",
     "Skip",
-    "configure_settings",
     "equal",
     "flush_deferred",
     "pump",
@@ -155,20 +154,6 @@ def require_processing() -> None:
         raise Skip(f"QGIS Processing is not available here ({PROCESSING_ERROR})")
     if not QgsApplication.processingRegistry().algorithms():
         raise Skip("QGIS Processing registered no algorithm, so nothing can be measured")
-
-
-def configure_settings(data_root: Path, project_root: Path) -> None:
-    """把两个允许目录指向测试数据；其他键不动。
-
-    Point the two allowed roots at the fixtures; nothing else is changed.
-    """
-
-    from qgis.core import QgsSettings
-
-    store = QgsSettings()
-    store.setValue(f"{SETTINGS_GROUP}/allowed_data_roots", [str(data_root)])
-    store.setValue(f"{SETTINGS_GROUP}/allowed_project_roots", [str(project_root)])
-    store.sync()
 
 
 def settings_file() -> Path:

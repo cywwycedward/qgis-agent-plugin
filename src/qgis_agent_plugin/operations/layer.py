@@ -83,7 +83,7 @@ from ..core.models import (
     Params,
     Result,
 )
-from ..core.security import resolve_path
+from ..core.security import absolute_path
 
 # 调用方可以请求载入什么 / what a caller may ask to load; ``other`` 只在读的那一侧 /
 # 只在读的一侧 / ``other`` exists only on the reading side.
@@ -172,20 +172,22 @@ class LayerSetVisibilityResult(Result):
 
 
 def layer_source_uri(source: Path, sub_layer: str | None) -> str:
-    """返回一个已经校验过的本地文件的 provider URI。
+    """返回一个数据源的 provider URI。
 
-    路径已经过 ``resolve_path``，所以它是一个真实的本地文件，这里拼的不是不可信字符串。子图层
-    仍然要靠 ogr provider 自己的编码器：它的 URI 怎么把路径和图层名拼在一起、每一段怎么转义，是
-    provider 的规则——自己照 ``path|layername=name`` 重建形状，就是对那条规则的猜测。
+    调用方给的字符串只经过绝对路径检查，是不是本地文件由 provider 决定——``/vsicurl/`` 与
+    WMS 地址都是合法的源。子图层仍然要靠 ogr provider 自己的编码器：它的 URI 怎么把路径和图层名
+    拼在一起、每一段怎么转义，是 provider 的规则——自己照 ``path|layername=name`` 重建形状，就是
+    对那条规则的猜测。
 
     shortcut: 这里只审调用方点名的文件，不审该文件自己点名的源——本地 ``.vrt`` 里可能装着
     ``/vsicurl/`` 或 WMS 源，不可信 VRT 变成输入时得升级。
 
-    The path has been through ``resolve_path``, so it is a real local file and no
-    untrusted string is being assembled here.  A sub-layer still needs the ogr
-    provider's own encoder: how its URI joins a path and a layer name, and how it
-    escapes each part, is the provider's rule -- re-deriving the
-    ``path|layername=name`` shape by hand is a guess about that rule.
+    The caller's string has been checked for being absolute and nothing more; whether
+    it is a local file is the provider's decision -- ``/vsicurl/`` and a WMS URL are both
+    legitimate sources.  A sub-layer still needs the ogr provider's own encoder: how its
+    URI joins a path and a layer name, and how it escapes each part, is the provider's
+    rule -- re-deriving the ``path|layername=name`` shape by hand is a guess about that
+    rule.
 
     shortcut: this vets the file the caller named, not the sources that file
     itself names -- a local ``.vrt`` may carry a ``/vsicurl/`` or WMS source
@@ -265,20 +267,20 @@ class LayerAdd(
     BaseCommand[LayerAddParams, LayerAddResult],
     MainThreadOperationMixin[LayerAddParams, LayerAddResult],
 ):
-    """把一个本地矢量或栅格文件载入当前工程。
+    """把一个矢量或栅格数据源载入当前工程。
 
-    Load a local vector or raster file into the current project.
+    Load a vector or raster data source into the current project.
     """
 
     name = "layer.add"
-    description = "Add a local vector or raster file to the project"
+    description = "Add a vector or raster data source to the project"
     input_model = LayerAddParams
     output_model = LayerAddResult
 
     def execute_main(self, ctx: OperationContext, request: LayerAddParams) -> LayerAddResult:
         from qgis.core import QgsRasterLayer, QgsVectorLayer
 
-        source = resolve_path(request.source_path, ctx.policy.allowed_data_roots, must_exist=True)
+        source = absolute_path(request.source_path)
         # provider 是声明类型算出来的：调用方点不了它 / the provider is a function of the
         # declared kind, 所以没人能自己指定一个 / so a caller cannot name one.
         provider = "ogr" if request.kind == "vector" else "gdal"

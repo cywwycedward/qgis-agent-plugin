@@ -18,7 +18,6 @@ import logging
 import sys
 import types
 import weakref
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -275,15 +274,16 @@ def test_the_settings_keep_their_defaults_for_every_key_nobody_set(fake_qgis) ->
     assert plugin.read_settings() == Settings()
 
     fake_qgis.settings.values["qgis_agent_plugin/max_pending"] = 4
-    fake_qgis.settings.values["qgis_agent_plugin/allowed_data_roots"] = "C:/data"
+    fake_qgis.settings.values["qgis_agent_plugin/left_over_key"] = "C:/data"
     settings = plugin.read_settings()
 
     assert settings.max_pending == 4
-    assert settings.allowed_data_roots == (Path("C:/data"),)
     # 没人设过的键取默认值，既不是 0 也不是缺失
     # an untouched key keeps its default, which is neither zero nor a missing value
     assert settings.max_active_background == 2
-    assert settings.allowed_project_roots == ()
+    # 旧配置留下的键不进 Settings，也不让加载失败
+    # a key left over from an older config neither reaches Settings nor fails loading
+    assert not hasattr(settings, "allowed_data_roots")
 
 
 # --- supervisor / 托管 -------------------------------------------------------

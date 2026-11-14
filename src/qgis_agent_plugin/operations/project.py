@@ -51,7 +51,7 @@ from ..core.models import (
     Params,
     Result,
 )
-from ..core.security import resolve_path
+from ..core.security import absolute_path
 
 # 本插件只读写这两种格式，别的都是调用方的错。
 # The two formats this plugin reads and writes; anything else is a caller mistake.
@@ -134,14 +134,6 @@ _VALUE_HEAD = 64
 # and both are values QGIS writes into a project.
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
-# 一个 GDAL 子数据集源，``decodeUri`` 会整串返回（见
-# ``_subdataset_path``）：大写驱动名前缀，然后是被引号包住或跟在 ``WORD:<index>:`` 后面的文件。
-# A GDAL subdataset source, which ``decodeUri`` returns whole (see ``_subdataset_path``): an
-# upper-case driver prefix, then the file quoted or behind a ``WORD:<index>:`` prefix.
-_SUBDATASET = re.compile(r"\A[A-Z][A-Z0-9_]+:")
-_SUBDATASET_INDEX = re.compile(r"\A(?:\d+|off):", re.IGNORECASE)
-_ABSOLUTE_PATH = re.compile(r"\A(?:[A-Za-z]:[\\/]|[\\/])")
-
 # 数据源是唯一按包含关系判断的值：GDAL
 # 在自己的本地语法里拼一个远程文件（``NETCDF:"/vsicurl/http://…":var``），而标记可能落在这个扫描保留的开头之后。``_MARKER_TAIL``
 # 是保留的末尾字符数，所以跨两个 character-data 事件的标记照样看得见。
@@ -165,12 +157,11 @@ _REMOTE_SOURCE = "the project file names a remote data source; it was not opened
 def _project_path(raw: str) -> str:
     """在任何文件系统调用之前，先拒掉形状不对的路径。
 
-    这里只管形状：目录是否允许、文件是否存在属于路径策略的判断，所以形状合法的路径仍然要过
-    ``resolve_path``。
+    这里只管形状：后缀对不对、是不是绝对路径。文件是否存在、能不能读，由 ``read()`` 自己回答——
+    它的答案比预检更新。
 
-    Only the shape belongs here: whether the directory is allowed, and whether the
-    file exists, is the path policy's decision, so a well-formed path still has to
-    survive ``resolve_path``.
+    Only the shape belongs here: the suffix and the absolute form.  Whether the file exists
+    and can be read is what ``read()`` answers, and its answer is fresher than a pre-check.
     """
 
     path = Path(raw)
@@ -279,7 +270,7 @@ class ProjectOpen(
     destructive = True
 
     def execute_main(self, ctx: OperationContext, request: ProjectOpenParams) -> ProjectOpenResult:
-        path = resolve_path(request.path, ctx.policy.allowed_project_roots, must_exist=True)
+        path = absolute_path(request.path)
         _refuse_replacement_unless_discarding(ctx, request.discard_current)
         _refuse_remote_datasources(path)
 
@@ -294,19 +285,6 @@ class ProjectOpen(
             )
 
         layers = ctx.project.mapLayers()
-        outside = _sources_outside_the_allowed_roots(ctx, layers)
-        if outside:
-            # 这些源是工程文件自己点的名，``read()``
-            # 已经碰到它们；移除它们才能让新工程留在调用方被承诺的策略之内。
-            # The project file named these sources, so ``read()`` already reached them; removing
-            # them is what keeps the new project inside the policy the caller was promised.
-            for layer_id in outside:
-                ctx.project.removeMapLayer(layer_id)
-            raise FrameworkError(
-                PATH_NOT_ALLOWED,
-                f"{len(outside)} layer data source(s) are outside allowed_data_roots; "
-                "they were removed and the project was replaced",
-            )
         return ProjectOpenResult(
             file_path=str(path),
             crs_authid=ctx.project.crs().authid(),
@@ -333,7 +311,7 @@ class ProjectSave(
                 PROJECT_PATH_REQUIRED, "no path was given and the project has no associated file"
             )
 
-        path = resolve_path(target, ctx.policy.allowed_project_roots, must_exist=False)
+        path = absolute_path(target)
         # 关联文件也算在内：覆盖它是一个丢文件的决定，必须由调用方明确做出。
         # The associated file counts too: overwriting it is a file loss decision the caller has to
         # make explicitly.
@@ -678,9 +656,8 @@ def _refuse_if_remote_value(value: str) -> None:
 
     一条规则，里面没有元素名：它对每个元素的文本和每个属性值都问一遍，因为 ``read()`` 取的可
     不只是图层来源。布局的图片条目用属性点名图片（``<LayoutItem type="65640"
-    file="http://host/picture.png">``），而 ``read()`` 会加载它：一个 5 KB、数据源都在白名单里
-    的工程在 0.25 s 内发起 9 个 TCP 连接，对一个接受连接但永不回答的主机则耗到 180 s，而且仍然
-    报成功（实测）。
+    file="http://host/picture.png">``），而 ``read()`` 会加载它：一个 5 KB 的工程在 0.25 s
+    内发起 9 个 TCP 连接，对一个接受连接但永不回答的主机则耗到 180 s，而且仍然报成功（实测）。
 
     只问「开头」，所以只是包含标记的本地文本仍然是本地文本：``D:/vsi_data/x.gpkg``、
     ``./vsi_data/...``，以及引用网址的说明文字。本地 scheme 先剥掉（``_local_path_of``：
@@ -688,8 +665,7 @@ def _refuse_if_remote_value(value: str) -> None:
     值不得以 ``/vsi``（GDAL 的虚拟文件系统）、UNC 前缀或 ``scheme://`` 开头。解析器到这时已经解完
     字符引用，所以 ``&#47;vsicurl&#47;`` 读出来就是它点名的路径。
 
-    这不是「工程文件里没有其它东西会被取」的证明。它是今天已知的形状清单，对每个值都问一遍，而
-    工程点名的图层在 ``read()`` 之后还有第二道检查（``_sources_outside_the_allowed_roots``）。
+    这不是「工程文件里没有其它东西会被取」的证明，而是今天已知的形状清单，对每个值都问一遍。
     ``<datasource>`` 在这条之上还要回答包含关系那个问题，因为它就是会变成 provider 数据源的值
     （``_refuse_if_remote_source``）。
 
@@ -697,7 +673,7 @@ def _refuse_if_remote_value(value: str) -> None:
     attribute value, because ``read()`` fetches more than a layer's source.  A layout's
     picture item names its picture in an attribute (``<LayoutItem type="65640"
     file="http://host/picture.png">``) and ``read()`` loads it: 9 TCP connections in
-    0.25 s from a 5 KB project inside the roots, and 180 s against a host that accepts
+    0.25 s from a 5 KB project, and 180 s against a host that accepts
     and never answers, still reported as ``SUCCEEDED`` (measured).
 
     Only the *start* is asked, so local text that merely contains a marker is still
@@ -709,10 +685,9 @@ def _refuse_if_remote_value(value: str) -> None:
     character references by now, so ``&#47;vsicurl&#47;`` reads as the path it names.
 
     What this is not: a proof that nothing else in a project file is fetched.  It is the
-    list of shapes known today, asked of every value, and the layers a project names get
-    a second check after ``read()`` (``_sources_outside_the_allowed_roots``).  A
-    ``<datasource>`` is asked the containment question on top of this one, because it is
-    the value that becomes a provider's data source (``_refuse_if_remote_source``).
+    list of shapes known today, asked of every value.  A ``<datasource>`` is asked the
+    containment question on top of this one, because it is the value that becomes a
+    provider's data source (``_refuse_if_remote_source``).
     """
 
     text = value.strip()
@@ -804,88 +779,6 @@ def _local_path_of(text: str) -> str | None:
 def _refuse_if_too_large(size: int) -> None:
     if size > MAX_PROJECT_BYTES:
         raise FrameworkError(PATH_NOT_ALLOWED, "the project file is too large; it was not opened")
-
-
-def _subdataset_path(raw: str) -> str | None:
-    """一个 GDAL 子数据集源点名的本地文件；其它任何源返回 None。
-
-    GDAL 的栅格 provider 不拆子数据集：``decodeUri`` 整串返回 ``NETCDF:"C:/x.nc":temperature``
-    和 ``GTIFF_DIR:1:C:/x.tif``，于是白名单被问到的是一个拼法而不是一个文件，一个每个文件都在
-    白名单里的工程拿回 ``PATH_NOT_ALLOWED``、图层被移除（实测）。
-
-    这些形状都是 GDAL 自己的：一个 ``WORD:`` 前缀，然后文件要么被引号包住
-    （``NETCDF:"…":var``、``HDF4_EOS:EOS_GRID:"…":grid:field``），要么跟在
-    ``WORD:<index>:`` 后面（``GTIFF_DIR:1:C:/x.tif``），要么光着（``NETCDF:C:/x.nc``）。别的都
-    不是子数据集，保持原义：读不出来的源留在外面，由 ``resolve_path`` 判断它返回的东西。
-
-    GDAL's raster provider does not split a subdataset: ``decodeUri`` returns
-    ``NETCDF:"C:/x.nc":temperature`` and ``GTIFF_DIR:1:C:/x.tif`` whole, so the
-    allow-list was asked about a spelling rather than a file, and a project whose every
-    file was inside the roots came back ``PATH_NOT_ALLOWED`` with its layer removed
-    (measured).
-
-    The shapes are GDAL's own: a ``WORD:`` prefix, then the file either quoted
-    (``NETCDF:"…":var``, ``HDF4_EOS:EOS_GRID:"…":grid:field``) or after a
-    ``WORD:<index>:`` prefix (``GTIFF_DIR:1:C:/x.tif``), or bare (``NETCDF:C:/x.nc``).
-    Anything else is not a subdataset and keeps its old meaning: a source this cannot
-    read stays outside, and ``resolve_path`` judges what it returns.
-    """
-
-    if _SUBDATASET.match(raw) is None:
-        return None
-    rest = raw.split(":", 1)[1]
-    if '"' in rest:
-        return rest.split('"')[1] or None
-    if _SUBDATASET_INDEX.match(rest) is not None:
-        rest = rest.split(":", 1)[1]
-    return rest if _ABSOLUTE_PATH.match(rest) is not None else None
-
-
-def _sources_outside_the_allowed_roots(ctx: OperationContext, layers: dict[str, Any]) -> list[str]:
-    """数据源本身会被路径策略拒掉的那些图层。
-
-    白名单必须对工程点名的每个源都问一遍，不能只问工程文件：``read()`` 会去取文件指向的任何东西。
-    由 provider 解自己的 URI，因为一个源不是路径字符串——``ogr`` 把一个源拼成
-    ``path|layername=name``。源是目录也算源（ESRI FileGDB），所以不要求它一定是文件。说不成
-    本地路径、或解不了自己 URI 的 provider 按白名单外处理：读不出来的源不是可信的源，而一个
-    provider 的异常不该抹掉其它图层已经给出的答案。
-
-    The allow-list has to be asked about every source a project names, not only
-    about the project file: ``read()`` reaches whatever the file points at.  The
-    provider decodes its own URI, because a source is not a path string -- ``ogr``
-    spells one as ``path|layername=name``.  A source that is a directory is a source
-    (an ESRI FileGDB), so only a file is not required.  A provider that cannot name
-    a local path, or cannot decode its own URI, is treated as outside: an unreadable
-    source is not a trusted one, and one provider's exception may not erase the
-    answer the other layers already gave.
-    """
-
-    from qgis.core import QgsProviderRegistry
-
-    outside: list[str] = []
-    for layer_id, layer in layers.items():
-        metadata = QgsProviderRegistry.instance().providerMetadata(layer.providerType())
-        try:
-            decoded = metadata.decodeUri(layer.source()) if metadata is not None else None
-        except Exception:  # noqa: BLE001 - any decoder failure is an untrusted source
-            outside.append(layer_id)
-            continue
-        raw = decoded.get("path") if decoded else None
-        if not raw:
-            outside.append(layer_id)
-            continue
-        # 白名单要看子数据集点名的文件，不是它那个拼法。
-        # The allow-list has to see the file a subdataset names, not its spelling.
-        raw = _subdataset_path(raw) or raw
-        try:
-            # 故意按保存式解析：工程点名一个已经不在的源不是踩白名单，而是读得进，只是
-            # ``invalid_layer_count`` 大于 0。
-            # Save-shaped on purpose: a project naming a source that is gone is read, just with
-            # ``invalid_layer_count`` above zero, not a breach of the roots.
-            resolve_path(raw, ctx.policy.allowed_data_roots, must_exist=False, allow_directory=True)
-        except FrameworkError:
-            outside.append(layer_id)
-    return outside
 
 
 def _refuse_replacement_unless_discarding(ctx: OperationContext, discard_current: bool) -> None:

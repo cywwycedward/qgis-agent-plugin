@@ -113,7 +113,6 @@ def main(argv: list[str]) -> int:
     root = Path(tempfile.mkdtemp(prefix="a8 background queue "))
     runtime, profile = root / "runtime", root / "profile"
     application = harness.start_application(runtime, profile)
-    harness.configure_settings(runtime, runtime)
     context = harness.Context(application, None)
     context.load()
     context.register_probes()

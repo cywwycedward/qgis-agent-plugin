@@ -82,7 +82,6 @@ def main(argv: list[str]) -> int:
         print(f"REFUSING: QGIS settings would land outside the profile: {settings_file}")
         application.exitQgis()
         return 2
-    harness.configure_settings(generated.root, generated.root)
 
     print(f"environment: {environment()}")
     print(f"fixtures: {generated.root}")

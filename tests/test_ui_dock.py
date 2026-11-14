@@ -725,10 +725,10 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     assert dock.capsule.text() == "失败"
     assert not dock.feedback.isHidden()
     assert dock.error_code.text() == PATH_NOT_ALLOWED
-    assert dock.error_message.text() == "这个路径不在允许的目录里。"
+    assert dock.error_message.text() == "这个路径或文件不能用。"
     # 引擎自己的消息留着，但只作提示 / the engine's own message is kept, as the tooltip only
     assert "outside the allowed roots" in dock.error_message.toolTip()
-    assert "allowed_data_roots" in dock.error_hint.text()
+    assert "完整路径" in dock.error_hint.text()
     assert PATH_NOT_ALLOWED in dock.feedback.accessibleDescription()
     assert dock.result_summary.text() == "耗时 1.0 s"
     assert "失败" not in dock.result_summary.text()

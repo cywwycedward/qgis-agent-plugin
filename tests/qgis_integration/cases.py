@@ -78,7 +78,6 @@ from qgis_agent_plugin.operations.layer import (
     SumNumericFieldParams,
 )
 from qgis_agent_plugin.operations.project import MAX_PROJECT_DEPTH
-from qgis_agent_plugin.plugin import read_settings
 
 LIVE_STATUSES = [
     ExecutionStatus.QUEUED,
@@ -982,40 +981,38 @@ def at_18b_project_with_unavailable_layer(ctx: Context) -> str:
 
 
 def at_19_path_policy(ctx: Context) -> str:
-    settings = read_settings()
-    equal(settings.allowed_data_roots, (ctx.fixtures.root,), "the allowed data roots")
-    equal(settings.allowed_project_roots, (ctx.fixtures.root,), "the allowed project roots")
+    """路径只剩一条规则：必须是绝对路径；其余由 QGIS 与 provider 回答。
 
-    outside = ctx.fixtures.outside / "outside.gpkg"
-    outside.write_bytes(ctx.fixtures.cities.read_bytes())
-    sources = {
-        "a file outside the allowed roots": str(outside),
-        "an https URI": "https://example.com/data.gpkg",
-        "a GDAL virtual file system": "/vsizip/" + str(ctx.fixtures.cities).replace("\\", "/"),
-    }
-    if ctx.fixtures.escape is None:
-        raise Skip(
-            "could not create the directory junction this machine needs for the "
-            "'link that leaves the allowed roots' sub-case"
-        )
-    sources["a junction that leaves the allowed roots"] = str(ctx.fixtures.escape / "outside.gpkg")
+    One rule is left: a path has to be absolute; QGIS and the provider answer the rest.
+    """
 
-    layers_before = project_layer_ids()
-    for label, source in sources.items():
-        record = ctx.run("layer.add", {"kind": "vector", "source_path": source, "name": "at19"})
-        equal(record.status, ExecutionStatus.FAILED, f"layer.add from {label}")
-        equal(error_code(record), PATH_NOT_ALLOWED, f"the code for {label}")
+    reset_project(ctx)
+    outside = ctx.fixtures.outside / "at19"
+    outside.mkdir(exist_ok=True)
 
-    record = ctx.run("project.save", {"path": str(ctx.fixtures.outside / "at19.qgs")})
-    equal(record.status, ExecutionStatus.FAILED, "project.save outside the allowed roots")
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for a save outside the roots")
-    require(
-        not (ctx.fixtures.outside / "at19.qgs").exists(), "a file was written outside the roots"
+    relative = ctx.run(
+        "layer.add", {"kind": "vector", "source_path": "cities.gpkg", "name": "at19"}
     )
-    equal(project_layer_ids(), layers_before, "the layers after the refused calls")
+    equal(relative.status, ExecutionStatus.FAILED, "layer.add from a relative path")
+    equal(error_code(relative), PATH_NOT_ALLOWED, "the code for a relative path")
+
+    saved = ctx.run("project.save", {"path": str(outside / "at19.qgs")})
+    equal(saved.status, ExecutionStatus.SUCCEEDED, "project.save outside any configured root")
+    require((outside / "at19.qgs").exists(), "the file the save reported was not written")
+
+    # 一个 URL 不是 Windows 的绝对路径，所以它和相对路径落在同一条规则上。
+    # A URL is not a Windows absolute path, so it meets the same rule as a relative path.
+    remote = ctx.run(
+        "layer.add",
+        {"kind": "vector", "source_path": "https://127.0.0.1:9/x.gpkg", "name": "at19 remote"},
+    )
+    equal(remote.status, ExecutionStatus.FAILED, "layer.add from an https URI")
+    equal(error_code(remote), PATH_NOT_ALLOWED, "the code for an https URI")
+    reset_project(ctx)
     return (
-        "PATH_NOT_ALLOWED for a file outside the roots, an https URI, a /vsi path and a junction "
-        "that resolves out, and for a save outside the roots; nothing was loaded or written"
+        "a relative path -> FAILED(PATH_NOT_ALLOWED); project.save into a directory outside any "
+        "configured root -> SUCCEEDED and the file exists; an https URI -> PATH_NOT_ALLOWED, the "
+        "same absolute-path rule rather than a scheme rule"
     )
 
 
@@ -1337,28 +1334,27 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
     )
 
 
-def at_29_open_refuses_a_source_outside_the_roots(ctx: Context) -> str:
-    """工程文件不能夹带路径策略拒绕的数据：工程本身在允许目录里，它的数据源不在。
+def at_29_open_accepts_a_source_outside_any_root(ctx: Context) -> str:
+    """工程自己点名的数据源不再由插件审：打开成功，图层留着。
 
-    A project file may not smuggle in data the path policy refuses.
+    The plugin no longer judges the sources a project names: the open succeeds and the layer stays.
     """
 
+    reset_project(ctx)
     record = ctx.run("project.open", {"path": str(ctx.fixtures.leak), "discard_current": True})
 
     equal(
         record.status,
-        ExecutionStatus.FAILED,
-        "project.open on a project whose layer source is outside the roots",
+        ExecutionStatus.SUCCEEDED,
+        "project.open on a project whose layer source is outside any configured root",
     )
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an outside data source")
     names = [layer.name() for layer in project_layers().values()]
-    require("leaked" not in names, f"the outside layer is still loaded: {names}")
-    equal(len(project_layers()), 0, "the layers left in the project")
+    require("leaked" in names, f"the outside layer is missing: {names}")
+    equal(len(project_layers()), 1, "the layers the project kept")
     reset_project(ctx)
     return (
-        "the QGZ itself is inside allowed_project_roots, its only layer names a GeoPackage in a "
-        "sibling directory: FAILED(PATH_NOT_ALLOWED), the layer was removed from the project, "
-        "and no layer stayed registered"
+        "a QGZ whose only layer names a GeoPackage in a sibling directory: SUCCEEDED with that "
+        "layer still registered, because the plugin no longer judges a project's data sources"
     )
 
 
@@ -1439,10 +1435,9 @@ def at_31_open_refuses_an_encoded_or_spaced_datasource(ctx: Context) -> str:
 
 
 def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
-    """数据源目录被搬走不等于越界：路径仍在允许目录里，只是那儿没有文件了。
+    """数据源目录被搬走：工程照样打开，只是那一层加载不出来。
 
-    A moved-away source directory is not a breach of the roots: the path is inside them and
-    only the data is gone.
+    A moved-away source directory: the project still opens, and only that layer fails to load.
     """
 
     reset_project(ctx)
@@ -1466,8 +1461,8 @@ def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
     reset_project(ctx)
     return (
         "SUCCEEDED with layer_count 1 and invalid_layer_count 1, the source directory "
-        "does not exist but its path is inside allowed_data_roots: the layer was not "
-        "removed and the read was not turned into PATH_NOT_ALLOWED"
+        "does not exist: the layer stays registered and the read is not turned into "
+        "PATH_NOT_ALLOWED"
     )
 
 
@@ -2261,18 +2256,14 @@ def at_50_open_refuses_a_subdataset_that_names_a_remote_file(ctx: Context) -> st
 
 
 def at_51_open_reads_a_project_whose_layer_is_a_local_subdataset(ctx: Context) -> str:
-    """本地 GDAL 子数据集：它自己的文件在允许目录里，整个数据源就在允许目录里。
+    """本地 GDAL 子数据集按它自己点名的文件读，与拼法无关。
 
-    A local GDAL subdataset is inside the roots when its own file is.
+    A local GDAL subdataset is read through the file it names, whatever its spelling.
     """
 
     reset_project(ctx)
     target = ctx.fixtures.root / "local subdataset.qgs"
     fixtures.write_subdataset_project(target, ctx.fixtures.raster)
-    outside_file = ctx.fixtures.outside / "cities.tif"
-    outside_file.write_bytes(ctx.fixtures.raster.read_bytes())
-    outside_target = ctx.fixtures.root / "outside subdataset.qgs"
-    fixtures.write_subdataset_project(outside_target, outside_file)
 
     started = time.monotonic()
     record = ctx.run("project.open", {"path": str(target), "discard_current": True})
@@ -2283,26 +2274,11 @@ def at_51_open_reads_a_project_whose_layer_is_a_local_subdataset(ctx: Context) -
     equal(values["invalid_layer_count"], 0, "the invalid layers of the project")
     kept = project_layer_ids()
     require(len(kept) == 1, f"the registered layers: {kept}")
-
-    outside_record = ctx.run("project.open", {"path": str(outside_target), "discard_current": True})
-    equal(
-        outside_record.status,
-        ExecutionStatus.FAILED,
-        "project.open on a subdataset whose file is outside the roots",
-    )
-    equal(
-        error_code(outside_record),
-        PATH_NOT_ALLOWED,
-        "the code for a subdataset whose file is outside the roots",
-    )
-    equal(project_layer_ids(), [], "the project's layers after the outside refusal")
     reset_project(ctx)
     return (
-        "a project whose layer is GTIFF_DIR:1:<inside the roots>/cities.tif: SUCCEEDED with "
-        f"{values['layer_count']} layer in {elapsed * 1000:.0f} ms and the layer kept; the same "
-        "spelling pointing outside the roots: FAILED(PATH_NOT_ALLOWED) with the layer removed. "
-        "decodeUri answers the whole spelling, so before A12 #2 the inside project was refused "
-        "and its layer removed although every file it names was inside the roots"
+        "a project whose layer is GTIFF_DIR:1:<the fixture>/cities.tif: SUCCEEDED with "
+        f"{values['layer_count']} layer in {elapsed * 1000:.0f} ms and the layer kept; the "
+        "subdataset spelling reaches the provider as it was written"
     )
 
 
@@ -2907,19 +2883,18 @@ def p12_input_path_policy(ctx: Context) -> str:
     outside = ctx.fixtures.outside / "secret.gpkg"
     require(outside.is_file(), "the outside fixture is missing")
 
-    # 插件侧的路径策略已经没了：允许目录之外的本地文件原样到达 QGIS，接下来由 QGIS 决定。远程那
-    # 一半故意不测——插件也不再拒网络源，要测它就得发真请求，而没有用例会发。
-    # The plugin-side path policy is gone: a local file outside the allowed roots reaches QGIS as it
-    # arrived, and what happens next is QGIS's decision.  The remote half is not measured here on
-    # purpose: the plugin no longer refuses a network source either, so measuring it would mean a
-    # real request, and no case makes one.
+    # 插件侧没有路径策略：任何本地绝对路径都原样到达 QGIS，接下来由 QGIS 决定。远程那一半故意
+    # 不测——要测它就得发真请求，而没有用例会发。
+    # There is no plugin-side path policy: any local absolute path reaches QGIS as it arrived, and
+    # what happens next is QGIS's decision.  The remote half is not measured here on purpose:
+    # measuring it would mean a real request, and no case makes one.
     outside_record = run_algorithm(
         ctx, "native:mergevectorlayers", {"LAYERS": [layer_id, str(outside)], "OUTPUT": "memory:"}
     )
     if outside_record.status is ExecutionStatus.SUCCEEDED:
         merged = output_layer(ctx, outside_record, "OUTPUT")
         outside_evidence = (
-            f"native:mergevectorlayers read {outside.name} from outside allowed_data_roots and "
+            f"native:mergevectorlayers read {outside.name} from outside the fixtures directory and "
             f"merged it into a layer with {merged.featureCount()} features (the project layer "
             f"plus the five features of the outside file)"
         )
@@ -2930,7 +2905,7 @@ def p12_input_path_policy(ctx: Context) -> str:
         )
         require(
             error_code(outside_record) != PATH_NOT_ALLOWED,
-            "the plugin still refuses a local file outside the allowed roots",
+            "the plugin still refuses a local file the caller named",
         )
 
     # 同一个边界的正面一半：CRS 权威码长得像 URI scheme，但它是 QGIS 解析的标识符，不是数据源。
@@ -4129,7 +4104,7 @@ CASES = (
     ("AT-27", at_27_pydantic_v2),
     ("AT-27-v1", at_27_v1_half),
     ("AT-28", at_28_layer_add_sub_layer),
-    ("AT-29", at_29_open_refuses_a_source_outside_the_roots),
+    ("AT-29", at_29_open_accepts_a_source_outside_any_root),
     ("AT-30", at_30_open_refuses_a_remote_source_before_reading),
     ("AT-31", at_31_open_refuses_an_encoded_or_spaced_datasource),
     ("AT-32", at_32_open_keeps_a_source_whose_directory_is_gone),

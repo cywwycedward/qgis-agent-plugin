@@ -33,7 +33,6 @@ from qgis_agent_plugin.core.models import (
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     LAYER_NOT_IN_TREE,
-    PATH_NOT_ALLOWED,
     FrameworkError,
 )
 from qgis_agent_plugin.core.registry import OperationRegistry
@@ -843,13 +842,8 @@ def make_source(root: Path, name: str = "roads.gpkg") -> Path:
     return path
 
 
-def make_context(project: Any, root: Path) -> OperationContext:
-    return OperationContext(
-        iface=None,
-        project=project,
-        lifecycle=None,
-        policy=Settings.from_mapping({"allowed_data_roots": [str(root)]}),
-    )
+def make_context(project: Any) -> OperationContext:
+    return OperationContext(iface=None, project=project, lifecycle=None, policy=Settings())
 
 
 def make_layer(
@@ -952,27 +946,12 @@ def test_a_visibility_flag_must_be_a_real_boolean() -> None:
 # --- layer.add：加图层 / adding a layer ----------------------------------
 
 
-def test_a_path_outside_the_allowed_roots_is_refused(
-    fake_qgis: FakeQgis, tmp_path: Path, data_root: Path
-) -> None:
-    project = FakeProject()
-    outside = make_source(tmp_path)
-    code = refuse(
-        ops.LayerAdd(),
-        make_context(project, data_root),
-        ops.LayerAddParams(**add_params(source_path=str(outside))),
-    )
-    assert code == PATH_NOT_ALLOWED
-    assert fake_qgis.constructed == []
-    assert project.mapLayers() == {}
-
-
 def test_a_source_qgis_cannot_load_is_invalid_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     fake_qgis.valid = False
     project = FakeProject()
     code = refuse(
         ops.LayerAdd(),
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerAddParams(**add_params(source_path=str(make_source(data_root)))),
     )
     assert code == INVALID_LAYER
@@ -986,7 +965,7 @@ def test_a_vector_source_is_added_through_ogr_without_a_sub_layer(
     project = FakeProject()
     source = make_source(data_root)
     result = ops.LayerAdd().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerAddParams(**add_params(source_path=str(source))),
     )
 
@@ -1007,7 +986,7 @@ def test_a_sub_layer_uri_comes_from_the_ogr_encoder(fake_qgis: FakeQgis, data_ro
     project = FakeProject()
     source = make_source(data_root, "roads with space.gpkg")
     result = ops.LayerAdd().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerAddParams(**add_params(source_path=str(source), sub_layer="roads")),
     )
 
@@ -1026,7 +1005,7 @@ def test_a_raster_source_is_added_through_gdal(fake_qgis: FakeQgis, data_root: P
     project = FakeProject()
     source = make_source(data_root, "dem.tif")
     result = ops.LayerAdd().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerAddParams(**add_params(kind="raster", source_path=str(source))),
     )
 
@@ -1042,7 +1021,7 @@ def test_a_layer_added_without_a_legend_entry_has_no_tree_node(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
     project = FakeProject()
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     added = ops.LayerAdd().execute_main(
         ctx,
         ops.LayerAddParams(
@@ -1070,7 +1049,7 @@ def test_layers_are_listed_in_id_order(fake_qgis: FakeQgis, data_root: Path) -> 
     for layer_id in ("zzz", "aaa", "mmm"):
         project.layers[layer_id] = make_layer(fake_qgis, layer_id)
 
-    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
+    result = ops.LayerList().execute_main(make_context(project), ops.LayerListParams())
     assert [summary.layer_id for summary in result.layers] == ["aaa", "mmm", "zzz"]
 
 
@@ -1081,7 +1060,7 @@ def test_a_layer_without_a_tree_node_has_no_visibility(
     layer = make_layer(fake_qgis, "untreed")
     project.layers[layer.id()] = layer
 
-    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
+    result = ops.LayerList().execute_main(make_context(project), ops.LayerListParams())
     summary = result.layers[0]
     assert summary.in_layer_tree is False
     assert summary.visible is None
@@ -1097,7 +1076,7 @@ def test_a_hidden_parent_group_keeps_own_and_effective_visibility_apart(
     project.layers[layer.id()] = layer
     project.root.nodes[layer.id()] = FakeNode(parent=FakeGroup(checked=False))
 
-    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
+    result = ops.LayerList().execute_main(make_context(project), ops.LayerListParams())
     summary = result.layers[0]
     assert summary.in_layer_tree is True
     assert summary.visible is True
@@ -1111,7 +1090,7 @@ def test_a_layer_that_is_neither_vector_nor_raster_is_other(
     project.layers["plugin-1"] = FakeLayer("plugin-1", "annotations", provider="custom", authid="")
     project.root.nodes["plugin-1"] = FakeNode()
 
-    result = ops.LayerList().execute_main(make_context(project, data_root), ops.LayerListParams())
+    result = ops.LayerList().execute_main(make_context(project), ops.LayerListParams())
     summary = result.layers[0]
     assert summary.kind == "other"
     assert summary.crs_authid == ""
@@ -1127,7 +1106,7 @@ def test_list_and_get_info_take_every_field_from_its_layer(
     """
 
     project = FakeProject()
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     # 假件给 vector 4326、raster 3857。
     # 所以 CRS 换个位或写死都过不了。
     # A vector is 4326, a raster 3857.
@@ -1167,7 +1146,7 @@ def test_list_and_get_info_take_every_field_from_its_layer(
 def test_get_info_refuses_an_unknown_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     code = refuse(
         ops.LayerGetInfo(),
-        make_context(FakeProject(), data_root),
+        make_context(FakeProject()),
         ops.LayerGetInfoParams(layer_id="missing"),
     )
     assert code == LAYER_NOT_FOUND
@@ -1177,7 +1156,7 @@ def test_get_info_reports_validity_and_the_same_visibility_as_list(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
     project = FakeProject()
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     layer = make_layer(fake_qgis, "roads")
     layer.valid = False
     project.layers[layer.id()] = layer
@@ -1202,7 +1181,7 @@ def test_get_info_reports_validity_and_the_same_visibility_as_list(
 def test_set_visibility_refuses_an_unknown_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
     code = refuse(
         ops.LayerSetVisibility(),
-        make_context(FakeProject(), data_root),
+        make_context(FakeProject()),
         ops.LayerSetVisibilityParams(layer_id="missing", visible=True),
     )
     assert code == LAYER_NOT_FOUND
@@ -1216,7 +1195,7 @@ def test_set_visibility_refuses_a_layer_without_a_tree_node(
     project.layers[layer.id()] = layer
     code = refuse(
         ops.LayerSetVisibility(),
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
     )
     assert code == LAYER_NOT_IN_TREE
@@ -1230,7 +1209,7 @@ def test_setting_the_same_state_changes_nothing(fake_qgis: FakeQgis, data_root: 
     project.root.nodes[layer.id()] = node
 
     result = ops.LayerSetVisibility().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
     )
     assert result.changed is False
@@ -1246,7 +1225,7 @@ def test_setting_a_new_state_toggles_only_that_node(fake_qgis: FakeQgis, data_ro
     project.root.nodes[layer.id()] = node
 
     result = ops.LayerSetVisibility().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=False),
     )
     assert result.changed is True
@@ -1256,7 +1235,7 @@ def test_setting_a_new_state_toggles_only_that_node(fake_qgis: FakeQgis, data_ro
 
 def test_a_hidden_parent_group_is_never_touched(fake_qgis: FakeQgis, data_root: Path) -> None:
     project = FakeProject()
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     layer = make_layer(fake_qgis, "grouped")
     project.layers[layer.id()] = layer
     group = FakeGroup(checked=False)
@@ -1363,7 +1342,7 @@ def test_a_spatial_vector_layer_has_the_eighteen_categories_in_order(
     style_layer(fake_qgis, project, "roads")
 
     result = ops.LayerListStyleCategories().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerListStyleCategoriesParams(layer_id="roads"),
     )
     assert result.layer_id == "roads"
@@ -1378,7 +1357,7 @@ def test_a_raster_layer_has_the_ten_categories_in_order(
     style_layer(fake_qgis, project, "dem", kind="raster")
 
     result = ops.LayerListStyleCategories().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerListStyleCategoriesParams(layer_id="dem"),
     )
     assert tuple(result.categories) == RASTER_CATEGORIES
@@ -1388,7 +1367,7 @@ def test_a_raster_layer_has_the_ten_categories_in_order(
 def test_every_style_read_refuses_an_unknown_layer(
     fake_qgis: FakeQgis, data_root: Path, operation: Any
 ) -> None:
-    ctx = make_context(FakeProject(), data_root)
+    ctx = make_context(FakeProject())
     assert refuse(operation(), ctx, style_request(operation, "missing")) == LAYER_NOT_FOUND
 
 
@@ -1400,7 +1379,7 @@ def test_every_style_read_refuses_an_invalid_layer(
     broken = style_layer(fake_qgis, project, "broken")
     broken.valid = False
 
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     assert refuse(operation(), ctx, style_request(operation, "broken")) == INVALID_LAYER
 
 
@@ -1413,7 +1392,7 @@ def test_every_style_read_refuses_a_layer_without_a_style(
     table.geometry = 4  # 对应 Qgis.GeometryType.NullGeometry / Qgis.GeometryType.NullGeometry
     project.layers["plugin-1"] = FakeLayer("plugin-1", "annotations", provider="custom", authid="")
 
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     for layer_id in ("table", "plugin-1"):
         assert refuse(operation(), ctx, style_request(operation, layer_id)) == INVALID_LAYER
 
@@ -1426,7 +1405,7 @@ def test_get_qml_without_categories_exports_the_whole_applicable_set(
     layer.style_xml = '<!DOCTYPE qgis>\n<qgis styleCategories="AllStyleCategories"/>\n'
 
     result = ops.LayerGetQml().execute_main(
-        make_context(project, data_root), ops.LayerGetQmlParams(layer_id="roads")
+        make_context(project), ops.LayerGetQmlParams(layer_id="roads")
     )
     assert result.qml == layer.style_xml
     assert set(result.model_dump()) == {"layer_id", "qml"}
@@ -1441,9 +1420,7 @@ def test_get_qml_uses_the_raster_set_for_a_raster_layer(
     project = FakeProject()
     layer = style_layer(fake_qgis, project, "dem", kind="raster")
 
-    ops.LayerGetQml().execute_main(
-        make_context(project, data_root), ops.LayerGetQmlParams(layer_id="dem")
-    )
+    ops.LayerGetQml().execute_main(make_context(project), ops.LayerGetQmlParams(layer_id="dem"))
     assert layer.style_exports[0][1] == category_flag(fake_qgis, RASTER_CATEGORIES)
 
 
@@ -1452,7 +1429,7 @@ def test_get_qml_only_ors_the_requested_categories(fake_qgis: FakeQgis, data_roo
     layer = style_layer(fake_qgis, project, "roads")
 
     ops.LayerGetQml().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology", "Labeling"]),
     )
     assert layer.style_exports[0][1] == category_flag(fake_qgis, ("Symbology", "Labeling"))
@@ -1468,7 +1445,7 @@ def test_get_qml_exports_a_single_category(fake_qgis: FakeQgis, data_root: Path)
     layer = style_layer(fake_qgis, project, "roads")
 
     result = ops.LayerGetQml().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology"]),
     )
     assert result.qml == layer.style_xml
@@ -1492,7 +1469,7 @@ def test_get_qml_refuses_a_repeating_category_list(fake_qgis: FakeQgis, data_roo
 
     code = refuse(
         ops.LayerGetQml(),
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerGetQmlParams(layer_id="roads", categories=["Symbology", "Symbology"]),
     )
     assert code == INVALID_INPUT
@@ -1507,7 +1484,7 @@ def test_get_qml_refuses_a_category_the_layer_does_not_have(
 
     code = refuse(
         ops.LayerGetQml(),
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerGetQmlParams(layer_id="dem", categories=["Symbology3D"]),
     )
     assert code == INVALID_INPUT
@@ -1532,7 +1509,7 @@ def test_a_failed_native_export_is_internal_error_without_the_native_message(
 
     with pytest.raises(FrameworkError) as caught:
         ops.LayerGetQml().execute_main(
-            make_context(project, data_root), ops.LayerGetQmlParams(layer_id="roads")
+            make_context(project), ops.LayerGetQmlParams(layer_id="roads")
         )
     assert caught.value.code == INTERNAL_ERROR
     assert "secret" not in caught.value.message
@@ -1548,7 +1525,7 @@ def test_an_exporter_that_raises_is_internal_error(fake_qgis: FakeQgis, data_roo
     layer.exportNamedStyle = explode
     with pytest.raises(FrameworkError) as caught:
         ops.LayerGetQml().execute_main(
-            make_context(project, data_root), ops.LayerGetQmlParams(layer_id="roads")
+            make_context(project), ops.LayerGetQmlParams(layer_id="roads")
         )
     assert caught.value.code == INTERNAL_ERROR
     assert "secret" not in caught.value.message
@@ -1562,7 +1539,7 @@ def test_the_vector_renderer_list_is_sorted_and_deduplicated(
     layer = style_layer(fake_qgis, project, "roads")
 
     result = ops.LayerListAvailableRenderers().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerListAvailableRenderersParams(layer_id="roads"),
     )
     assert result.renderer_types == ["RuleRenderer", "singleSymbol"]
@@ -1579,7 +1556,7 @@ def test_the_raster_renderer_list_comes_from_the_raster_registry(
     style_layer(fake_qgis, project, "dem", kind="raster")
 
     result = ops.LayerListAvailableRenderers().execute_main(
-        make_context(project, data_root),
+        make_context(project),
         ops.LayerListAvailableRenderersParams(layer_id="dem"),
     )
     assert result.renderer_types == ["multibandcolor", "singlecolor"]
@@ -1595,7 +1572,7 @@ def test_get_renderer_reads_the_active_type_of_vector_and_raster(
     vector.renderer_value = FakeRenderer("categorizedSymbol")
     raster = style_layer(fake_qgis, project, "dem", kind="raster")
     raster.renderer_value = FakeRenderer("singlebandgray")
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
 
     def renderer_type(layer_id: str) -> str:
         result = ops.LayerGetRenderer().execute_main(
@@ -1614,7 +1591,7 @@ def test_a_layer_without_a_renderer_reports_an_empty_type(
     style_layer(fake_qgis, project, "roads")
 
     result = ops.LayerGetRenderer().execute_main(
-        make_context(project, data_root), ops.LayerGetRendererParams(layer_id="roads")
+        make_context(project), ops.LayerGetRendererParams(layer_id="roads")
     )
     assert result.renderer_type == ""
     assert set(result.model_dump()) == {"layer_id", "renderer_type"}
@@ -1741,9 +1718,7 @@ def test_a_null_symbol_renderer_is_installed_in_one_call(
     layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
     layer.renderer_value = FakeRenderer("singleSymbol")
 
-    result = set_renderer(
-        make_context(project, data_root), setter_payload("parcels", {"type": "nullSymbol"})
-    )
+    result = set_renderer(make_context(project), setter_payload("parcels", {"type": "nullSymbol"}))
 
     assert result.layer_id == "parcels"
     assert result.renderer_type == "nullSymbol"
@@ -1765,7 +1740,7 @@ def test_a_single_symbol_renderer_takes_the_declared_properties(
     layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "parcels",
             {
@@ -1808,7 +1783,7 @@ def test_each_geometry_takes_only_its_own_symbol_type(
     layer = setter_layer(fake_qgis, project, "features", geometry=geometry)
 
     set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload("features", {"type": "singleSymbol", "symbol": symbol}),
     )
 
@@ -1823,7 +1798,7 @@ def test_categories_keep_the_declared_order_and_values(
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
     layer.field_list = [FakeField("landuse", numeric=False)]
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
 
     result = set_renderer(
         ctx,
@@ -1863,7 +1838,7 @@ def test_ranges_keep_the_declared_order_and_limits(fake_qgis: FakeQgis, data_roo
     layer.field_list = [FakeField("population", numeric=True)]
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "pop",
             {
@@ -1894,7 +1869,7 @@ def test_a_flat_rule_renderer_builds_its_rules_in_order(
     layer = setter_layer(fake_qgis, project, "roads", geometry=LINE)
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "roads",
             {
@@ -1946,7 +1921,7 @@ def test_a_single_band_gray_renderer_carries_its_stretch(
     layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=4)
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload("dem", {"type": "singlebandgray", "band": 2, "min": 0, "max": 2500}),
     )
 
@@ -1985,7 +1960,7 @@ def test_a_multiband_renderer_may_repeat_a_band(fake_qgis: FakeQgis, data_root: 
     layer = setter_layer(fake_qgis, project, "satellite", kind="raster", bands=4)
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "satellite", {"type": "multibandcolor", "red_band": 4, "green_band": 4, "blue_band": 2}
         ),
@@ -2009,7 +1984,7 @@ def test_a_pseudocolor_renderer_carries_its_stops(
     layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=1)
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "dem",
             {
@@ -2044,7 +2019,7 @@ def test_a_single_color_renderer_carries_its_colour(fake_qgis: FakeQgis, data_ro
     layer = setter_layer(fake_qgis, project, "mask", kind="raster", bands=1)
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload("mask", {"type": "singlecolor", "band": 1, "color": "#CC6633"}),
     )
 
@@ -2066,7 +2041,7 @@ def test_a_native_constructor_that_raises_leaves_the_old_renderer(
 
     with pytest.raises(FrameworkError) as caught:
         set_renderer(
-            make_context(project, data_root),
+            make_context(project),
             setter_payload(
                 "landuse",
                 {
@@ -2118,7 +2093,7 @@ def test_a_symbol_for_another_geometry_is_refused(
     layer = setter_layer(fake_qgis, project, "features", geometry=geometry)
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload("features", {"type": "singleSymbol", "symbol": symbol}),
     )
     assert code == INVALID_INPUT
@@ -2163,7 +2138,7 @@ def test_a_missing_category_field_is_invalid_field_type(
     layer = setter_layer(fake_qgis, project, "landuse", geometry=POLYGON)
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "landuse",
             {
@@ -2183,7 +2158,7 @@ def test_a_repeating_category_value_is_refused(fake_qgis: FakeQgis, data_root: P
     layer.field_list = [FakeField("landuse", numeric=False)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "landuse",
             {
@@ -2206,7 +2181,7 @@ def test_two_null_categories_are_refused(fake_qgis: FakeQgis, data_root: Path) -
     layer.field_list = [FakeField("landuse", numeric=False)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "landuse",
             {
@@ -2231,7 +2206,7 @@ def test_a_numeric_field_normalises_one_and_one_point_zero(
     layer.field_list = [FakeField("population", numeric=True)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "pop",
             {
@@ -2263,7 +2238,7 @@ def test_a_fractional_value_on_an_integer_field_is_refused(
     layer.renderer_value = old
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "num",
             {
@@ -2292,7 +2267,7 @@ def test_a_whole_value_on_an_integer_field_is_stored_as_an_integer(
     layer.field_list = [FakeField("num", field_type=fake_qgis.QVariant.Int)]
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "num",
             {
@@ -2323,7 +2298,7 @@ def test_a_whole_float_and_an_integer_are_one_category_on_an_integer_field(
     layer.field_list = [FakeField("num", field_type=fake_qgis.QVariant.Int)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "num",
             {
@@ -2366,7 +2341,7 @@ def test_an_integer_outside_the_fields_range_is_refused(
     layer.renderer_value = old
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "num",
             {
@@ -2404,7 +2379,7 @@ def test_an_integer_at_the_fields_edge_is_stored_as_an_integer(
     layer.field_list = [FakeField("num", field_type=getattr(fake_qgis.QVariant, variant_name))]
 
     set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "num",
             {
@@ -2436,7 +2411,7 @@ def test_two_integers_one_float_cannot_tell_apart_are_two_categories(
     neighbour = shared + 1
 
     set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "num",
             {
@@ -2464,7 +2439,7 @@ def test_a_category_value_the_field_cannot_hold_is_refused(
     layer.field_list = [FakeField("population", numeric=True)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "pop",
             {
@@ -2489,7 +2464,7 @@ def test_an_unrepresentable_category_value_is_refused(fake_qgis: FakeQgis, data_
     layer.field_list = [FakeField("population", numeric=True)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "pop",
             {
@@ -2517,7 +2492,7 @@ def test_a_boolean_category_is_refused_on_a_field_that_is_not_boolean(
     layer.field_list = [FakeField("recorded", numeric=False, field_type=fake_qgis.QVariant.Date)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "events",
             {
@@ -2540,7 +2515,7 @@ def test_a_boolean_category_is_accepted_on_a_boolean_field(
     layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
 
     result = set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "flags",
             {
@@ -2567,7 +2542,7 @@ def test_a_string_a_boolean_field_converts_is_written_as_that_boolean(
     layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
 
     set_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "flags",
             {
@@ -2592,7 +2567,7 @@ def test_a_boolean_and_its_string_form_are_one_category(
     layer.field_list = [FakeField("active", numeric=False, field_type=fake_qgis.QVariant.Bool)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "flags",
             {
@@ -2619,7 +2594,7 @@ def test_a_date_field_takes_a_date_string_and_refuses_a_non_date(
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "events", geometry=POLYGON)
     layer.field_list = [FakeField("recorded", numeric=False, field_type=fake_qgis.QVariant.Date)]
-    ctx = make_context(project, data_root)
+    ctx = make_context(project)
     payload = {
         "type": "categorizedSymbol",
         "field": "recorded",
@@ -2641,7 +2616,7 @@ def test_a_missing_graduated_field_is_invalid_field_type(
     layer = setter_layer(fake_qgis, project, "pop", geometry=POLYGON)
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "pop",
             {
@@ -2663,7 +2638,7 @@ def test_a_non_numeric_graduated_field_is_invalid_field_type(
     layer.field_list = [FakeField("landuse", numeric=False)]
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "landuse",
             {
@@ -2766,7 +2741,7 @@ def test_an_invalid_expression_is_refused_before_the_layer_is_touched(
     fake_qgis.invalid_expressions.add('"class" =')
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload(
             "roads",
             {
@@ -2799,7 +2774,7 @@ def test_a_band_outside_the_raster_is_refused(
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "dem", kind="raster", bands=2)
 
-    code = refuse_renderer(make_context(project, data_root), setter_payload("dem", renderer))
+    code = refuse_renderer(make_context(project), setter_payload("dem", renderer))
     assert code == INVALID_INPUT
     assert fake_qgis.built == []
     assert layer.renderer_sets == []
@@ -2839,7 +2814,7 @@ def test_the_setter_refuses_a_layer_that_does_not_exist(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
     code = refuse_renderer(
-        make_context(FakeProject(), data_root),
+        make_context(FakeProject()),
         setter_payload("missing", {"type": "nullSymbol"}),
     )
     assert code == LAYER_NOT_FOUND
@@ -2850,9 +2825,7 @@ def test_the_setter_refuses_an_invalid_layer(fake_qgis: FakeQgis, data_root: Pat
     layer = setter_layer(fake_qgis, project, "broken", geometry=POLYGON)
     layer.valid = False
 
-    code = refuse_renderer(
-        make_context(project, data_root), setter_payload("broken", {"type": "nullSymbol"})
-    )
+    code = refuse_renderer(make_context(project), setter_payload("broken", {"type": "nullSymbol"}))
     assert code == INVALID_LAYER
     assert layer.renderer_sets == []
 
@@ -2863,9 +2836,7 @@ def test_the_setter_refuses_a_layer_without_a_geometry(
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "table", geometry=NULL_GEOMETRY)
 
-    code = refuse_renderer(
-        make_context(project, data_root), setter_payload("table", {"type": "nullSymbol"})
-    )
+    code = refuse_renderer(make_context(project), setter_payload("table", {"type": "nullSymbol"}))
     assert code == INVALID_LAYER
     assert layer.renderer_sets == []
 
@@ -2877,7 +2848,7 @@ def test_a_raster_renderer_does_not_apply_to_a_vector_layer(
     layer = setter_layer(fake_qgis, project, "parcels", geometry=POLYGON)
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload("parcels", {"type": "singlecolor", "band": 1, "color": "#CC6633"}),
     )
     assert code == INVALID_LAYER
@@ -2891,7 +2862,7 @@ def test_a_vector_renderer_does_not_apply_to_a_raster_layer(
     layer = setter_layer(fake_qgis, project, "dem", kind="raster")
 
     code = refuse_renderer(
-        make_context(project, data_root),
+        make_context(project),
         setter_payload("dem", {"type": "singleSymbol", "symbol": FILL}),
     )
     assert code == INVALID_LAYER

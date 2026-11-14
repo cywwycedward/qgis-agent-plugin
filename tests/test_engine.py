@@ -905,7 +905,7 @@ def test_a_real_project_replacement_does_not_cancel_the_call_that_replaces_it(
         registry.register(ProjectCreate())
         engine = OperationEngine(
             registry,
-            Settings(allowed_project_roots=(tmp_path,)),
+            Settings(),
             lifecycle,
             iface=HeadlessIface(project),
             project=project,
