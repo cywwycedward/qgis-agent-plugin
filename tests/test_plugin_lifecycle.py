@@ -468,6 +468,31 @@ def test_a_count_key_below_one_refuses_the_load_and_publishes_nothing(fake_qgis)
     assert not hasattr(iface, "agent_registry")
 
 
+def test_a_session_that_dies_half_assembled_leaves_no_log_forwarding(
+    fake_qgis: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """装配到一半就死的会话不把日志转发漏给进程。
+
+    QGIS 对加载失败的插件不调 unload，所以装在中间的 handler 会活到进程结束、重新加载后
+    每条日志出现两次；转发放在最后一步，失败就什么都不留下。
+
+    A session that dies half-assembled leaks no forwarding into the process. QGIS does
+    not call unload for a plugin whose load failed, so a handler installed half-way would
+    live to process end and double every line on the next load; installed as the last
+    step, a failure leaves nothing behind.
+    """
+
+    def refuse(*args: Any) -> None:
+        raise RuntimeError("a broken build")
+
+    monkeypatch.setattr("qgis_agent_plugin.operations.register_all", refuse)
+    with pytest.raises(RuntimeError):
+        plugin.Plugin(types.SimpleNamespace()).initGui()
+
+    # 转发是 initGui 的最后一步，坏装配留不下它 / forwarding is initGui's last step, so none leaks
+    assert logging.getLogger("qgis_agent_plugin").handlers == []
+
+
 def test_unloading_keeps_a_task_that_is_still_running(fake_qgis) -> None:
     """活着的任务要活过 ``Plugin`` 实例。
 

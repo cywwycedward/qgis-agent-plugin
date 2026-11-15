@@ -110,12 +110,12 @@ def read_settings(store: Any = None) -> Settings:
 
 
 def _message_log_handler() -> logging.Handler:
-    """把每条 logging 记录转给 ``QgsMessageLog`` 的 handler。
+    """把 WARNING 及以上的每条 logging 记录转给 ``QgsMessageLog`` 的 handler。
 
     坞窗把操作者指向 QGIS 日志面板，所以这些行必须真的进那个面板：挂在包 logger 上，
     模块 logger 的行顺着传播到达。QGIS 在这里面导入，本模块在裸解释器里仍然可加载。
 
-    A handler that hands every logging record to ``QgsMessageLog``.
+    A handler that hands every record at WARNING or above to ``QgsMessageLog``.
 
     The dock points the operator at the QGIS log panel, so those lines have to really
     reach it: attached to the package logger, the module loggers' records propagate in.
@@ -294,11 +294,6 @@ class Plugin:
         from .operations import register_all
 
         settings = read_settings()
-        # 日志转发先装：装配期间出错的行也进 QGIS 日志面板；unload 把它拆掉。
-        # Forwarding goes in first, so a line logged while the session is assembled
-        # still reaches the QGIS log panel; unload removes it.
-        self._log_handler = _message_log_handler()
-        logging.getLogger(__package__).addHandler(self._log_handler)
         lifecycle = ProjectLifecycle()
         # 这个插件和它的任务共用一个管理器：全局 cancelAll() 因此不可达，
         # 而 supervisor 盯的就是这同一个对象。
@@ -327,6 +322,12 @@ class Plugin:
         project.aboutToBeCleared.connect(self._project_about_to_be_cleared)
         self._create_dock(registry, self.engine)
         self._publish()
+        # 日志转发装在最后：这之后没有会抛的步骤，装配中途死掉的会话不会把 handler 漏给进程；
+        # unload 把它拆掉。
+        # Forwarding goes in last: nothing after this can throw, so a session that dies
+        # half-assembled leaks no handler into the process; unload removes it.
+        self._log_handler = _message_log_handler()
+        logging.getLogger(__package__).addHandler(self._log_handler)
 
     def unload(self) -> None:
         from qgis.core import QgsProject
