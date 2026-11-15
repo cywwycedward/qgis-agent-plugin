@@ -93,6 +93,28 @@ class FakeFields:
         return self._fields[index]
 
 
+class FakeFeatureRequest:
+    """``QgsFeatureRequest`` 只留求和快照建请求所需的部分，并记下收到的裁剪。
+
+    Enough of ``QgsFeatureRequest`` for the sum snapshot to build its request,
+    remembering the trim it was handed.
+    """
+
+    NoGeometry = 1
+
+    def __init__(self) -> None:
+        self.flags = 0
+        self.attribute_indexes: list[int] = []
+
+    def setFlags(self, flags: int) -> FakeFeatureRequest:  # noqa: N802 - the QGIS name
+        self.flags = flags
+        return self
+
+    def setSubsetOfAttributes(self, indexes: list[int]) -> FakeFeatureRequest:  # noqa: N802
+        self.attribute_indexes = list(indexes)
+        return self
+
+
 class FakeFeature:
     def __init__(self, values: tuple[Any, ...]) -> None:
         self._values = values
@@ -116,6 +138,8 @@ class FakeVectorLayer:
         self.rows = rows
         self._fields = FakeFields(fields if fields is not None else [FakeField(FIELD)])
         self._valid = valid
+        # 最后一次读请求，快照裁剪那条用例查它 / the last request; the trim test checks it
+        self.last_request: Any = None
 
     def isValid(self) -> bool:  # noqa: N802 - the QGIS name
         return self._valid
@@ -123,7 +147,8 @@ class FakeVectorLayer:
     def fields(self) -> FakeFields:
         return self._fields
 
-    def getFeatures(self) -> Any:  # noqa: N802 - the QGIS name
+    def getFeatures(self, request: Any = None) -> Any:  # noqa: N802 - the QGIS name
+        self.last_request = request
         return iter([FakeFeature(row) for row in self.rows])
 
 
@@ -136,6 +161,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
     core = types.ModuleType("qgis.core")
     core.QgsVectorLayer = FakeVectorLayer  # type: ignore[attr-defined]
+    core.QgsFeatureRequest = FakeFeatureRequest  # type: ignore[attr-defined]
     core.NULL = NULL  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "qgis", types.ModuleType("qgis"))
     monkeypatch.setitem(sys.modules, "qgis.core", core)
@@ -217,6 +243,20 @@ def test_a_null_that_arrives_as_the_qgis_null_value_is_skipped() -> None:
     assert record.result["count"] == 2
     assert record.result["skipped_null"] == 1
     assert record.result["total"] == 8.0
+
+
+def test_the_snapshot_asks_the_layer_for_only_the_field_it_sums() -> None:
+    layer = make_layer([(1,)])
+    harness = harness_with(layer)
+
+    settled(harness, submit_sum(harness))
+
+    # 只读一个字段、不要几何：请求必须带 NoGeometry 且裁剪到那一列
+    # one field and no geometry: the request must carry NoGeometry and that column
+    request = layer.last_request
+    assert request is not None
+    assert request.flags == FakeFeatureRequest.NoGeometry
+    assert request.attribute_indexes == [0]
 
 
 def test_every_value_null_is_an_empty_sum_not_a_failure() -> None:

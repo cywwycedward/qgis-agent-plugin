@@ -1,6 +1,6 @@
 """QGIS 加载的插件：一次加载一个会话，以及 ``unload`` 的六步。
 
-``initGui`` 装好一个会话——七项设置、工程代数、这个插件自己的
+``initGui`` 装好一个会话——五项设置、工程代数、这个插件自己的
 ``QgsTaskManager``、建在它之上的适配器、装满本构建全部操作的注册表，以及引擎——
 把操作坞窗挂到主窗口上，并把引擎与注册表发布到 ``iface`` 上，
 Python Console 就在那里找它们。
@@ -16,7 +16,7 @@ pydantic 的大版本在这里检查，早于 DTO 层被导入：DTO 是按 pyda
 
 The plugin QGIS loads: one session per load, and the six steps of ``unload``.
 
-``initGui`` assembles a session -- the seven settings, the project generation,
+``initGui`` assembles a session -- the five settings, the project generation,
 this plugin's own ``QgsTaskManager``, the adapter over it, the registry filled with
 this build's operations, and the engine -- puts the operation dock on the main
 window, and publishes the engine and the registry on ``iface``, which is where the
@@ -59,8 +59,8 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 
-# 七项设置共用一个组：这个插件读到的名字不会和别的插件撞上，默认安装什么也读不到。
-# The seven settings live under one group: nothing this plugin reads can be confused with
+# 五项设置共用一个组：这个插件读到的名字不会和别的插件撞上，默认安装什么也读不到。
+# The five settings live under one group: nothing this plugin reads can be confused with
 # another plugin's setting, and a default install reads nothing at all.
 SETTINGS_GROUP = "qgis_agent_plugin"
 
@@ -87,15 +87,15 @@ def read_settings(store: Any = None) -> Settings:
     """从 ``QgsSettings`` 里读出这几项设置，没写过的用默认值。
 
     没人写过的键返回 ``None``，``Settings.from_mapping`` 把它当「没设过」，
-    于是一个没配置过的 profile 拒绝所有文件访问，而不是放开任何一项。
+    于是一个没配置过的 profile 就拿全部出厂默认值。
     store 只是参数，为了这段映射能在不写进用户 profile 的前提下被测试。
 
     The settings as ``QgsSettings`` holds them, defaults for the rest.
 
     A key nobody wrote comes back as ``None``, which ``Settings.from_mapping`` reads
-    as "not set", so an untouched profile denies all file access instead of granting
-    anything.  The store is a parameter only so this mapping can be tested without
-    writing into the user's profile.
+    as "not set", so an untouched profile keeps every product default.  The store is a
+    parameter only so this mapping can be tested without writing into the user's
+    profile.
     """
 
     from .core.config import Settings
@@ -107,6 +107,43 @@ def read_settings(store: Any = None) -> Settings:
     return Settings.from_mapping(
         {field.name: store.value(f"{SETTINGS_GROUP}/{field.name}") for field in fields(Settings)}
     )
+
+
+def _message_log_handler() -> logging.Handler:
+    """把每条 logging 记录转给 ``QgsMessageLog`` 的 handler。
+
+    坞窗把操作者指向 QGIS 日志面板，所以这些行必须真的进那个面板：挂在包 logger 上，
+    模块 logger 的行顺着传播到达。QGIS 在这里面导入，本模块在裸解释器里仍然可加载。
+
+    A handler that hands every logging record to ``QgsMessageLog``.
+
+    The dock points the operator at the QGIS log panel, so those lines have to really
+    reach it: attached to the package logger, the module loggers' records propagate in.
+    QGIS is imported inside, so this module still loads in a bare interpreter.
+    """
+
+    from qgis.core import Qgis, QgsMessageLog
+
+    class _MessageLogHandler(logging.Handler):
+        """一条 logging 记录变成 QgsMessageLog 的一行。
+
+        One logging record becomes one QgsMessageLog line.
+        """
+
+        def emit(self, record: logging.LogRecord) -> None:
+            # ERROR 及以上读成 Critical，WARNING 读成 Warning，其余读成 Info；
+            # 异常记录自带 traceback（logging 的默认 formatter 把它附在消息后）。
+            # ERROR and above read as Critical, WARNING as Warning, the rest as Info; an
+            # exception record carries its traceback (the default formatter appends it).
+            if record.levelno >= logging.ERROR:
+                level = Qgis.MessageLevel.Critical
+            elif record.levelno >= logging.WARNING:
+                level = Qgis.MessageLevel.Warning
+            else:
+                level = Qgis.MessageLevel.Info
+            QgsMessageLog.logMessage(self.format(record), "QGIS Agent", level)
+
+    return _MessageLogHandler()
 
 
 class Supervisor:
@@ -243,6 +280,9 @@ class Plugin:
         # 承载坞窗的对象：``iface`` 自己，或者回退时用的那个窗口。
         # Whoever hosts the dock: ``iface`` itself, or the window the fallback used.
         self._dock_host: Any = None
+        # 把 logging 转给 QgsMessageLog 的 handler；unload 时移除。
+        # The handler that forwards logging to QgsMessageLog; removed on unload.
+        self._log_handler: Any = None
 
     def initGui(self) -> None:
         from qgis.core import QgsProject, QgsTaskManager
@@ -254,6 +294,11 @@ class Plugin:
         from .operations import register_all
 
         settings = read_settings()
+        # 日志转发先装：装配期间出错的行也进 QGIS 日志面板；unload 把它拆掉。
+        # Forwarding goes in first, so a line logged while the session is assembled
+        # still reaches the QGIS log panel; unload removes it.
+        self._log_handler = _message_log_handler()
+        logging.getLogger(__package__).addHandler(self._log_handler)
         lifecycle = ProjectLifecycle()
         # 这个插件和它的任务共用一个管理器：全局 cancelAll() 因此不可达，
         # 而 supervisor 盯的就是这同一个对象。
@@ -307,6 +352,12 @@ class Plugin:
             # What is still running stays reachable until the last task has terminated, then the
             # shell clears itself on the main thread.
             supervisor.close()
+        # 会话结束，转发随它拆掉；重复卸载时 handler 已经是 None。
+        # The session is over and its forwarding goes with it; on a repeated unload
+        # the handler is already None.
+        handler, self._log_handler = self._log_handler, None
+        if handler is not None:
+            logging.getLogger(__package__).removeHandler(handler)
 
     def _project_about_to_be_cleared(self) -> None:
         """先换一代工程，然后丢掉旧一代的工作。

@@ -1300,6 +1300,10 @@ def fake_qgis(qapp: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
         QgsTaskManager=lambda: manager,
         QgsSettings=lambda: types.SimpleNamespace(value=lambda key: None),
         QgsTask=_FakeTask,
+        Qgis=types.SimpleNamespace(
+            MessageLevel=types.SimpleNamespace(Info="info", Warning="warning", Critical="critical")
+        ),
+        QgsMessageLog=types.SimpleNamespace(logMessage=lambda message, tag, level: None),
     )
     qgis = types.ModuleType("qgis")
     # 伪造包的面：真 Qt 那一面加伪造的 core

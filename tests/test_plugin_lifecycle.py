@@ -174,6 +174,19 @@ class FakeSettingsStore:
         return self.values.get(key)
 
 
+class FakeMessageLog:
+    """``QgsMessageLog`` 压成一份列表，日志面板的替身。
+
+    ``QgsMessageLog`` reduced to a list, standing in for the log panel.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str, Any]] = []
+
+    def logMessage(self, message: str, tag: str, level: Any) -> None:
+        self.lines.append((message, tag, level))
+
+
 class FakeQTimer:
     """把下一个事件循环回合记下来而不执行：单元测试里没有事件循环。
 
@@ -215,12 +228,14 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     Install a stand-in ``qgis`` package, so ``plugin`` talks to the fakes above.
     """
 
+    message_log = FakeMessageLog()
     state = types.SimpleNamespace(
         project=FakeProject(),
         application=FakeApplication(),
         managers=[],
         settings=FakeSettingsStore(),
         pending=[],
+        message_log=message_log,
     )
 
     def new_manager() -> FakeTaskManager:
@@ -235,6 +250,10 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
         QgsTaskManager=new_manager,
         QgsSettings=lambda: state.settings,
         QgsTask=FakeQgsTask,
+        Qgis=types.SimpleNamespace(
+            MessageLevel=types.SimpleNamespace(Info="info", Warning="warning", Critical="critical")
+        ),
+        QgsMessageLog=message_log,
     )
     qtcore = _module("qgis.PyQt.QtCore", QObject=FakeQObject, QTimer=FakeQTimer(state.pending))
     pyqt = _module("qgis.PyQt", QtCore=qtcore)
@@ -404,6 +423,33 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
     # a fresh registry and a fresh manager per load, so no operation is registered twice
     assert len({id(registry) for registry in registries}) == 3
     assert len(fake_qgis.managers) == 3
+
+
+def test_session_logs_reach_the_message_log_and_stop_at_unload(fake_qgis) -> None:
+    """会话日志进 QgsMessageLog，卸载后不再进。
+
+    坞窗把操作者指向 QGIS 日志面板，所以 initGui 必须把 Python logging 转发进面板；
+    unload 拆掉转发，之后的行面板看不见。
+
+    Session logs reach QgsMessageLog, and stop at unload. The dock points the operator at
+    the QGIS log panel, so initGui must forward Python logging into the panel; unload
+    removes the forwarding, and later lines never reach it.
+    """
+
+    iface = types.SimpleNamespace()
+    instance = plugin.Plugin(iface)
+    instance.initGui()
+
+    plugin._LOGGER.error("a session error")
+    assert ("a session error", "QGIS Agent") in [
+        (message, tag) for message, tag, _level in fake_qgis.message_log.lines
+    ]
+
+    instance.unload()
+
+    before = len(fake_qgis.message_log.lines)
+    plugin._LOGGER.error("an error after unload")
+    assert len(fake_qgis.message_log.lines) == before
 
 
 def test_a_count_key_below_one_refuses_the_load_and_publishes_nothing(fake_qgis) -> None:

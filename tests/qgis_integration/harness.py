@@ -4,7 +4,7 @@
 ``QgsTaskManager``、一个替身界面，以及几个能把任务按住足够久的探针操作。用例碰到的都是 ``src`` 里
 真实的对象；只有界面和探针是测试替身，每条用例都在证据行里说明这一点。
 
-应用跑在一次性的配置目录里（``QGIS_CUSTOM_CONFIG_PATH``），所以验收写下的七项配置离操作者自己的
+应用跑在一次性的配置目录里（``QGIS_CUSTOM_CONFIG_PATH``），所以验收碰到的任何配置都离操作者自己的
 ``QGIS3.ini`` 很远；工作目录也是那个一次性目录，因为 QGIS 会把 ``symbology-style.db`` 丢在它启动
 时所在的目录。
 
@@ -13,8 +13,8 @@ the real ``QgsProject``, one real ``QgsTaskManager`` per plugin session, a stand
 and a handful of probe operations that hold a task open long enough to look at it.  Everything
 the cases exercise is the real object from ``src``; the interface and the probes are the only
 test doubles, and every case says so in its evidence line.  The application runs inside a
-throwaway profile (``QGIS_CUSTOM_CONFIG_PATH``), so the seven configuration keys the acceptance
-run writes live nowhere near the operator's own ``QGIS3.ini``, and the working directory is the
+throwaway profile (``QGIS_CUSTOM_CONFIG_PATH``), so any settings the acceptance run touches
+live nowhere near the operator's own ``QGIS3.ini``, and the working directory is the
 throwaway one because QGIS drops ``symbology-style.db`` into whatever directory it starts in.
 """
 

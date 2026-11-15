@@ -452,7 +452,7 @@ class LayerSumNumericField(
     output_model = SumNumericFieldResult
 
     def prepare_main(self, ctx: OperationContext, request: SumNumericFieldParams) -> FieldValues:
-        from qgis.core import NULL, QgsVectorLayer
+        from qgis.core import NULL, QgsFeatureRequest, QgsVectorLayer
 
         layer = project_layer(ctx.project, request.layer_id)
         if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
@@ -464,10 +464,18 @@ class LayerSumNumericField(
         if not fields.at(index).isNumeric():
             raise FrameworkError(INVALID_FIELD_TYPE, "the field is not integer or floating point")
 
+        # 求和只读一个字段、不要几何：请求裁剪到那一列，主线程不为别的列和每个几何付拷贝费。
+        # The sum reads one column and no geometry: the request is trimmed to that column, so the
+        # main thread does not pay for the other columns or for any geometry.
+        read = (
+            QgsFeatureRequest()
+            .setFlags(QgsFeatureRequest.NoGeometry)
+            .setSubsetOfAttributes([index])
+        )
         limit = ctx.policy.max_snapshot_features
         values: list[float] = []
         skipped = 0
-        for seen, feature in enumerate(layer.getFeatures(), start=1):
+        for seen, feature in enumerate(layer.getFeatures(read), start=1):
             if seen > limit:
                 # 从不静悄悄截断 / never truncate quietly: 一个看起来完整的部分和比一次拒绝更糟 /
                 # 部分和比拒绝更糟 / a partial sum that looks complete is worse than a refusal.
