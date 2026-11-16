@@ -55,8 +55,9 @@ _FLAG_OPTIONAL = 8
 _FLAG_HIDE_FROM_TOOLBOX = 64
 _FLAG_KNOWN_ISSUES = 128
 
-# 桌面版工具箱的阅读顺序：先分组名，再算法名。
-# The desktop toolbox reading order: group name first, then algorithm name.
+# 两个开关的 QgsSettings 键；fake 把持久化的值原样返回，字符串归一由被测代码自己做。
+# The two switches' QgsSettings keys; the fake returns the persisted value as it is, and the
+# code under test does the string normalisation.
 _SETTINGS_WARN_UNMATCHING_CRS = "Processing/Configuration/WARN_UNMATCHING_CRS"
 _SETTINGS_SHOW_KNOWN_ISSUES = "Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES"
 
@@ -838,7 +839,7 @@ def test_outputs_are_checked_as_json_too() -> None:
 # --- processing.list_algorithms：列出算法 / listing the algorithms ----------
 
 
-def test_the_list_follows_the_toolbox_reading_order(fake_qgis: FakeQgis) -> None:
+def test_the_list_uses_the_flat_group_name_order(fake_qgis: FakeQgis) -> None:
     # 分组名先、算法名后；两个键都故意与 id 的顺序相反。
     # Group name first, algorithm name second; both keys deliberately disagree with id order.
     install(fake_qgis, algorithm_id="zzz:alpha", name="Zulu", group="Alpha")

@@ -549,9 +549,9 @@ class ProcessingListAlgorithms(
             for algorithm in QgsApplication.processingRegistry().algorithms()
             if not int(algorithm.flags()) & excluded
         ]
-        # 工具箱按分组名、再按算法名排序；列表把同一顺序摊平。
-        # The toolbox sorts by group name and then by algorithm name; the list flattens that
-        # order.
+        # 列表是扁平投影：按分组名、算法名、id 排；工具箱的 provider/分组树序不复刻。
+        # The list is a flat projection ordered by group name, algorithm name and id; the
+        # toolbox's provider/group tree order is not reproduced.
         algorithms.sort(key=lambda summary: (summary.group, summary.name, summary.id))
         return ProcessingListAlgorithmsResult(algorithms=algorithms)
 
