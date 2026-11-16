@@ -17,8 +17,8 @@
 ``checkParameterValues``；任一条不通过就是 ``INVALID_INPUT``，消息是 QGIS 对同一个问题说的那一句。
 通过之后，``qgis.processing.runAndLoadResults()`` 跑它并把结果图层加载进当前工程——磁盘输出因此
 进工程，图层名、样式与结果分组都由 QGIS 自己的后处理决定。算法抛出的异常由
-``FrameworkError(INTERNAL_ERROR, 异常原文)`` 报出，那一批消息另有一份进本地日志。没声明的参数键由
-QGIS 忽略，路径或远程 URI 也由 QGIS 解析。
+``FrameworkError(INTERNAL_ERROR, 异常原文（空则类型名）)`` 报出，那一批消息另有一份进本地日志。
+没声明的参数键由 QGIS 忽略，路径或远程 URI 也由 QGIS 解析。
 
 本模块守着的边界是 JSON：``parameters`` 是一棵有限的 JSON 树；``outputs`` 里只放有无损 JSON 形式的
 值，NaN、无穷、bytes 或 QGIS/Qt 对象在这里就被拒，而不是 ``str()`` 一下。
@@ -47,9 +47,9 @@ a value, run ``preprocessParameters``, ask the CRS-mismatch confirmation, and fi
 that same question.  Only then does ``qgis.processing.runAndLoadResults()`` run it and load the
 result layers into the current project -- a disk output reaches the project that way -- with the
 layer names, styles and results group QGIS's own post-processing gives them.  An exception the
-algorithm raises is reported as ``FrameworkError(INTERNAL_ERROR, the exception's text)``, and
-the run's messages keep a second copy in the local log.  An undeclared parameter key is QGIS's
-to ignore, a path or a remote URI is QGIS's to resolve.
+algorithm raises is reported as ``FrameworkError(INTERNAL_ERROR, the exception's text, or its
+type name when that is empty)``, and the run's messages keep a second copy in the local log.  An
+undeclared parameter key is QGIS's to ignore, a path or a remote URI is QGIS's to resolve.
 
 The boundary this module owns is JSON: ``parameters`` is a finite JSON tree and ``outputs``
 holds only values that have a lossless JSON form; a NaN, an infinity, bytes or a QGIS/Qt object

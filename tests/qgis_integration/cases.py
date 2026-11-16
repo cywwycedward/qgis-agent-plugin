@@ -2129,9 +2129,9 @@ PROBE_ALGORITHMS = (
     f"{PROBE_PROVIDER}:non_json",
     f"{PROBE_PROVIDER}:runs",
 )
-# 记录探针算法被要求做了什么，这样用例才能证明图层真的被交接了，而且是在结果被拒之前。
-# What the probe algorithms were asked to do, so a case can show that the transfer really happened
-# before the result was refused.
+# 记录探针算法被要求做了什么，这样用例才能证明算法真的跑了，而不是被插件提前拒掉。
+# What the probe algorithms were asked to do, so a case can show that the algorithm really ran
+# instead of being refused up front by the plugin.
 PROBE_CALLS: list[str] = []
 # 原生注册表接管提供者的所有权，所以这里必须让 Python 包装对象活着，与
 # ``_REGISTERED_RENDERER_METADATA`` 是同一个理由。
@@ -2185,11 +2185,11 @@ def processing_probe_provider() -> None:
         def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
             PROBE_CALLS.append(f"{PROBE_PROVIDER}:non_json.processAlgorithm")
             layer = QgsVectorLayer("Point?field=p5:string", "p5 probe result", "memory")
-            context.temporaryLayerStore().addMapLayer(layer)
-            # ``LAYER`` 放在前面，让插件真的把它交接过去；随后是一个没有无损 JSON 映像的值，拒绝
-            # 必须把那次交接再撤回。
-            # ``LAYER`` comes first, so the plugin really transfers it; then a value with no
-            # lossless JSON image, so the refusal must undo that transfer again.
+            # ``LAYER`` 是一个真实图层的 id（输出定义把它当图层输出），后面跟着一个没有无损 JSON
+            # 映像的值；拒绝发生在结果转 JSON 那一步，所以这一对值必须真的交到插件手里。
+            # ``LAYER`` is a real layer's id (the output definition types it as a layer output),
+            # followed by a value with no lossless JSON image; the refusal happens in the JSON
+            # step, so this pair really has to reach the plugin.
             return {"LAYER": layer.id(), "OBJECT": object()}
 
     class Runs(QgsProcessingAlgorithm):
