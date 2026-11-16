@@ -275,10 +275,11 @@ get_info     -> SUCCEEDED  {"file_path": ".../demo.qgz", "crs_authid": "", "is_d
 
 - **覆盖**只由 Save As 问：给了 `path` 且目标已存在才要 `overwrite=true`（覆盖确认本来由保存对话框
   问）。不给 `path` 的 Save 写工程自己的关联文件，不问覆盖（`save assoc` 就是第二次写同一个文件）。
-- **替换**：有任务还依赖当前工程的图层，或者有没保存下来的东西（带 provider 的非 memory 矢量图层
-  有没提交的编辑、带要素的 memory 图层或临时图层、工程 `isDirty()`、栅格波段的属性表脏了），就要
-  `discard_current=true`。上面 `demo` 里那个 memory 图层带要素，所以头几次 open 都被它挡住，`create`
-  之后才干净；一个有图层但没改过的工程不需要它。
+- **替换**：有没保存下来的东西（带 provider 的非 memory 矢量图层有没提交的编辑、带要素的 memory
+  图层或临时图层、工程 `isDirty()`、栅格波段的属性表脏了）就要 `discard_current=true`。上面 `demo`
+  里那个 memory 图层带要素，所以头几次 open 都被它挡住，`create` 之后才干净；一个有图层但没改过的
+  工程不需要它。另一条拒绝是“有任务还在依赖当前工程的图层”，它**不由 `discard_current` 回答**：
+  消息里列出那些任务，调用方 `cancel` 掉再来。
 - **失败文本是 QGIS 自己那句**：`read()`/`write()` 返回假时消息就是 `QgsProject.error()`，例如
   `open 缺失` 的 `Unable to unzip file '<path>'`（后缀是 `.qgz` 就按压缩包处理，文件不在也走这条），
   坏 `.qgs` 则是 `Project file read error in file <path>: …`。`read()` **之前**被拒的两种防死形状
