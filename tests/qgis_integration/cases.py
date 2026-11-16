@@ -2178,9 +2178,9 @@ PROBE_ALGORITHMS = (
     f"{PROBE_PROVIDER}:non_json",
     f"{PROBE_PROVIDER}:runs",
 )
-# 记录探针算法被要求做了什么，这样用例才能证明图层真的被交接了，而且是在结果被拒之前。
-# What the probe algorithms were asked to do, so a case can show that the transfer really happened
-# before the result was refused.
+# 记录探针算法被要求做了什么，这样用例才能证明算法真的跑了，而不是被插件提前拒掉。
+# What the probe algorithms were asked to do, so a case can show that the algorithm really ran
+# instead of being refused up front by the plugin.
 PROBE_CALLS: list[str] = []
 # 原生注册表接管提供者的所有权，所以这里必须让 Python 包装对象活着，与
 # ``_REGISTERED_RENDERER_METADATA`` 是同一个理由。
@@ -2214,9 +2214,9 @@ def processing_probe_provider() -> None:
     )
 
     class NonJsonResult(QgsProcessingAlgorithm):
-        """先交出一个真的结果图层，再交一个没有 JSON 映像的值。
+        """先交出一个真的结果图层的 id，再交一个没有 JSON 映像的值。
 
-        Hands over a real result layer, then a value with no JSON image.
+        Hands over the id of a real result layer, then a value with no JSON image.
         """
 
         def name(self) -> str:
@@ -2234,11 +2234,11 @@ def processing_probe_provider() -> None:
         def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
             PROBE_CALLS.append(f"{PROBE_PROVIDER}:non_json.processAlgorithm")
             layer = QgsVectorLayer("Point?field=p5:string", "p5 probe result", "memory")
-            context.temporaryLayerStore().addMapLayer(layer)
-            # ``LAYER`` 放在前面，让插件真的把它交接过去；随后是一个没有无损 JSON 映像的值，拒绝
-            # 必须把那次交接再撤回。
-            # ``LAYER`` comes first, so the plugin really transfers it; then a value with no
-            # lossless JSON image, so the refusal must undo that transfer again.
+            # ``LAYER`` 是一个真实图层的 id（输出定义把它当图层输出），后面跟着一个没有无损 JSON
+            # 映像的值；拒绝发生在结果转 JSON 那一步，所以这一对值必须真的交到插件手里。
+            # ``LAYER`` is a real layer's id (the output definition types it as a layer output),
+            # followed by a value with no lossless JSON image; the refusal happens in the JSON
+            # step, so this pair really has to reach the plugin.
             return {"LAYER": layer.id(), "OBJECT": object()}
 
     class Runs(QgsProcessingAlgorithm):
@@ -2322,11 +2322,9 @@ def p01_list_algorithms(ctx: Context) -> str:
         (algorithm.group(), algorithm.displayName(), algorithm.id())
         for algorithm in visible.values()
     )
-    # 列表是扁平投影，按（分组名、算法名、id）排序；不是工具箱的 provider/分组树序。顺序不是
-    # 判据，这条用例只钉住列表自己声明的那个键。
-    # The list is a flat projection ordered by (group, display name, id), not the toolbox's
-    # provider/group tree; order is not a criterion, and this case pins only the key the list
-    # declares.
+    # 列表是扁平投影，按（分组名、算法名、id）排序；工具箱的 provider/分组树不复刻。
+    # The list is a flat projection ordered by (group, display name, id); the toolbox's
+    # provider/group tree is not reproduced.
     equal(
         [(summary["group"], summary["name"], summary["id"]) for summary in summaries],
         expected,
@@ -2358,7 +2356,7 @@ def p01_list_algorithms(ctx: Context) -> str:
     )
 
 
-def p02_no_algorithm_allow_list(ctx: Context) -> str:
+def p02_every_registered_algorithm_answers(ctx: Context) -> str:
     require_processing()
     processing_probe_provider()
     algorithms = processing_algorithms()
@@ -2538,9 +2536,10 @@ def p04_unknown_algorithm(ctx: Context) -> str:
     equal(error_code(info), INVALID_INPUT, "the code for an unknown algorithm")
     equal(message_of(info), help_sentence, "the get_algorithm_info sentence")
 
-    # 运行路径自己解析 id：未知 id 在调用 ``processing.run()`` 之前就被拒，仍是调用方的输入错误。
-    # The run path resolves the id itself: an unknown id is refused before ``processing.run()``
-    # and stays a caller input mistake.
+    # 运行路径自己解析 id：未知 id 在调用 ``runAndLoadResults()`` 之前就被拒，仍是调用方的输入
+    # 错误。
+    # The run path resolves the id itself: an unknown id is refused before
+    # ``runAndLoadResults()`` and stays a caller input mistake.
     run = run_algorithm(ctx, missing, {})
     equal(run.status, ExecutionStatus.FAILED, "run_algorithm on an unknown id")
     equal(error_code(run), INVALID_INPUT, "the run code for an unknown algorithm")
@@ -2549,8 +2548,8 @@ def p04_unknown_algorithm(ctx: Context) -> str:
     for record in (info, run):
         require(record.result is None, "a refused call carries a result")
     return (
-        f"an unknown id is FAILED(INVALID_INPUT) from both operations, each with its own GUI "
-        f"action's sentence: {help_sentence!r} from get_algorithm_info (algorithmHelp's "
+        f"an unknown id is FAILED(INVALID_INPUT) from both operations, each with its own action's "
+        f"sentence: {help_sentence!r} from get_algorithm_info (algorithmHelp's "
         f"printout) and {run_sentence!r} from run_algorithm (the run path's exception, newline "
         "included); neither call carries a result or adds a layer"
     )
@@ -2581,8 +2580,8 @@ def p05_unknown_key(ctx: Context) -> str:
     equal(len(project_layer_ids()), len(before) + 1, "the layers after the run")
     return (
         "P5_NOT_A_PARAMETER reached QGIS untouched and native:buffer SUCCEEDED, adding a valid "
-        f"{layer.featureCount()}-feature layer to the project: the plugin has no parameter-name "
-        "whitelist any more, so an undeclared key is QGIS's to ignore"
+        f"{layer.featureCount()}-feature layer to the project: an undeclared key is QGIS's to "
+        "ignore"
     )
 
 
@@ -2661,9 +2660,9 @@ def p08_scalar_output(ctx: Context) -> str:
             f"{key} is not a JSON number: {outputs[key]!r}",
         )
 
-    # 桌面版两个输出控件的默认值都是“临时输出”，所以两个键都出现：一个临时图层、一个临时 HTML。
-    # Both desktop output widgets default to a temporary output, so both keys appear: a temporary
-    # layer and a temporary HTML file.
+    # 两个输出控件的默认值都是“临时输出”，所以两个键都出现：一个临时图层、一个临时 HTML。
+    # Both output widgets default to a temporary output, so both keys appear: a temporary layer
+    # and a temporary HTML file.
     statistics = output_layer(ctx, record, "OUTPUT")
     require(statistics.isValid(), "the statistics layer is not valid")
     equal(statistics.featureCount(), 1, "the statistics table's row count")
@@ -2671,8 +2670,8 @@ def p08_scalar_output(ctx: Context) -> str:
     require(isinstance(html, str), f"the HTML output is {html!r}, not a path")
     require(Path(html).is_file(), f"the HTML output {html!r} was not written")
 
-    # ``None`` 是桌面版“跳过输出”的位置：两个键都不出现，标量照旧。
-    # ``None`` is the desktop's "skip output": neither key appears, and the scalars stay.
+    # ``None`` 是“跳过输出”的位置：两个键都不出现，标量照旧。
+    # ``None`` is "skip output": neither key appears, and the scalars stay.
     skipped = run_algorithm(
         ctx,
         "native:basicstatisticsforfields",
@@ -2692,9 +2691,9 @@ def p08_scalar_output(ctx: Context) -> str:
     equal(skipped_outputs["SUM"], fixtures.POP_TOTAL, "the sum with both outputs skipped")
     return (
         f"a scalar-only run returned {len(outputs) - 2} finite JSON numbers (COUNT=3, "
-        f"SUM=200.0, MEAN={outputs['MEAN']:.3f}) plus the desktop's two temporary outputs: the "
+        f"SUM=200.0, MEAN={outputs['MEAN']:.3f}) plus the panel's two temporary outputs: the "
         f"statistics layer ({statistics.featureCount()} row) and the HTML file it wrote, while "
-        'passing ``None`` for both destinations is the desktop\'s "skip output" and leaves the '
+        'passing ``None`` for both destinations is "skip output" and leaves the '
         "scalars only"
     )
 
@@ -2831,7 +2830,7 @@ def p12_input_path_policy(ctx: Context) -> str:
         "the CRS of the reprojected result",
     )
     return (
-        f"{outside_evidence}, so no file is refused by the plugin any more; "
+        f"{outside_evidence}; "
         "TARGET_CRS='EPSG:32633' on the same entry point SUCCEEDED and the result really is in "
         "EPSG:32633, so a CRS code is still handed through as data"
     )
@@ -2843,6 +2842,7 @@ def p13_destination_policy(ctx: Context) -> str:
 
     layer_id = cities_layer(ctx, "p13 cities")
     target = ctx.fixtures.root / "p13 output.gpkg"
+    before = project_layer_ids()
 
     # 写真实文件是调用方的决定：QGIS 就写到被告知的位置。``gdal:convertformat`` 是拷贝图层，所以
     # 写出的文件要带同样的要素与几何——只看行数会被几何全 NULL 的表骗过，而 ``gdal:buffervectors``
@@ -2859,6 +2859,15 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(written.status, ExecutionStatus.SUCCEEDED, f"convertformat to a file: {written.error}")
     equal(outputs_of(written), {"OUTPUT": str(target)}, "the value of the output key")
     require(target.is_file(), f"{target.name} was not written")
+    # 磁盘输出也是运行的结果：QGIS 的后处理把它读进工程。
+    # A disk output is a result too: QGIS's post-processing reads it into the project.
+    loaded = {lid: layer for lid, layer in project_layers().items() if lid not in before}
+    equal(len(loaded), 1, "the layers the disk run added")
+    loaded_layer = next(iter(loaded.values()))
+    require(
+        str(target) in loaded_layer.source(),
+        f"the loaded layer's source {loaded_layer.source()!r} is not {target}",
+    )
     product = QgsVectorLayer(str(target), "p13 written", "ogr")
     require(product.isValid(), f"the written dataset {target.name} is not a readable layer")
     source = project_layer(layer_id)
@@ -2871,8 +2880,9 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(with_geometry, source.featureCount(), "the written features that really carry a geometry")
     equal(product.wkbType(), source.wkbType(), "the geometry type the written dataset keeps")
 
-    # QGIS 自己的临时输出：插件把它产出的那个图层收进工程。
-    # QGIS's own temporary output: the plugin takes the layer it produced.
+    # QGIS 自己的临时输出：运行结果里是图层 id，图层已在工程里。
+    # QGIS's own temporary output: the result value is the layer id and the layer is already in
+    # the project.
     temporary = run_algorithm(
         ctx,
         "native:buffer",
@@ -2881,11 +2891,11 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(temporary.status, ExecutionStatus.SUCCEEDED, f"TEMPORARY_OUTPUT: {temporary.error}")
     require(output_layer(ctx, temporary, "OUTPUT").isValid(), "the temporary output layer")
 
-    # 非文件目的地也由桌面版输出控件先判：GDAL 提供者不支持非文件输出，所以 "memory:" 在参数
-    # 面板里就会被拒；插件用的是同一条判据、同一句话。
-    # A non-file destination is judged by the desktop output widget first: the GDAL provider does
-    # not support non-file outputs, so "memory:" is refused in the panel; the plugin uses the
-    # same criterion and the same sentence.
+    # 非文件目的地由输出控件先判：GDAL 提供者不支持非文件输出，所以 "memory:" 在参数面板里
+    # 就会被拒；插件用的是同一条判据、同一句话。
+    # A non-file destination is judged by the output widget first: the GDAL provider does not
+    # support non-file outputs, so "memory:" is refused in the panel; the plugin uses the same
+    # criterion and the same sentence.
     made_up = run_algorithm(
         ctx, "gdal:buffervectors", {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": "memory:"}
     )
@@ -2920,16 +2930,17 @@ def p13_destination_policy(ctx: Context) -> str:
     )
 
     return (
-        "a destination is judged by the desktop output widget and then handed to QGIS: "
+        "a destination is judged by QGIS's output criterion and then handed to QGIS: "
         f"gdal:convertformat wrote a GeoPackage at the path the caller named "
         f"({target.stat().st_size} bytes) that opens with the source's {product.featureCount()} "
         "features, the source's wkb type and a non-null geometry on every one of them, and the "
-        'outputs value is that same path; native:buffer with OUTPUT="TEMPORARY_OUTPUT" '
+        f'outputs value is that same path while the project gains one loaded layer named "'
+        f'{loaded_layer.name()}"; native:buffer with OUTPUT="TEMPORARY_OUTPUT" '
         "SUCCEEDED with its result layer in the project; gdal:buffervectors with "
-        'OUTPUT="memory:" is FAILED(INVALID_INPUT) with the panel\'s own sentence (the GDAL '
-        "provider supports disk-based outputs only) instead of QGIS's misleading SUCCEEDED with "
-        f'the literal "memory:"; and a /vsicurl destination is FAILED({remote_code}) from QGIS, '
-        "not PATH_NOT_ALLOWED from the plugin"
+        'OUTPUT="memory:" is FAILED(INVALID_INPUT) with the output criterion\'s own sentence '
+        "(the GDAL provider supports disk-based outputs only) instead of QGIS's misleading "
+        f'SUCCEEDED with the literal "memory:"; a /vsicurl destination is FAILED({remote_code}) '
+        "from QGIS, not PATH_NOT_ALLOWED from the plugin"
     )
 
 
@@ -2962,29 +2973,14 @@ def p14_output_ownership(ctx: Context) -> str:
 def p15_non_json_output(ctx: Context) -> str:
     require_processing()
     processing_probe_provider()
-    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
-    project = QgsProject.instance()
-    added: list[str] = []
-    removed: list[str] = []
-
-    # 探针先交出的结果图层必须先进工程、再被搬掉：图层这一步只搬本次运行加进去的。
-    # The result layer the probe hands over must enter the project and then be removed again: the
-    # layer step undoes only what this run added.
-    def note_added(layer: Any) -> None:
-        added.append(layer.id())
-
-    def note_removed(layer_id: str) -> None:
-        removed.append(layer_id)
-
+    # 探针先交出一个结果图层的 id（不是图层对象），再交一个没有无损 JSON 映像的值；拒绝发生在
+    # 结果转 JSON 那一步，工程里不该多出任何东西。
+    # The probe hands over a result layer id (not a layer object) and then a value with no
+    # lossless JSON image; the refusal happens in the JSON step, and the project must gain
+    # nothing.
     before = project_layer_ids()
-    project.layerWasAdded.connect(note_added)
-    project.layerRemoved.connect(note_removed)
-    try:
-        record = run_algorithm(ctx, f"{PROBE_PROVIDER}:non_json", {})
-    finally:
-        project.layerWasAdded.disconnect(note_added)
-        project.layerRemoved.disconnect(note_removed)
+    record = run_algorithm(ctx, f"{PROBE_PROVIDER}:non_json", {})
 
     equal(record.status, ExecutionStatus.FAILED, "a result with no lossless JSON image")
     equal(error_code(record), INTERNAL_ERROR, "the code for a result with no JSON image")
@@ -3002,19 +2998,11 @@ def p15_non_json_output(ctx: Context) -> str:
         f"the failure message describes the object or a path ({leaked}): {message!r}",
     )
 
-    equal(len(added), 1, f"the result layer the probe handed over was added {len(added)} times")
-    equal(removed, added, "the layers the failed run removed, against the ones it added")
-    for layer_id in added:
-        require(
-            layer_id not in project_layers(),
-            f"the layer {layer_id!r} of the failed run stayed in the project",
-        )
     equal(project_layer_ids(), before, "the project's layers after the failed run")
     return (
-        f"{PROBE_PROVIDER}:non_json handed over a real result layer and then an object; the run "
+        f"{PROBE_PROVIDER}:non_json handed over a result layer id and then an object; the run "
         f"is FAILED(INTERNAL_ERROR) with no result, the message names neither the object nor a "
-        f"path ({message!r}), and the layer this run added ({added[0][:8]}…) was removed again, "
-        f"so the project is back to its {len(before)} layers"
+        f"path ({message!r}), and the project is still its {len(before)} layers"
     )
 
 
@@ -3046,7 +3034,7 @@ def p16_submit_cancel_queued(ctx: Context) -> str:
     )
 
 
-def p17_gui_output_defaults(ctx: Context) -> str:
+def p17_temporary_output_default(ctx: Context) -> str:
     require_processing()
     layer_id = cities_layer(ctx, "p17 cities")
     before = project_layer_ids()
@@ -3064,9 +3052,9 @@ def p17_gui_output_defaults(ctx: Context) -> str:
     require(layer.isTemporary(), "the filled destination is not a temporary output")
     equal(sorted(project_layer_ids()), sorted([*before, layer.id()]), "the project's layers")
     return (
-        "native:buffer without OUTPUT SUCCEEDED: the required destination got the desktop "
-        f"panel's own default (a temporary output), so the {layer.featureCount()}-feature result "
-        f"layer ({layer.id()[:8]}…) is in the project; the plugin reports the key it filled"
+        "native:buffer without OUTPUT SUCCEEDED: the missing destination got a temporary output, "
+        f"so the {layer.featureCount()}-feature result layer ({layer.id()[:8]}…) is in the "
+        "project; the plugin reports the key it filled"
     )
 
 
@@ -3197,9 +3185,9 @@ def p20_crs_mismatch_question(ctx: Context) -> str:
     QgsProject.instance().addMapLayer(mask)
     before = project_layer_ids()
 
-    # 桌面版在参数 CRS 不一致时会问“要继续吗”，默认按钮是“否”；operation 用参数回答同一句。
-    # The desktop asks "do you want to continue?" when the parameters' CRSes differ, with "No" as
-    # the default button; the operation answers that question with a parameter.
+    # 参数 CRS 不一致时会问“要继续吗”，默认按钮是“否”；operation 用参数回答同一句。
+    # QGIS asks "do you want to continue?" when the parameters' CRSes differ, with "No" as the
+    # default button; the operation answers that question with a parameter.
     parameters = {"INPUT": points.id(), "MASK": mask.id()}
     refused = run_algorithm(ctx, "gdal:clipvectorbypolygon", parameters)
     equal(refused.status, ExecutionStatus.FAILED, "a CRS mismatch with no answer")
@@ -3227,9 +3215,9 @@ def p20_crs_mismatch_question(ctx: Context) -> str:
     written = QgsVectorLayer(output, "p20 written", "ogr")
     require(written.isValid(), f"the continued run's output {output!r} is not a readable layer")
 
-    # 开关关着 = 桌面版不问。持久化的是字符串 'false'，只有按 ProcessingConfig 的读法才算关。
-    # The switch off means the desktop does not ask.  The persisted value is the string 'false',
-    # and it is off only when read the way ProcessingConfig reads it.
+    # 开关关着 = 不问。持久化的是字符串 'false'，只有按 ProcessingConfig 的读法才算关。
+    # The switch off means no question.  The persisted value is the string 'false', and it is off
+    # only when read the way ProcessingConfig reads it.
     from qgis.core import QgsSettings
 
     settings = QgsSettings()
@@ -3250,10 +3238,10 @@ def p20_crs_mismatch_question(ctx: Context) -> str:
 
     return (
         "gdal:clipvectorbypolygon on a 4326 input and a 32633 mask is FAILED(INVALID_INPUT) "
-        f"with the desktop's question ({message_of(refused)!r}) and adds nothing; the same call "
+        f"with the question ({message_of(refused)!r}) and adds nothing; the same call "
         f"with continue_on_crs_mismatch=true writes a readable GeoPackage "
-        f"({written.featureCount()} feature(s)); with the desktop's warning switch persisted as "
-        "'false' the same parameters also run, so the question follows the desktop's switch and "
+        f"({written.featureCount()} feature(s)); with the warning switch persisted as "
+        "'false' the same parameters also run, so the question follows that switch and "
         "its answer is a parameter"
     )
 
@@ -4267,7 +4255,7 @@ CASES = (
     ("AT-49", at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory),
     ("AT-51", at_51_open_reads_a_project_whose_layer_is_a_local_subdataset),
     ("P01", p01_list_algorithms),
-    ("P02", p02_no_algorithm_allow_list),
+    ("P02", p02_every_registered_algorithm_answers),
     ("P03", p03_algorithm_info_fields),
     ("P04", p04_unknown_algorithm),
     ("P05", p05_unknown_key),
@@ -4281,7 +4269,7 @@ CASES = (
     ("P14", p14_output_ownership),
     ("P15", p15_non_json_output),
     ("P16", p16_submit_cancel_queued),
-    ("P17", p17_gui_output_defaults),
+    ("P17", p17_temporary_output_default),
     ("P18", p18_parameter_value_refused),
     ("P19", p19_output_extension_refused),
     ("P20", p20_crs_mismatch_question),
