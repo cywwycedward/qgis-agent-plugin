@@ -20,19 +20,19 @@ import types
 import weakref
 from typing import Any
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin import plugin
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin import plugin  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     DUPLICATE_OPERATION,
     ENGINE_CLOSING,
     ExecutionStatus,
     FrameworkError,
 )
-from qgis_agent_plugin.core.registry import OperationRegistry
-from qgis_agent_plugin.core.runners import qgs_task
-from qgis_agent_plugin.operations import register_all
+from qgis_agent_plugin.core.registry import OperationRegistry  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.runners import qgs_task  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations import register_all  # pyright: ignore[reportMissingImports]
 
 # 构建必须恰好注册这个集合，否则就是错的 / the build registers exactly this set, or it is wrong
 PRD_NAMES = frozenset(
@@ -94,9 +94,9 @@ class FakeCrs:
 
 
 class FakeProject:
-    """工程单例，按插件的读法：一个信号加四路读取。
+    """工程单例，按插件的读法：一个信号加五路读取。
 
-    The project singleton as the plugin reads it: one signal and four reads.
+    The project singleton as the plugin reads it: one signal and five reads.
     """
 
     def __init__(self) -> None:
@@ -113,6 +113,11 @@ class FakeProject:
 
     def mapLayers(self) -> dict[str, Any]:
         return {}
+
+    def title(self) -> str:
+        # 新建或未命名工程的标题是空串，`project.get_info` 原样报它。
+        # An unnamed project's title is the empty string, and `project.get_info` reports it.
+        return ""
 
 
 class FakeTaskManager:
@@ -313,17 +318,17 @@ def test_the_supervisor_holds_work_until_the_last_task_is_gone() -> None:
     supervisor = plugin.Supervisor(object(), object(), dispose=lambda: disposed.append(True))
     supervisor.attach(7)
     supervisor.attach(9)
-    supervisor.close()
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
 
-    assert supervisor.live == frozenset({7, 9})
+    assert supervisor.live == frozenset({7, 9})  # pyright: ignore[reportAttributeAccessIssue]
     assert disposed == []
 
     supervisor.release(7)
-    assert supervisor.live == frozenset({9})
+    assert supervisor.live == frozenset({9})  # pyright: ignore[reportAttributeAccessIssue]
     assert disposed == []
 
     supervisor.release(9)
-    assert supervisor.live == frozenset()
+    assert supervisor.live == frozenset()  # pyright: ignore[reportAttributeAccessIssue]
     assert disposed == [True]
 
 
@@ -331,8 +336,8 @@ def test_a_supervisor_with_nothing_live_disposes_itself_at_once() -> None:
     disposed: list[bool] = []
     supervisor = plugin.Supervisor(object(), object(), dispose=lambda: disposed.append(True))
 
-    supervisor.close()
-    supervisor.close()
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
     supervisor.release(1)  # 没持有过的 id 不算第二次释放 / an id never held is no second disposal
 
     assert disposed == [True]
@@ -348,7 +353,7 @@ def test_the_supervisor_lets_go_of_the_work_it_held() -> None:
     del engine
     assert engine_ref() is not None
 
-    supervisor.close()
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
 
     assert engine_ref() is None
 
@@ -362,8 +367,8 @@ def test_the_shell_belongs_to_the_application_and_follows_its_manager(fake_qgis)
 
     manager.taskAdded.emit(11)
     manager.taskAdded.emit(12)
-    supervisor.close()
-    assert supervisor.live == frozenset({11, 12})
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
+    assert supervisor.live == frozenset({11, 12})  # pyright: ignore[reportAttributeAccessIssue]
     assert supervisor.deleted is False
 
     manager.taskAboutToBeDeleted.emit(11)
@@ -371,7 +376,7 @@ def test_the_shell_belongs_to_the_application_and_follows_its_manager(fake_qgis)
 
     manager.taskAboutToBeDeleted.emit(12)
     assert supervisor.deleted is True
-    assert supervisor.live == frozenset()
+    assert supervisor.live == frozenset()  # pyright: ignore[reportAttributeAccessIssue]
 
 
 # --- initGui 与 unload / initGui and unload ------------------------------------
@@ -525,12 +530,12 @@ def test_unloading_keeps_a_task_that_is_still_running(fake_qgis) -> None:
     # 活着的任务被留下，不随实例丢弃，由 supervisor 单独持有，另一条用例验证了这点
     # the live task is kept, not dropped with the plugin instance: the supervisor is the one
     # holder, as ``test_the_supervisor_lets_go_of_the_work_it_held`` shows
-    assert supervisor.live == frozenset({1})
+    assert supervisor.live == frozenset({1})  # pyright: ignore[reportAttributeAccessIssue]
     assert supervisor.deleted is False
 
     # 最后一项任务已结束，外壳自己清理掉 / the last task is gone, so the shell clears itself
     fake_qgis.managers[-1].taskAboutToBeDeleted.emit(1)
-    assert supervisor.live == frozenset()
+    assert supervisor.live == frozenset()  # pyright: ignore[reportAttributeAccessIssue]
     assert supervisor.deleted is True
 
 

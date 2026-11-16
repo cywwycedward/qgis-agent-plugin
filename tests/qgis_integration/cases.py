@@ -15,16 +15,15 @@ user's own project.
 from __future__ import annotations
 
 import json
-import socket
 import threading
 import time
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-import fixtures
-import pydantic
-from harness import (
+import fixtures  # pyright: ignore[reportMissingImports]
+import pydantic  # pyright: ignore[reportMissingImports]
+from harness import (  # pyright: ignore[reportMissingImports]
     FINALIZE_CANCEL,
     GATES,
     PROBE_LOG,
@@ -39,13 +38,13 @@ from harness import (
     require,
     require_processing,
 )
-from pydantic import ValidationError
+from pydantic import ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.context import ProjectLifecycle
-from qgis_agent_plugin.core.engine import OperationEngine
-from qgis_agent_plugin.core.execution_store import TERMINAL_STATUSES
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.context import ProjectLifecycle  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.engine import OperationEngine  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.execution_store import TERMINAL_STATUSES  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     DUPLICATE_OPERATION,
     ENGINE_CLOSING,
     EXECUTION_NOT_FOUND,
@@ -69,15 +68,15 @@ from qgis_agent_plugin.core.models import (
     FrameworkError,
     OperationSpec,
 )
-from qgis_agent_plugin.core.registry import OperationRegistry
-from qgis_agent_plugin.core.runners.qgs_task import OperationTaskRunner, _dependent_layers
-from qgis_agent_plugin.operations import register_all
-from qgis_agent_plugin.operations.layer import (
+from qgis_agent_plugin.core.registry import OperationRegistry  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.runners.qgs_task import OperationTaskRunner, _dependent_layers  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations import register_all  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations.layer import (  # pyright: ignore[reportMissingImports]
     LayerSetVisibilityParams,
     LayerSumNumericField,
     SumNumericFieldParams,
 )
-from qgis_agent_plugin.operations.project import MAX_PROJECT_DEPTH
+from qgis_agent_plugin.operations.project import MAX_PROJECT_DEPTH  # pyright: ignore[reportMissingImports]
 
 LIVE_STATUSES = [
     ExecutionStatus.QUEUED,
@@ -95,7 +94,7 @@ ALL_STATUSES = [*LIVE_STATUSES, *TERMINAL_STATUSES]
 
 
 def project_layers() -> dict[str, Any]:
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     return QgsProject.instance().mapLayers()
 
@@ -110,7 +109,7 @@ def reset_project(ctx: Context) -> None:
     A clean project for a case's own setup, cleared directly rather than by an operation.
     """
 
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     QgsProject.instance().clear()
     pump(ctx.app, 0.05)
@@ -167,7 +166,7 @@ def processing_algorithms() -> list[Any]:
     Every algorithm the live QGIS Processing registry holds, in its own order.
     """
 
-    from qgis.core import QgsApplication
+    from qgis.core import QgsApplication  # pyright: ignore[reportMissingImports]
 
     return list(QgsApplication.processingRegistry().algorithms())
 
@@ -713,7 +712,7 @@ def at_11_project_replaced(ctx: Context) -> str:
 
 
 def at_12_layer_removed_while_running(ctx: Context) -> str:
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     ctx.register_probes()
     reset_project(ctx)
@@ -871,10 +870,24 @@ def at_14_submission_refused(ctx: Context) -> str:
 
 
 def at_15_stateful_replace_refused(ctx: Context) -> str:
+    """判据只有一条：工程有未保存内容时才问，且不问就是拒。
+
+    有图层不等于有未保存内容：GUI 只问 ``is_dirty()``，所以一个没改过的工程（哪怕在它上面加过
+    图层）照样被换掉，而一个标脏的工程没有 ``discard_current=true`` 就拒。
+
+    One criterion only: ask when the project holds unsaved content, and refuse when not asked.
+    Layers are not unsaved content: the GUI asks on ``is_dirty()`` alone, so a project nobody
+    edited (even one layers were added to) is replaced, and a dirty one is refused without
+    ``discard_current=true``.
+    """
+
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+
     reset_project(ctx)
     cities_layer(ctx, "at15 cities")
     layers_before = [(layer_id, layer.name()) for layer_id, layer in project_layers().items()]
 
+    QgsProject.instance().setDirty(True)
     record = ctx.run("project.create", {})
     equal(record.status, ExecutionStatus.FAILED, "project.create without discard_current")
     equal(error_code(record), PROJECT_REPLACE_REQUIRED, "the code for an unarmed replacement")
@@ -883,15 +896,32 @@ def at_15_stateful_replace_refused(ctx: Context) -> str:
         layers_before,
         "the project after the refused call",
     )
+
+    # 同一个工程，没被标脏：GUI 不问就换，所以 operation 也不拒。
+    # The same project, not marked dirty: the GUI replaces it without asking, so nothing is
+    # refused here either.
+    QgsProject.instance().setDirty(False)
+    unarmed = ctx.run("project.open", {"path": str(ctx.fixtures.project)})
+    equal(
+        unarmed.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open over a clean project that still holds layers",
+    )
+    equal(len(project_layers()), 2, "the layers the opened project brought")
+    reset_project(ctx)
     return (
-        f"FAILED(PROJECT_REPLACE_REQUIRED) with {len(layers_before)} layer(s) still registered: "
-        "the stateful project was left alone"
+        f"dirty + no discard_current -> FAILED(PROJECT_REPLACE_REQUIRED) with {len(layers_before)} "
+        "layer(s) still registered; the same project once clean -> project.open SUCCEEDED "
+        "without any flag, because is_dirty is the only condition the GUI asks on"
     )
 
 
 def at_16_stateful_replace(ctx: Context) -> str:
     reset_project(ctx)
     cities_layer(ctx, "at16 cities")
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+
+    QgsProject.instance().setDirty(True)
     epoch_before = ctx.lifecycle.current_epoch
     equal(len(project_layers()), 1, "the stateful project before the replacement")
 
@@ -901,12 +931,20 @@ def at_16_stateful_replace(ctx: Context) -> str:
     equal(len(project_layers()), 0, "the registered layers after the replacement")
     equal(result_of(record)["crs_authid"], "EPSG:3857", "the CRS of the new project")
     equal(ctx.lifecycle.current_epoch, epoch_before + 1, "the project epoch")
+    # 新建完的工程不是脏的：GUI 的 fileNew 最后一步是 setDirty(false)，而 setCrs 会把它标脏。
+    # A project that was just created is not dirty: the GUI's fileNew ends with setDirty(false),
+    # and setCrs dirties it.
+    info = result_of(ctx.run("project.get_info", {}))
+    equal(info["is_dirty"], False, "the dirty flag right after project.create")
     return (
-        f"SUCCEEDED: layer_count 1 -> 0, CRS EPSG:3857, epoch {epoch_before} -> {epoch_before + 1}"
+        f"SUCCEEDED: layer_count 1 -> 0, CRS EPSG:3857, is_dirty false, epoch {epoch_before} -> "
+        f"{epoch_before + 1}"
     )
 
 
 def at_17_save_refuses_existing(ctx: Context) -> str:
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+
     target = ctx.fixtures.existing_project
     bytes_before = target.read_bytes()
 
@@ -921,17 +959,33 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
     saved = ctx.run("project.save", {"path": str(fresh)})
     equal(saved.status, ExecutionStatus.SUCCEEDED, "project.save onto a new file")
     require(fresh.exists(), "no file was written")
+
+    # Save（不给路径）写自己的关联文件，不问覆盖：GUI 那时不弹对话框。
+    # Save (no path) writes the project's own associated file and asks nothing about overwriting:
+    # the GUI shows no dialog then.
+    again = ctx.run("project.save", {})
+    equal(again.status, ExecutionStatus.SUCCEEDED, "project.save onto its own associated file")
+    # QGIS 记的文件名用正斜杠，比的是同一个路径而不是同一串字符。
+    # QGIS remembers the file name with forward slashes, so compare paths, not spellings.
+    equal(Path(QgsProject.instance().fileName()), fresh, "the associated file after Save")
+    reset_project(ctx)
     return (
-        f"FAILED(TARGET_EXISTS) and the target's {len(bytes_before)} bytes are unchanged; the same "
-        "save to a new path SUCCEEDED and wrote the file"
+        f"Save As onto an existing file: FAILED(TARGET_EXISTS) and the target's "
+        f"{len(bytes_before)} bytes are unchanged; Save As onto a new path: SUCCEEDED and the file "
+        "was written; Save onto that associated file: SUCCEEDED without an overwrite flag"
     )
 
 
 def at_18_corrupt_project(ctx: Context) -> str:
-    """同一条规则的两面：坏的 QGZ 被拒，好的被读进来。
+    """同一条规则的两面：坏的 QGZ 被拒且当前工程被清空，好的被读进来。
 
-    Both sides of the same rule: a corrupt QGZ is refused, a valid one is read.
+    Both sides of the same rule: a corrupt QGZ is refused and the current project is cleared, a
+    valid one is read.
     """
+
+    reset_project(ctx)
+    cities_layer(ctx, "at18 kept")
+    equal(len(project_layers()), 1, "the project before the failed open")
 
     record = ctx.run(
         "project.open",
@@ -943,9 +997,12 @@ def at_18_corrupt_project(ctx: Context) -> str:
     if error is None:
         raise AssertionError("a failed record carries an error")
     require(
-        "may have changed" in error.message,
-        f"the message does not warn about the project state: {error.message!r}",
+        "cleared" in error.message,
+        f"the message does not say what happened to the project: {error.message!r}",
     )
+    # GUI 的 addProject 先 closeProject() 再 read()：读失败时眼前这个工程是空的。
+    # The GUI's addProject calls closeProject() before read(): a failed read leaves it empty.
+    equal(len(project_layers()), 0, "the layers left after the failed open")
 
     valid = ctx.run("project.open", {"path": str(ctx.fixtures.project), "discard_current": True})
     equal(valid.status, ExecutionStatus.SUCCEEDED, "project.open on a valid QGZ")
@@ -959,9 +1016,9 @@ def at_18_corrupt_project(ctx: Context) -> str:
         "the layers the QGZ really loaded: the GeoPackage and the GeoTIFF",
     )
     return (
-        f"corrupt QGZ -> FAILED(PROJECT_OPEN_FAILED) with the warning {error.message!r}; the valid "
-        "QGZ -> SUCCEEDED with 2 layers, 0 invalid, one vector from the GeoPackage and one "
-        "raster from the GeoTIFF; the session kept answering"
+        "corrupt QGZ -> FAILED(PROJECT_OPEN_FAILED), message says the project was cleared, and "
+        "the project holds 0 layers afterwards; the valid QGZ -> SUCCEEDED with 2 layers, "
+        "0 invalid; the session kept answering"
     )
 
 
@@ -1046,7 +1103,7 @@ def at_21_layer_without_tree_node(ctx: Context) -> str:
 
 
 def at_21b_group_hides_layer(ctx: Context) -> str:
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     layer_id = cities_layer(ctx, "at21b cities")
@@ -1189,7 +1246,7 @@ def at_25_three_sessions(ctx: Context) -> str:
         engines.append(plugin.engine)
         equal(len(plugin.registry.list_specs()), 17, f"round {number}: the seventeen operations")
         require(hasattr(ctx.iface, "agent_engine"), f"round {number}: no console handle")
-        from qgis.core import QgsProject
+        from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
         QgsProject.instance().clear()
         equal(plugin.lifecycle.current_epoch, 1, f"round {number}: one bump per project clear")
@@ -1202,7 +1259,7 @@ def at_25_three_sessions(ctx: Context) -> str:
         require(supervisor._disposed, f"round {number}: the supervisor still holds the session")
         require(qt_deleted(supervisor), f"round {number}: the supervisor was not deleted")
 
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     QgsProject.instance().clear()
     equal(
@@ -1308,7 +1365,7 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
     One named table in a GeoPackage, reached through the OGR encoder.
     """
 
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     source = ctx.fixtures.spaced  # 文件名本身就带空格，故意如此 / its own name has a space
@@ -1358,79 +1415,32 @@ def at_29_open_accepts_a_source_outside_any_root(ctx: Context) -> str:
     )
 
 
-def at_30_open_refuses_a_remote_source_before_reading(ctx: Context) -> str:
-    """工程文件不能在检查之前就花掉一次网络往返：先看文件自己的字节，再交给 read()。
+def at_30_open_does_not_judge_a_remote_source(ctx: Context) -> str:
+    """远程数据源不是操作的判据：GUI 会去取它，插件也交给 ``read()``。
 
-    A project file may not cost a network round trip before it is checked.
+    以前这里是一条“读前扫描”的拒绝，现在没了：那只是慢，不是死。工程里的远程源让那一层加载
+    不出来，结果里就多一个 ``invalid_layer_count``。
+
+    A remote datasource is not an operation's criterion: the GUI goes and fetches it, and so does
+    ``read()`` here.  The old pre-read refusal is gone because it only guarded slowness, not death:
+    a remote source makes that layer fail to load and shows up in ``invalid_layer_count``.
     """
 
-    from qgis.core import QgsProject
-
     reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at30 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    timings: list[str] = []
-    for label, target in (
-        ("a /vsicurl source", ctx.fixtures.remote_vsicurl),
-        ("a UNC source", ctx.fixtures.remote_unc),
-    ):
-        started = time.monotonic()
-        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-        elapsed = time.monotonic() - started
-        equal(record.status, ExecutionStatus.FAILED, f"project.open on {label}")
-        equal(error_code(record), PATH_NOT_ALLOWED, f"the code for {label}")
-        # 文件自己的 datasource 文本在 read() 之前就被拒，所以 HTTP 重试与 SMB 连接都不会发生在
-        # 主线程上。
-        # The file's own datasource text is refused before read(), so neither the HTTP retry nor the
-        # SMB connect happens on the main thread.
-        require(elapsed < 1.0, f"{label} took {elapsed:.2f}s: read() reached it")
-        equal(project_layer_ids(), before, f"the project's layers after {label}")
-        equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
-        timings.append(f"{label} {elapsed * 1000:.0f} ms")
-    reset_project(ctx)
-    return (
-        f"FAILED(PATH_NOT_ALLOWED) in {', '.join(timings)}; the project file was scanned "
-        "before read(), so the old project and its one layer are still loaded"
+    record = ctx.run(
+        "project.open",
+        {"path": str(ctx.fixtures.remote_vsicurl), "discard_current": True},
     )
 
-
-def at_31_open_refuses_an_encoded_or_spaced_datasource(ctx: Context) -> str:
-    """只按 UTF-8 明文扫描可以被一个编码或一个空格绕过：UTF-16 与带空格的标签都测。
-
-    A UTF-8-only text scan can be walked past with an encoding or a space.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at31 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    timings: list[str] = []
-    for label, target, expected in (
-        ("a UTF-16 project", ctx.fixtures.remote_utf16, "not UTF-8"),
-        ("a <datasource > tag", ctx.fixtures.remote_spaced, "remote data source"),
-    ):
-        started = time.monotonic()
-        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-        elapsed = time.monotonic() - started
-        equal(record.status, ExecutionStatus.FAILED, f"project.open on {label}")
-        equal(error_code(record), PATH_NOT_ALLOWED, f"the code for {label}")
-        error = record.error
-        if error is None:
-            raise AssertionError("a failed record carries an error")
-        require(expected in error.message, f"the message for {label}: {error.message!r}")
-        # 两种写法都不能走到 read()：扫描若看漏数据源，就要付 10 s 的 GDAL 重试（实测）。
-        # Neither form may reach read(): a datasource the scan misses costs 10 s of GDAL retries.
-        require(elapsed < 0.5, f"{label} took {elapsed:.2f}s: read() reached the source")
-        equal(project_layer_ids(), before, f"the project's layers after {label}")
-        equal(QgsProject.instance().fileName(), file_before, f"the project's file after {label}")
-        timings.append(f"{label} {elapsed * 1000:.0f} ms")
+    equal(record.status, ExecutionStatus.SUCCEEDED, "project.open on a /vsicurl source")
+    values = result_of(record)
+    equal(values["layer_count"], 1, "the layers the project registers")
+    equal(values["invalid_layer_count"], 1, "the layers whose remote source never answered")
     reset_project(ctx)
     return (
-        f"FAILED(PATH_NOT_ALLOWED) in {', '.join(timings)}; the file was scanned in its own "
-        "bytes, so the old project and its one layer are still loaded"
+        "a project whose only layer names /vsicurl/http://127.0.0.1:9/never.tif: SUCCEEDED "
+        "with layer_count 1 and invalid_layer_count 1, because the plugin no longer refuses a "
+        "remote source (the GUI fetches it too; the closed port answers at once)"
     )
 
 
@@ -1466,45 +1476,11 @@ def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
     )
 
 
-def at_33_open_refuses_an_oversized_member_before_unpacking_it(ctx: Context) -> str:
-    """一个很小的 QGZ 可以装下解压后 300 MB 的成员，而且解压发生在主线程上。
-
-    A tiny QGZ may hold a member that expands to 300 MB, on the main thread.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at33 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    on_disk = ctx.fixtures.oversized.stat().st_size
-
-    started = time.monotonic()
-    record = ctx.run("project.open", {"path": str(ctx.fixtures.oversized), "discard_current": True})
-    elapsed = time.monotonic() - started
-
-    equal(record.status, ExecutionStatus.FAILED, "project.open on an oversized member")
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an oversized member")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("too large" in error.message, f"the message: {error.message!r}")
-    require(elapsed < 1.0, f"the {on_disk} byte archive took {elapsed:.2f}s: its member was read")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        f"a {on_disk} byte QGZ whose member declares 300 MB: FAILED(PATH_NOT_ALLOWED) in "
-        f"{elapsed * 1000:.0f} ms, after at most the 16 MB budget was decompressed; the old "
-        "project kept its layer"
-    )
-
-
 def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
-    """扫描器解不开的 QGZ 是文件自己的问题，不该报成插件的内部错误。
+    """加密成员会让 ``read()`` 直接杀掉进程，所以它在 read() 之前被拒，用 read() 会报的码。
 
-    A QGZ the scanner cannot unpack is the file's problem, not the plugin's.
+    An encrypted member kills the process inside ``read()``, so it is refused before ``read()``,
+    with the code ``read()`` would have reported.
     """
 
     reset_project(ctx)
@@ -1522,17 +1498,17 @@ def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
     equal(
         error_code(record),
         PROJECT_OPEN_FAILED,
-        "the code for a QGZ the scanner cannot unpack (INTERNAL_ERROR would blame the plugin)",
+        "the code for a QGZ with an encrypted member (INTERNAL_ERROR would blame the plugin)",
     )
     error = record.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require("may have changed" in error.message, f"the message: {error.message!r}")
+    require("cleared" in error.message, f"the message: {error.message!r}")
     reset_project(ctx)
     return (
-        "the member carries the zip encryption flag, so extracting it raises RuntimeError; "
-        "read() is never given that archive (QGIS 3.44 crashes on it, measured) and the "
-        "caller gets PROJECT_OPEN_FAILED with read()'s message, not INTERNAL_ERROR"
+        "the member carries the zip encryption flag: FAILED(PROJECT_OPEN_FAILED) with 'the "
+        "current project was cleared', and read() never sees the archive (QGIS 3.44 ended the "
+        "process with 0xC0000005 on it, measured here)"
     )
 
 
@@ -1542,7 +1518,7 @@ def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -
     A deeply nested project crashes ``read()``'s parser, so it never reaches it.
     """
 
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     ctx.add_layer(ctx.fixtures.cities, "at35 kept")
@@ -1569,184 +1545,8 @@ def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -
     return (
         "a 56 KB project nested 8000 levels deep: FAILED(PROJECT_OPEN_FAILED) in "
         f"{elapsed * 1000:.0f} ms, before read(); the process is still here and the old "
-        "project kept its layer (QGIS 3.44 crashed with 0xC00000FD when read() got this "
-        "file, measured)"
-    )
-
-
-def at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds(ctx: Context) -> str:
-    """984 KB 未闭合标签曾经让主线程耗掉 661 s（实测），现在是一次线性扫描。
-
-    984 KB of unclosed tags once cost the main thread 661 s; the scan is linear now.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at36 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    on_disk = ctx.fixtures.unclosed_project.stat().st_size
-
-    started = time.monotonic()
-    record = ctx.run(
-        "project.open",
-        {"path": str(ctx.fixtures.unclosed_project), "discard_current": True},
-    )
-    elapsed = time.monotonic() - started
-
-    equal(record.status, ExecutionStatus.FAILED, "project.open on 984 KB of unclosed tags")
-    equal(error_code(record), PROJECT_OPEN_FAILED, "the code for 984 KB of unclosed tags")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("nests deeper" in error.message, f"the message: {error.message!r}")
-    require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s to scan")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        f"a {on_disk} byte project of 82000 unclosed <datasource> tags: "
-        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, before read(); the old "
-        "regex was still scanning this file after 150 s, and the audit measured 661 s for "
-        "this shape"
-    )
-
-
-def at_37_open_refuses_a_qgz_over_the_total_budget(ctx: Context) -> str:
-    """预算算的是各成员之和，不是逐个成员单独卡：十七个 1 MB 成员单看不超，加起来超。
-
-    The budget is the sum of the members, not each member on its own.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at37 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    on_disk = ctx.fixtures.many_members.stat().st_size
-
-    started = time.monotonic()
-    record = ctx.run(
-        "project.open",
-        {"path": str(ctx.fixtures.many_members), "discard_current": True},
-    )
-    elapsed = time.monotonic() - started
-
-    equal(record.status, ExecutionStatus.FAILED, "project.open on an archive over the budget")
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an archive over the budget")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("too large" in error.message, f"the message: {error.message!r}")
-    require(elapsed < 1.0, f"the {on_disk} byte archive took {elapsed:.2f}s")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        f"a {on_disk} byte QGZ with {fixtures.BUDGET_MEMBERS} one-megabyte .qgs members "
-        f"(each under 16 MB, {fixtures.BUDGET_MEMBERS} MB together): "
-        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms, after at most the 16 MB budget "
-        "was decompressed; the old per-member check accepted this shape and read every "
-        "member (measured peak 200 MB for 100 members)"
-    )
-
-
-def at_38_open_refuses_a_tag_spam_project_in_milliseconds(ctx: Context) -> str:
-    """16 MB 的 XML 元素靠计数拒绝，而不是逐个元素走一遍：一次 bytes.count 就够。
-
-    16 MB of XML elements is refused by count, not walked element by element.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at38 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    on_disk = ctx.fixtures.tag_spam.stat().st_size
-
-    started = time.monotonic()
-    record = ctx.run(
-        "project.open",
-        {"path": str(ctx.fixtures.tag_spam), "discard_current": True},
-    )
-    elapsed = time.monotonic() - started
-
-    equal(record.status, ExecutionStatus.FAILED, "project.open on a tag-spam project")
-    equal(error_code(record), PROJECT_OPEN_FAILED, "the code for a tag-spam project")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("XML tags" in error.message, f"the message: {error.message!r}")
-    # 冷读 1.9 s、热读 234 ms（实测），所以这个上限区分的是“一次 bytes.count”与“逐元素解析”，
-    # 而不是两次磁盘缓存状态的差异。
-    # A cold read of this 16.7 MB file cost 1.9 s and a warm one 234 ms, so the bound separates one
-    # bytes.count from a parse per element, not one disk cache state from another.
-    require(elapsed < 5.0, f"the {on_disk} byte project took {elapsed:.2f}s")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        f"a {on_disk} byte project of {fixtures.TAG_SPAM_PAIRS} empty elements: "
-        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, one bytes.count over "
-        "the bytes; a parse per element would have held the main thread for seconds"
-    )
-
-
-def at_39_open_refuses_a_datasource_hidden_by_an_attribute(ctx: Context) -> str:
-    """属性值里的 ``>`` 是合法 XML，不是标签的结束：在第一个 ``>`` 处截断就会看漏数据源。
-
-    A ``>`` inside an attribute value is legal XML, not the end of the tag.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at39 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(8)
-    listener.settimeout(0.2)
-    port = listener.getsockname()[1]
-    target = ctx.fixtures.root / "attribute source.qgs"
-    fixtures.write_attribute_remote(target, ctx.fixtures.raster, port)
-
-    connections = 0
-    started = time.monotonic()
-    try:
-        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-        elapsed = time.monotonic() - started
-        try:
-            connection, _ = listener.accept()
-        except TimeoutError:
-            pass
-        else:
-            connections += 1
-            connection.close()
-    finally:
-        listener.close()
-
-    equal(record.status, ExecutionStatus.FAILED, "project.open on an attribute-hidden source")
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for an attribute-hidden source")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("remote data source" in error.message, f"the message: {error.message!r}")
-    equal(connections, 0, "TCP connections made while the project was opened")
-    require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        '<datasource x="/>">/vsicurl/http://127.0.0.1:<a port this case listens on>: '
-        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms with {connections} TCP "
-        "connections; the old scan ended the tag at the first >, accepted, and read() made 9 "
-        "connections in 0.08 s (measured). The old project kept its layer"
+        f"project kept its layer (the bound is {MAX_PROJECT_DEPTH} levels; QGIS 3.44 ended the "
+        "process with 0xC00000FD when read() got 6000 levels, measured here)"
     )
 
 
@@ -1798,7 +1598,7 @@ def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
     The three shapes that held the old depth counter down.
     """
 
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     ctx.add_layer(ctx.fixtures.cities, "at41 kept")
@@ -1838,7 +1638,7 @@ def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context
     ``read()`` unpacks every member, not only the ``.qgs`` one.
     """
 
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     ctx.add_layer(ctx.fixtures.cities, "at42 kept")
@@ -1858,7 +1658,7 @@ def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context
     error = record.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require("may have changed" in error.message, f"the message: {error.message!r}")
+    require("cleared" in error.message, f"the message: {error.message!r}")
     require(elapsed < 0.5, f"the {on_disk} byte archive took {elapsed:.2f}s")
     equal(project_layer_ids(), before, "the project's layers after the refusal")
     equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
@@ -1906,7 +1706,7 @@ def at_44_field_sum_refuses_a_non_finite_value(ctx: Context) -> str:
     NaN and Infinity are not JSON, so a sum that would carry them is refused.
     """
 
-    from qgis.core import QgsFeature, QgsProject, QgsVectorLayer
+    from qgis.core import QgsFeature, QgsProject, QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     layer = QgsVectorLayer("Point?crs=EPSG:4326&field=n:double", "at44 non finite", "memory")
@@ -1937,86 +1737,15 @@ def at_44_field_sum_refuses_a_non_finite_value(ctx: Context) -> str:
     )
 
 
-def at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail(ctx: Context) -> str:
-    """元素的 text 是整个子树（含子元素的 tail），不是只算直接文本。
+def at_46_open_reads_a_project_that_declares_xml_entities(ctx: Context) -> str:
+    """XML 实体不是判据：真 QGIS 不展开它，所以操作也不能拿它拒。
 
-    An element's text is the whole subtree, tail included.
+    XML entities are not a criterion: real QGIS does not expand them, so the operation may not
+    refuse on them either.
     """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at45 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(8)
-    listener.settimeout(0.2)
-    port = listener.getsockname()[1]
-    target = ctx.fixtures.root / "tail source.qgs"
-    fixtures.write_mixed_content_remote(target, ctx.fixtures.raster, port)
-
-    connections = 0
-    started = time.monotonic()
-    try:
-        record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-        elapsed = time.monotonic() - started
-        try:
-            connection, _ = listener.accept()
-        except TimeoutError:
-            pass
-        else:
-            connections += 1
-            connection.close()
-    finally:
-        listener.close()
-
-    equal(record.status, ExecutionStatus.FAILED, "project.open on a tail-carried source")
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for a tail-carried source")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("remote data source" in error.message, f"the message: {error.message!r}")
-    equal(connections, 0, "TCP connections made while the project was opened")
-    require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        "<datasource><x/>/vsicurl/http://127.0.0.1:<a port this case listens on>: "
-        f"FAILED(PATH_NOT_ALLOWED) in {elapsed * 1000:.0f} ms with {connections} TCP "
-        "connections. QDom datasource.text() is the whole subtree, so read() saw the source; "
-        "the scan only read element.text and made 42 HTTP requests (measured). The old "
-        "project kept its layer"
-    )
-
-
-def at_46_open_refuses_a_project_that_declares_xml_entities(ctx: Context) -> str:
-    """内部 DTD 子集在任何预算之前就被展开，所以只能从扫描里拒。
-
-    An internal DTD subset is expanded before any budget, so it is refused.
-    """
-
-    from qgis.core import QgsProject
 
     reset_project(ctx)
     on_disk = ctx.fixtures.entity_project.stat().st_size
-
-    # 先量出文件对任何解析器的代价：read() 会展开它并接受它，所以拒绝必须来自扫描，发生在把文件
-    # 交给 read() 之前。
-    # This measures what the file costs whoever parses it: read() expands it and accepts it, so the
-    # refusal has to come from the scan, before read() is handed the file.
-    reader = QgsProject()
-    started = time.monotonic()
-    read_result = reader.read(str(ctx.fixtures.entity_project))
-    read_elapsed = time.monotonic() - started
-    reader.clear()
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at46 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
 
     started = time.monotonic()
     record = ctx.run(
@@ -2024,33 +1753,31 @@ def at_46_open_refuses_a_project_that_declares_xml_entities(ctx: Context) -> str
     )
     elapsed = time.monotonic() - started
 
-    equal(record.status, ExecutionStatus.FAILED, "project.open on a project declaring entities")
-    equal(error_code(record), PATH_NOT_ALLOWED, "the code for a project declaring entities")
-    error = record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("entities" in error.message, f"the message: {error.message!r}")
-    require(elapsed < 0.5, f"the {on_disk} byte project took {elapsed:.2f}s")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    equal(
+        record.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open on a project declaring XML entities",
+    )
+    values = result_of(record)
+    require(elapsed < 20.0, f"the {on_disk} byte project took {elapsed:.2f}s")
     reset_project(ctx)
     return (
-        f"a {on_disk} byte project whose 1 MiB entity is read 50 times: read() "
-        f"{'accepted' if read_result else 'refused'} it in {read_elapsed:.2f} s (expanded to "
-        f"50 MiB), while project.open returned FAILED(PATH_NOT_ALLOWED) with 'declares XML "
-        f"entities' in {elapsed * 1000:.0f} ms, before read(). The old scan parsed the "
-        "expansion and peaked at 100 MiB (measured); this process kept answering and the "
-        "old project kept its layer"
+        f"a {on_disk} byte project whose 1 MiB entity is referenced 50 times: SUCCEEDED with "
+        f"{values['layer_count']} layer(s) in {elapsed * 1000:.0f} ms. QDomDocument does not "
+        "expand a custom entity (measured ok=True in 0.53 s), so refusing it was stricter than "
+        "the GUI; the scan streams the file now and accumulates no expansion"
     )
 
 
 def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
-    """CSV 图层的 ``file:`` 源不算远程；图层元数据里的 URL 算。
+    """两个普通工程：CSV 图层的 ``file:`` 源，与元数据里带 URL 的图层。
 
-    A CSV layer's ``file:`` source is not remote; a URL in the layer metadata is.
+    两个都必须能打开：扫描不再看任何值的内容，远程与否是 ``read()`` 的事。
+
+    Two ordinary projects: a CSV layer's ``file:`` source, and a layer whose metadata carries a
+    URL.  Both have to open: the scan no longer reads any value, and whether a source is remote is
+    ``read()``'s business.
     """
-
-    from qgis.core import QgsProject
 
     reset_project(ctx)
     csv_project = ctx.fixtures.root / "csv project.qgs"
@@ -2066,97 +1793,27 @@ def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
     require(csv_layers >= 1, f"the CSV project's layers: {csv_layers}")
     require(csv_elapsed < 20.0, f"the CSV project took {csv_elapsed:.2f}s")
 
-    # 这条规则不看元素名，所以标识符本身就是一个 URL 的图层也会在 read() 之前被拒：一个已知并接受
-    # 下来的误拒——宁可误拒一个正常工程，也不让网络地址走到 read()。
-    # The rule does not look at the element name, so a layer whose identifier is a URL is refused
-    # before read() as well: a known false refusal that is accepted, because refusing a normal
-    # project beats letting a network address reach read().
-    ctx.add_layer(ctx.fixtures.cities, "at47 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
     started = time.monotonic()
     metadata_record = ctx.run(
         "project.open", {"path": str(metadata_project), "discard_current": True}
     )
     metadata_elapsed = time.monotonic() - started
 
-    equal(metadata_record.status, ExecutionStatus.FAILED, "project.open on a metadata identifier")
-    equal(error_code(metadata_record), PATH_NOT_ALLOWED, "the code for a metadata identifier")
-    error = metadata_record.error
-    if error is None:
-        raise AssertionError("a failed record carries an error")
-    require("remote data source" in error.message, f"the message: {error.message!r}")
-    require(metadata_elapsed < 1.0, f"the metadata project took {metadata_elapsed:.2f}s")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        f"a Delimited Text layer spelled file:./points.csv: SUCCEEDED with {csv_layers} "
-        f"layer in {csv_elapsed * 1000:.0f} ms; a layer whose metadata identifier is "
-        "https://example.org/datasets/42: FAILED(PATH_NOT_ALLOWED) with 'remote data "
-        f"source' in {metadata_elapsed * 1000:.0f} ms, before read() -- the accepted "
-        "false refusal of the uniform rule (docs/OPERATIONS.md section 12). The CSV "
-        "project was FAILED(PATH_NOT_ALLOWED) before A6 #3 while read() accepted it in "
-        "0.06 s (measured): a file: prefix is not a scheme that reaches a host"
+    equal(
+        metadata_record.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open on a layer whose metadata identifier is a URL",
     )
-
-
-def at_48_open_refuses_a_source_split_across_child_elements(ctx: Context) -> str:
-    """datasource 的文本是它整个子树的字符数据，不是只算直接文本。
-
-    The text of a datasource is every character data event of its subtree.
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at48 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(16)
-    listener.settimeout(0.2)
-    port = listener.getsockname()[1]
-
-    connections = 0
-    evidence: list[str] = []
-    try:
-        for suffix in (".qgs", ".qgz"):
-            target = ctx.fixtures.root / f"split source{suffix}"
-            fixtures.write_split_content_remote(target, ctx.fixtures.raster, port)
-            started = time.monotonic()
-            record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-            elapsed = time.monotonic() - started
-            equal(record.status, ExecutionStatus.FAILED, f"project.open on a split source {suffix}")
-            equal(error_code(record), PATH_NOT_ALLOWED, f"the code for a split source {suffix}")
-            error = record.error
-            if error is None:
-                raise AssertionError("a failed record carries an error")
-            require("remote data source" in error.message, f"the message: {error.message!r}")
-            require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
-            evidence.append(f"{suffix} in {elapsed * 1000:.0f} ms")
-        while True:
-            try:
-                connection, _ = listener.accept()
-            except TimeoutError:
-                break
-            connections += 1
-            connection.close()
-    finally:
-        listener.close()
-
-    equal(connections, 0, "TCP connections made while the projects were opened")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+    metadata_layers = result_of(metadata_record)["layer_count"]
+    require(metadata_layers >= 1, f"the metadata project's layers: {metadata_layers}")
+    require(metadata_elapsed < 20.0, f"the metadata project took {metadata_elapsed:.2f}s")
     reset_project(ctx)
     return (
-        "<datasource>/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:<a port this case listens on>"
-        f"/never.tif: FAILED(PATH_NOT_ALLOWED) for {' and '.join(evidence)} with {connections} "
-        "TCP connections. Every fragment is an ordinary piece of a path; their concatenation "
-        "is the /vsicurl address QDom datasource.text() hands the provider, and the scan asked "
-        "each fragment separately while read() made 8 connections before the refusal (measured)"
+        f"a Delimited Text layer spelled file:./points.csv: SUCCEEDED with {csv_layers} layer "
+        f"in {csv_elapsed * 1000:.0f} ms; a layer whose metadata identifier is "
+        f"https://example.org/datasets/42: SUCCEEDED with {metadata_layers} layer in "
+        f"{metadata_elapsed * 1000:.0f} ms. Both were refused by the old value scan; read() "
+        "reads them, and a value that is only metadata names no data source"
     )
 
 
@@ -2185,73 +1842,6 @@ def at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory(ctx: Conte
         f"{values['layer_count']} layer in {elapsed * 1000:.0f} ms (it registered {len(layers)}). "
         "/vsi is a GDAL file system only when it opens the path: the substring check refused the "
         "project as a remote data source, while read() reads it (measured)"
-    )
-
-
-def at_50_open_refuses_a_subdataset_that_names_a_remote_file(ctx: Context) -> str:
-    """数据源自己的语法里写着远程文件时，在 read() 之前就拒。
-
-    A remote file inside a datasource's own syntax is refused before read().
-    """
-
-    from qgis.core import QgsProject
-
-    reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at50 kept")
-    before = project_layer_ids()
-    file_before = QgsProject.instance().fileName()
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(16)
-    listener.settimeout(0.2)
-    port = listener.getsockname()[1]
-
-    connections = 0
-    evidence: list[str] = []
-    try:
-        for suffix in (".qgs", ".qgz"):
-            target = ctx.fixtures.root / f"subdataset remote{suffix}"
-            fixtures.write_subdataset_remote_project(target, ctx.fixtures.raster, port)
-            started = time.monotonic()
-            record = ctx.run("project.open", {"path": str(target), "discard_current": True})
-            elapsed = time.monotonic() - started
-            equal(
-                record.status,
-                ExecutionStatus.FAILED,
-                f"project.open on a remote subdataset {suffix}",
-            )
-            equal(
-                error_code(record),
-                PATH_NOT_ALLOWED,
-                f"the code for a remote subdataset {suffix}",
-            )
-            error = record.error
-            if error is None:
-                raise AssertionError("a failed record carries an error")
-            require("remote data source" in error.message, f"the message: {error.message!r}")
-            require(elapsed < 1.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s")
-            evidence.append(f"{suffix} in {elapsed * 1000:.0f} ms")
-        while True:
-            try:
-                connection, _ = listener.accept()
-            except TimeoutError:
-                break
-            connections += 1
-            connection.close()
-    finally:
-        listener.close()
-
-    equal(connections, 0, "TCP connections made while the projects were opened")
-    equal(project_layer_ids(), before, "the project's layers after the refusal")
-    equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
-    reset_project(ctx)
-    return (
-        '<datasource>NETCDF:"/vsicurl/http://127.0.0.1:<a port this case listens on>'
-        '/never.tif":temperature</datasource>: FAILED(PATH_NOT_ALLOWED) for '
-        f"{' and '.join(evidence)} with {connections} TCP connections. The marker is not at the "
-        "start of the value, so the scan that asked only the start let read() fetch it (5 "
-        "connections, measured, A12 #1)"
     )
 
 
@@ -2370,7 +1960,7 @@ def processing_probe_provider() -> None:
 
     if _registered_provider:
         return
-    from qgis.core import (
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
         QgsApplication,
         QgsProcessingAlgorithm,
         QgsProcessingOutputNumber,
@@ -2528,7 +2118,7 @@ def p02_no_algorithm_allow_list(ctx: Context) -> str:
 
 def p03_algorithm_info_fields(ctx: Context) -> str:
     require_processing()
-    from qgis.core import (
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
         QgsApplication,
         QgsProcessingParameterDefinition,
         QgsProcessingParameterEnum,
@@ -2708,7 +2298,7 @@ def p05_unknown_key(ctx: Context) -> str:
 
 def p06_buffer_memory_output(ctx: Context) -> str:
     require_processing()
-    from qgis.core import Qgis
+    from qgis.core import Qgis  # pyright: ignore[reportMissingImports]
 
     layer_id = cities_layer(ctx, "p06 cities")
     before = project_layer_ids()
@@ -2826,9 +2416,9 @@ def p09_multiple_outputs(ctx: Context) -> str:
 
 def p10_json_values(ctx: Context) -> str:
     require_processing()
-    from qgis.core import Qgis, QgsProject
+    from qgis.core import Qgis, QgsProject  # pyright: ignore[reportMissingImports]
 
-    from qgis_agent_plugin.operations.processing import ProcessingRunAlgorithmParams
+    from qgis_agent_plugin.operations.processing import ProcessingRunAlgorithmParams  # pyright: ignore[reportMissingImports]
 
     accepted = ProcessingRunAlgorithmParams.model_validate(
         {
@@ -2931,7 +2521,7 @@ def p12_input_path_policy(ctx: Context) -> str:
 
 def p13_destination_policy(ctx: Context) -> str:
     require_processing()
-    from qgis.core import QgsProcessing, QgsVectorLayer
+    from qgis.core import QgsProcessing, QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     layer_id = cities_layer(ctx, "p13 cities")
     target = ctx.fixtures.root / "p13 output.gpkg"
@@ -3047,7 +2637,7 @@ def p14_output_ownership(ctx: Context) -> str:
 def p15_non_json_output(ctx: Context) -> str:
     require_processing()
     processing_probe_provider()
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     project = QgsProject.instance()
     added: list[str] = []
@@ -3294,7 +2884,7 @@ def s06_export_failure(ctx: Context) -> str:
 
 
 def a01_vector_candidates(ctx: Context) -> str:
-    from qgis.core import QgsApplication
+    from qgis.core import QgsApplication  # pyright: ignore[reportMissingImports]
 
     layers = {
         "Point": cities_layer(ctx, "a01 point"),
@@ -3322,7 +2912,7 @@ def a01_vector_candidates(ctx: Context) -> str:
 
 
 def a02_raster_candidates(ctx: Context) -> str:
-    from qgis.core import QgsRasterRendererRegistry
+    from qgis.core import QgsRasterRendererRegistry  # pyright: ignore[reportMissingImports]
 
     native = QgsRasterRendererRegistry().renderersList()
     equal(sorted(native), RASTER_RENDERER_TYPES, "the eight built-in raster renderers")
@@ -3353,7 +2943,7 @@ _REGISTERED_RENDERER_METADATA: list[Any] = []
 
 
 def a03_third_party_candidate(ctx: Context) -> str:
-    from qgis.core import (
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
         QgsApplication,
         QgsMarkerSymbol,
         QgsRendererAbstractMetadata,
@@ -3403,7 +2993,7 @@ def a03_third_party_candidate(ctx: Context) -> str:
 
 
 def a03b_raster_third_party(ctx: Context) -> str:
-    from qgis.core import QgsApplication
+    from qgis.core import QgsApplication  # pyright: ignore[reportMissingImports]
 
     # 这个访问器在 3.44 里没绑定；而这里新建的注册表对象也不是第三方提供者会注册进去的那个 C++
     # 单例。
@@ -3423,7 +3013,7 @@ def a03b_raster_third_party(ctx: Context) -> str:
 
 
 def a04_bad_layers(ctx: Context) -> str:
-    from qgis.core import QgsProject, QgsVectorLayer
+    from qgis.core import QgsProject, QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     table = QgsVectorLayer("None?field=p5:integer", "a04 table", "memory")
     require(QgsProject.instance().addMapLayer(table) is not None, "the table layer was not added")
@@ -3476,7 +3066,7 @@ def a05_stable_result(ctx: Context) -> str:
 
 
 def a06_get_renderer(ctx: Context) -> str:
-    from qgis.core import QgsHeatmapRenderer
+    from qgis.core import QgsHeatmapRenderer  # pyright: ignore[reportMissingImports]
 
     vector_id = cities_layer(ctx, "a06 point")
     raster_id = raster_layer(ctx, "a06 raster", ctx.fixtures.raster3)
@@ -3506,7 +3096,7 @@ def a06_get_renderer(ctx: Context) -> str:
 
 
 def v01_null_symbol(ctx: Context) -> str:
-    from qgis.core import QgsProject
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     layer_id = sub_layer(ctx, "v01 polygon", fixtures.PARCELS_LAYER)
     before = result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))
@@ -3535,7 +3125,7 @@ def v01_null_symbol(ctx: Context) -> str:
 
 
 def v02_single_symbol(ctx: Context) -> str:
-    from qgis.core import QgsSymbol
+    from qgis.core import QgsSymbol  # pyright: ignore[reportMissingImports]
 
     cases = (
         (
@@ -3887,7 +3477,7 @@ def v08_unsupported(ctx: Context) -> str:
 
 
 def r01_single_band_gray(ctx: Context) -> str:
-    from qgis.core import QgsContrastEnhancement, QgsSingleBandGrayRenderer
+    from qgis.core import QgsContrastEnhancement, QgsSingleBandGrayRenderer  # pyright: ignore[reportMissingImports]
 
     layer_id = raster_layer(ctx, "r01 raster", ctx.fixtures.raster3)
     record = set_renderer(
@@ -3936,7 +3526,7 @@ def r02_multiband_color(ctx: Context) -> str:
 
 
 def r03_pseudo_color(ctx: Context) -> str:
-    from qgis.core import QgsColorRampShader
+    from qgis.core import QgsColorRampShader  # pyright: ignore[reportMissingImports]
 
     layer_id = raster_layer(ctx, "r03 raster", ctx.fixtures.raster3)
     stops = [{"value": 0, "color": "#2665B8"}, {"value": 10, "color": "#F2E9A4"}]
@@ -4105,27 +3695,18 @@ CASES = (
     ("AT-27-v1", at_27_v1_half),
     ("AT-28", at_28_layer_add_sub_layer),
     ("AT-29", at_29_open_accepts_a_source_outside_any_root),
-    ("AT-30", at_30_open_refuses_a_remote_source_before_reading),
-    ("AT-31", at_31_open_refuses_an_encoded_or_spaced_datasource),
+    ("AT-30", at_30_open_does_not_judge_a_remote_source),
     ("AT-32", at_32_open_keeps_a_source_whose_directory_is_gone),
-    ("AT-33", at_33_open_refuses_an_oversized_member_before_unpacking_it),
     ("AT-34", at_34_unreadable_member_is_a_project_read_failure),
     ("AT-35", at_35_open_refuses_a_deeply_nested_project_before_reading_it),
-    ("AT-36", at_36_open_refuses_an_unclosed_datasource_project_in_milliseconds),
-    ("AT-37", at_37_open_refuses_a_qgz_over_the_total_budget),
-    ("AT-38", at_38_open_refuses_a_tag_spam_project_in_milliseconds),
-    ("AT-39", at_39_open_refuses_a_datasource_hidden_by_an_attribute),
     ("AT-40", at_40_open_reads_a_project_with_labelled_layers),
     ("AT-41", at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes),
     ("AT-42", at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted),
     ("AT-43", at_43_open_reads_a_project_with_a_deep_group_tree),
     ("AT-44", at_44_field_sum_refuses_a_non_finite_value),
-    ("AT-45", at_45_open_refuses_a_source_that_a_child_element_carries_in_its_tail),
-    ("AT-46", at_46_open_refuses_a_project_that_declares_xml_entities),
+    ("AT-46", at_46_open_reads_a_project_that_declares_xml_entities),
     ("AT-47", at_47_open_reads_projects_the_old_scan_called_remote),
-    ("AT-48", at_48_open_refuses_a_source_split_across_child_elements),
     ("AT-49", at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory),
-    ("AT-50", at_50_open_refuses_a_subdataset_that_names_a_remote_file),
     ("AT-51", at_51_open_reads_a_project_whose_layer_is_a_local_subdataset),
     ("P01", p01_list_algorithms),
     ("P02", p02_no_algorithm_allow_list),

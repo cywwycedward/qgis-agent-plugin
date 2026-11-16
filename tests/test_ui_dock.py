@@ -60,8 +60,8 @@ from qgis.PyQt.QtWidgets import (  # pyright: ignore[reportMissingImports]
     QMainWindow,
 )
 
-from qgis_agent_plugin import plugin
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin import plugin  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     ENGINE_CLOSING,
     INTERNAL_ERROR,
     INVALID_INPUT,
@@ -75,10 +75,10 @@ from qgis_agent_plugin.core.models import (
     OperationKind,
     OperationSpec,
 )
-from qgis_agent_plugin.core.registry import OperationRegistry
-from qgis_agent_plugin.operations import register_all
-from qgis_agent_plugin.ui import theme
-from qgis_agent_plugin.ui.dock import _DESTRUCTIVE_ROLE, _META_ROLE, OperationDock, _Field
+from qgis_agent_plugin.core.registry import OperationRegistry  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations import register_all  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.ui import theme  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.ui.dock import _DESTRUCTIVE_ROLE, _META_ROLE, OperationDock, _Field  # pyright: ignore[reportMissingImports]
 
 # 一个 schema 里放齐所有编辑器类型：文本、布尔、整数、小数、枚举，可空字符串与
 # 可空数组，两个必填，其余带默认值
@@ -725,7 +725,7 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     assert dock.capsule.text() == "失败"
     assert not dock.feedback.isHidden()
     assert dock.error_code.text() == PATH_NOT_ALLOWED
-    assert dock.error_message.text() == "这个路径或文件不能用。"
+    assert dock.error_message.text() == "这个路径不能用。"
     # 引擎自己的消息留着，但只作提示 / the engine's own message is kept, as the tooltip only
     assert "outside the allowed roots" in dock.error_message.toolTip()
     assert "完整路径" in dock.error_hint.text()

@@ -233,58 +233,77 @@ engine.get(running_id).status  # 等任务自己报告，才变 'CANCELLED'
 ```python
 engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})
 engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})  # 第二次
-engine.run_sync("project.open", {"path": r"C:\temp\projects\missing.qgz", "discard_current": True})
-engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz", "discard_current": True})
+engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz", "overwrite": True})
+engine.run_sync("project.save", {})  # Save：自己的关联文件
+engine.run_sync("project.open", {"path": r"C:\temp\projects\missing.qgz"})
+engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz"})
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz"})
 ```
 
-已实测（headless）：
+已实测（headless 真 QGIS，`demo.qgz` 里一个图层）：
 
 ```text
-save #1   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}
-save #2   -> FAILED     TARGET_EXISTS | the target file exists; pass overwrite=true to replace it
-open 缺失 -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project may have changed
-open 损坏 -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project may have changed
-open 不 discard -> FAILED  PROJECT_REPLACE_REQUIRED | ... pass discard_current=true to replace it
+save #1     -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}
+save #2     -> FAILED     TARGET_EXISTS | the target file exists; pass overwrite=true to replace it
+save #3     -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}   # overwrite=true
+save assoc  -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}   # 不给 path
+open 缺失   -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project was cleared
+               之后工程里 0 个图层
+open 损坏   -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project was cleared
+open demo   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
+                           "invalid_layer_count": 0}
+open 已脏   -> FAILED     PROJECT_REPLACE_REQUIRED | the current project has unsaved changes; pass
+                          discard_current=true to replace it
+open 已脏 + discard -> SUCCEEDED  {"...", "layer_count": 1, "invalid_layer_count": 0}
 ```
 
-“缺失文件”归 `PROJECT_OPEN_FAILED`：插件不预检存在性，`read()` 打不开就是打不开。它的 `message`
-明说当前工程可能已经改变——不承诺回滚。
+两个判据与 GUI 是同一个：
+
+- **覆盖**只由 `Save As` 问：给了 `path` 且文件已存在才要 `overwrite=true`；`project.save` 不给
+  `path` 写的是工程自己的关联文件，那条路不再问覆盖（`save assoc` 上面就是第二次写同一个文件），
+  因为 GUI 的 Save 不弹对话框。
+- **替换**只看工程有没有未保存内容（`is_dirty()`）。一个有图层但没改过的工程不需要
+  `discard_current`；“缺失文件”归 `PROJECT_OPEN_FAILED`：插件不预检存在性，`read()` 打不开就是
+  打不开。失败时当前工程**已被清空**（GUI 的 `addProject` 也是先 `closeProject()` 再 `read()`），
+  消息里写的是这一点，不是“可能变了”。
 
 ```python
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz", "discard_current": True})
+engine.run_sync("project.create", {})  # 用 QGIS 自己的默认 CRS
 engine.run_sync("project.create", {"crs_authid": "epsg:3857", "discard_current": True})
+engine.run_sync("project.create", {"crs_authid": "NOT:A_CRS", "discard_current": True})
+engine.run_sync("project.get_info", {})
 ```
 
-已实测（headless 真 QGIS；`project.create` 是“已实测（GUI 未跑）”：headless 里没有 `iface.newProject()`，
-用等价替身“`QgsProject.instance().clear()` + 返回 `True`”；`project.open` 不经过 `iface`）。
-`demo.qgz` 里是一个图层，数据源在 `C:\temp\data`：
+已实测（headless 真 QGIS；`project.create` 的 `iface.newProject(promptToSaveFlag=False)` 用等价替身
+“`QgsProject.instance().clear()` + 返回 `True`”，`project.open` 不经过 `iface`）：
 
 ```text
 open demo.qgz（数据源在 C:\temp\data，与工程文件不同目录）
-                -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
-                               "invalid_layer_count": 0}   ；lifecycle epoch 0 -> 1，记录 epoch 仍是 0
-
-create          -> SUCCEEDED  {"crs_authid": "EPSG:3857", "file_path": null, "layer_count": 0}
-                               ；lifecycle epoch 1 -> 2，记录 epoch 仍是 1
-create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dirty": true,
-                        "layer_count": 0, "project_epoch": 2}
+              -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
+                             "invalid_layer_count": 0}
+create epsg   -> SUCCEEDED  {"crs_authid": "EPSG:3857", "file_path": null, "layer_count": 0}
+get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "EPSG:3857", "is_dirty": false,
+                             "layer_count": 0, "title": "", "project_epoch": 0}
+create 乱写 CRS -> SUCCEEDED {"crs_authid": "", "file_path": null, "layer_count": 0}
+get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": false,
+                             "layer_count": 0, "title": "", "project_epoch": 0}
 ```
 
 工程点名的数据源不再由插件审：在任何目录、不存在、甚至写成远程，工程照样打开，加载不出来的层
-只让 `invalid_layer_count` 变大。插件在 `read()` 之前挡的是那一次网络往返（见
-`docs/agents/DEVELOP.md` §7.2），不是目录归属。
+只让 `invalid_layer_count` 变大。`read()` 之前只剩两条防死检查（嵌套超过 4096 层、`.qgz` 里有加密
+成员），见 `docs/agents/DEVELOP.md` §7.2。
 
-三条要注意的事：
+四条要注意的事：
 
 - 替换工程会让 `project_epoch` 加 1（旧代数的排队调用因此 `CANCELLED`），但**记录里保存的是接受调用
-  时的那一代**，所以刚打开完的记录写着 `project_epoch: 0`，下一次调用才是 `1`、`2`。
-- `crs_authid` 为 `""` 不是错误：`QgsProject` 没有设 CRS 时就是这个值；`layer_count` 是打开的工程
-  里实际注册的图层数。
-- `create` 之后 `is_dirty` 是 `true`：新建工程设了 CRS 就会变脏，不代表没建成功。
-
-四个失败路径照旧有效（`open` 缺失文件归 `PROJECT_OPEN_FAILED`、损坏文件 `PROJECT_OPEN_FAILED`、
-不传 `discard_current` 是 `PROJECT_REPLACE_REQUIRED`，`create` 的无效 CRS 是 `INVALID_CRS`）。
+  时的那一代**。上面那份样例脚本没有接 `aboutToBeCleared`，所以 `project_epoch` 一直是 0；插件装配
+  好之后每换一次工程才加 1。
+- `crs_authid` 为 `""` 不是错误：`QgsProject` 没有 CRS 时就是这个值。`create` 传一个构造不出 CRS 的
+  字符串不再被拒（GUI 的新建动作也不拒），工程留下的是空 CRS，结果如实报 `""`。
+- `create` 不给 `crs_authid` 就不碰 QGIS 自己给新工程的 CRS（设置里的 `projections/defaultProjectCrs`
+  与默认模板）。
+- `create` 之后 `is_dirty` 是 `false`：GUI 的 `fileNew` 最后一步就是 `setDirty(false)`。
 
 ## 9. 常见错误速览
 
@@ -303,8 +322,9 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
 | `layer.set_visibility` 对一个 `add_to_legend=false` 的图层 | `FAILED` `LAYER_NOT_IN_TREE` |
 | `layer.sum_numeric_field` 对文本字段 | `FAILED` `INVALID_FIELD_TYPE` |
 | `project.save` 不给路径且工程无关联文件 | `FAILED` `PROJECT_PATH_REQUIRED` |
-| `project.create` 传 `crs_authid="NOT:A_CRS"` | `FAILED` `INVALID_CRS`（当前工程未被替换） |
-| `project.create` 在有内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
+| `project.create` 传 `crs_authid="NOT:A_CRS"` | `SUCCEEDED`，`crs_authid` 是 `""`（GUI 的新建动作也不拒） |
+| `project.create` / `project.open` 在有未保存内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
+| `project.save` 给了 `path` 且文件已存在、不传 `overwrite` | `FAILED` `TARGET_EXISTS`；不给 `path` 写关联文件不问覆盖 |
 | 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
 | 全新安装（允许目录为空）调 `layer.add` / `project.save` | `FAILED` `PATH_NOT_ALLOWED` |
 
