@@ -328,7 +328,6 @@ get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": fa
 | `run_sync("no.such", {})` | 抛 `FrameworkError: OPERATION_NOT_FOUND` |
 | `get("no-such-id")` | 抛 `FrameworkError: EXECUTION_NOT_FOUND` |
 | 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
-| `layer.add` 的路径是相对路径 | `FAILED` `PATH_NOT_ALLOWED` |
 | `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
 | `layer.add` 的 `sub_layer` 不在 provider 的清单里（矢量或栅格） | `FAILED` `INVALID_LAYER` |
 | `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |

@@ -1,6 +1,6 @@
 """QGIS 加载的插件：一次加载一个会话，以及 ``unload`` 的六步。
 
-``initGui`` 装好一个会话——五项设置、工程代数、这个插件自己的
+``initGui`` 装好一个会话——四项设置、工程代数、这个插件自己的
 ``QgsTaskManager``、建在它之上的适配器、装满本构建全部操作的注册表，以及引擎——
 把操作坞窗挂到主窗口上，并把引擎与注册表发布到 ``iface`` 上，
 Python Console 就在那里找它们。
@@ -16,7 +16,7 @@ pydantic 的大版本在这里检查，早于 DTO 层被导入：DTO 是按 pyda
 
 The plugin QGIS loads: one session per load, and the six steps of ``unload``.
 
-``initGui`` assembles a session -- the five settings, the project generation,
+``initGui`` assembles a session -- the four settings, the project generation,
 this plugin's own ``QgsTaskManager``, the adapter over it, the registry filled with
 this build's operations, and the engine -- puts the operation dock on the main
 window, and publishes the engine and the registry on ``iface``, which is where the
@@ -59,8 +59,8 @@ __all__ = [
 
 _LOGGER = logging.getLogger(__name__)
 
-# 五项设置共用一个组：这个插件读到的名字不会和别的插件撞上，默认安装什么也读不到。
-# The five settings live under one group: nothing this plugin reads can be confused with
+# 四项设置共用一个组：这个插件读到的名字不会和别的插件撞上，默认安装什么也读不到。
+# The four settings live under one group: nothing this plugin reads can be confused with
 # another plugin's setting, and a default install reads nothing at all.
 SETTINGS_GROUP = "qgis_agent_plugin"
 

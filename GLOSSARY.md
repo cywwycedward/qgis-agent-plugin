@@ -64,7 +64,8 @@ _Avoid_：copy、cache、buffer、dump
 _Avoid_：version、revision、generation、project id
 
 **Pre-scan（读前扫描）**：
-把工程文件交给 QGIS 读取之前，先按字节审一遍内容的步骤。目的是不让主线程替文件发出网络往返。
+把工程文件交给 QGIS 读取之前，先按字节审一遍内容的步骤。留到现在的目的只有一个：挡住实测会让
+`QgsProject.read()` 打掉进程的形状（嵌套过深、加密成员），见 ADR 0005。
 _Avoid_：validation、sanitization、precheck、guard
 
 ## 失败与风险

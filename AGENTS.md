@@ -9,7 +9,7 @@ QGIS Agent 插件本体。本文件只做索引与摘要，规范在 `docs/agent
 | `docs/agents/ENVIRONMENT.md` | 跑任何 Python、装依赖、找路径之前 | 两个解释器各自的职责、依赖现状、uv 的坑、路径与版本 |
 | `docs/agents/DELEGATION.md` | 要把活派给别的 agent 时 | `hc` + `herdr-app`、一个功能的五步、交接文档命名 |
 | `GLOSSARY.md` | 命名任何东西之前（Operation、issue 标题、测试名、注释里的术语） | 领域词汇的正牌说法与要避免的同义词；查不到的词说明是在自造语言 |
-| `docs/adr/` | 想问"为什么这么定"，或想改一条既有边界时 | 已成文的架构决定：路径无白名单、冻结执行协议、协作式取消、读前扫描 |
+| `docs/adr/` | 想问"为什么这么定"，或想改一条既有边界时 | 已成文的架构决定：路径无白名单、冻结执行协议、协作式取消、`project.open` 只挡会杀死进程的形状 |
 
 构建、部署、测试入口都在 `package.json`：`npm run deploy` 把 `src/qgis_agent_plugin` 镜像进
 QGIS profile。

@@ -146,7 +146,7 @@ layer.add 指向不存在的绝对路径 -> FAILED INVALID_LAYER（QGIS 的答�
 
 | 命令 | 作用 | 结果 |
 | --- | --- | --- |
-| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 本机最近一次 691 passed，见下 |
+| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 本机最近一次 721 passed，见下 |
 | `npm run test:verbose` | 同上，`-vv tests` | — |
 | `npm run lint` | `ruff check .` | `All checks passed!` |
 | `npm run format` | `ruff format .` | — |
@@ -163,7 +163,7 @@ layer.add 指向不存在的绝对路径 -> FAILED INVALID_LAYER（QGIS 的答�
 
 ```text
 $ npm run test                                                       # QGIS 解释器
-691 passed, 1 warning in 16.38s
+721 passed, 1 warning in 14.41s
 ```
 
 这一行就是 fix 之后的一次全绿跑。`569c3e4` 的样例里那条失败来自一条已被删除的用例

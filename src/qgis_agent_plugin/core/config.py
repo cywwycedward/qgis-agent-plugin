@@ -1,16 +1,16 @@
 """引擎读的配置，以及它们的出厂默认值。
 
-五项都是计数：并发、排队、记录保留和一次后台快照的要素上限。没有路径策略的配置项——路径只要求是
-绝对路径，就在参数校验处判断。
+四项都是计数：并发、排队与记录保留。没有路径策略的配置项——路径只要求是绝对路径，就在参数
+校验处判断。
 
 从 ``QgsSettings`` 里读设置属于插件生命周期；本模块只负责把普通 mapping 变成这些值，所以它在
 裸解释器里也能导入。
 
 The settings the engine reads, and their product defaults.
 
-Five counts: concurrency, queueing, record retention and the feature cap of one
-background snapshot.  There is no path-policy setting: a path only has to be
-absolute, which is decided where arguments are validated.
+Four counts: concurrency, queueing and record retention.  There is no path-policy
+setting: a path only has to be absolute, which is decided where arguments are
+validated.
 
 Reading the settings out of ``QgsSettings`` belongs to the plugin lifecycle; this
 module only turns a plain mapping into the values, so it stays importable in a
