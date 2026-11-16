@@ -100,12 +100,12 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 **路径必须是绝对路径**：相对路径在参数校验处就被拒（`PATH_NOT_ALLOWED`，消息是
 `the path must be an absolute path`）。除此之外插件不管路径——能不能读由 QGIS 与 provider 回答。
 
-## 4. 配置（五项）
+## 4. 配置（四项）
 
-键名一律是 `qgis_agent_plugin/<键名>`（一个 QSettings 组，避免和别的插件撞名）。七个键的语义、
+键名一律是 `qgis_agent_plugin/<键名>`（一个 QSettings 组，避免和别的插件撞名）。四个键的语义、
 默认值与"计数必须 ≥ 1"的规则只有一份，在 `docs/agents/DEVELOP.md` §6.12。这里只说怎么写、怎么生效。
 
-五项都是计数，没有路径配置。改法：
+四项都是计数，没有路径配置。改法：
 
 ```python
 from qgis.core import QgsSettings
@@ -121,8 +121,8 @@ s.setValue("qgis_agent_plugin/max_active_background", 4)
 生效时机：`initGui` 读一次（`plugin.read_settings()`），所以**改完要在插件管理器里禁用再启用**
 （或重启 QGIS）。
 
-五个计数键（`max_active_background`、`max_pending`、`max_terminal_records`、
-`terminal_ttl_seconds`、`max_snapshot_features`）必须 **≥ 1**：写 `0` 或负数、或者写成
+四个计数键（`max_active_background`、`max_pending`、`max_terminal_records`、`terminal_ttl_seconds`）
+必须 **≥ 1**：写 `0` 或负数、或者写成
 `32 (default)` 这类非数字，`initGui` 会直接报一个带键名（非法值时也带原值）的错误，插件
 不加载。故意不夹取：`max_active_background=0` 会让每个后台调用永久 `QUEUED`，这种配置
 失误必须当场暴露。
@@ -178,7 +178,7 @@ $ npm run test                                                       # QGIS 解�
 | Console 里 `iface.agent_engine` 不存在 | 插件没启用，或已卸载 | 启用插件；看 Console/日志里的加载异常 |
 | 报 `PATH_NOT_ALLOWED`，消息是 `the path must be an absolute path` | 路径是相对的，或者是个 URL | 给一条带盘符的完整路径；见 §4 |
 | 插件加载失败，日志里是 `max_active_background must be at least 1` 或 `… must be a whole number` | 某个计数键写成了 0/负数/非数字 | 按报错里的键名改回 ≥ 1 的整数；见 §4 |
-| `layer.set_visibility` 返回 `LAYER_NOT_IN_TREE` | 该图层是 `layer.add(add_to_legend=false)` 加进来的 | 用 `true` 重加，或只做 `layer.get_info` |
+| `layer.set_visibility` 返回 `LAYER_NOT_IN_TREE` | 这个图层不在图层树里（加载来的工程可以这样，`layer.add` 已经造不出这种图层） | 只做 `layer.get_info`；要可见性得先在桌面版里把它放回图例 |
 | `run_sync` 报 `UNSUPPORTED_EXECUTION_MODE` | 对 `layer.sum_numeric_field` 用了 `run_sync` | 用 `submit` + `get` |
 
 ## 7. 卸载

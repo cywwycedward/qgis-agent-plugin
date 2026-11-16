@@ -30,7 +30,7 @@ npm run check      # lint + 格式 + 规范组测试（12 条，约 5 s）
 
 | 位置 | 放什么 |
 | --- | --- |
-| `src/qgis_agent_plugin/core/` | 契约与管线：`contracts`（Operation/Command/Query 与两个策略的协议）、`models`（DTO、状态枚举、25 个错误码）、`registry`、`engine`、`execution_store`（状态机）、`context`（工程代数 `project_epoch` 与主线程判定）、`config`（五项配置）、`security`（只要求绝对路径）、`runners/`（`main_thread` 事件队列、`qgs_task` 后台适配） |
+| `src/qgis_agent_plugin/core/` | 契约与管线：`contracts`（Operation/Command/Query 与两个策略的协议）、`models`（DTO、状态枚举、23 个错误码）、`registry`、`engine`、`execution_store`（状态机）、`context`（工程代数 `project_epoch` 与主线程判定）、`config`（四项配置）、`security`（只要求绝对路径）、`runners/`（`main_thread` 事件队列、`qgs_task` 后台适配） |
 | `src/qgis_agent_plugin/operations/` | 十七个操作，一个文件一个能力族：`project.py`（4）、`layer.py`（10）、`processing.py`（3）。每个模块装自己的 `Params`、`Result` 与 Operation 类；`__init__.py` 只汇总（`register_all`） |
 | `src/qgis_agent_plugin/__init__.py` | 入口：QGIS 按名字在包上找的 `classFactory`（只在被调用时才 import `plugin`） |
 | `src/qgis_agent_plugin/plugin.py` | 会话：`initGui`／`unload`、`Supervisor`（卸载后仍活着的任务的托管）、坞窗的建／挂／卸、pydantic 主版本闸门 |
@@ -62,7 +62,7 @@ npm run check      # lint + 格式 + 规范组测试（12 条，约 5 s）
 `tests/qgis_integration/` 是 headless 验收跑，不是 pytest 用例。
 
 运行时的两个观察面：Python Console 里 `iface.agent_registry` / `iface.agent_engine`（插件加载期间
-存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，五项见
+存在，`unload` 撤掉）；配置从 `QgsSettings` 的 `qgis_agent_plugin/<键名>` 读，四项见
 `docs/agents/DEVELOP.md` §6.12。
 
 ## Git branches

@@ -262,7 +262,7 @@ qgis-agent-plugin/
 
 | 模块 | 公开名字 | 说明 |
 | --- | --- | --- |
-| `core/models.py` | 24 个错误码常量、`ERROR_CODES` | 见 §7.4 的完整表 |
+| `core/models.py` | 23 个错误码常量、`ERROR_CODES` | 见 §7.4 的完整表 |
 | | `OperationKind`、`ExecutionStrategy`、`ExecutionStatus` | 三个 `StrEnum` |
 | | `FrameworkError(code, message)` | 控制面异常；构造时校验 code 已知 |
 | | `ErrorDetail`、`CancelReceipt`、`ExecutionRecord`、`OperationSpec` | Pydantic DTO，全部 `extra="forbid"` |
@@ -628,7 +628,7 @@ revalidate_instances="always")`——拒未知键，并且传进来的已构造�
 `CANCELLED` 两者都不能有；非终态不能有 `finished_at` 或 `result`；只有 `FAILED` 能有 `error`。
 一份"状态机到不了的组合"会在构造时就 `ValueError`，不会被静默修好。
 
-`ErrorDetail` 有 `code`、`message`、`details`；`code` 在构造时校验必须在 24 个已知错误码里；
+`ErrorDetail` 有 `code`、`message`、`details`；`code` 在构造时校验必须在 23 个已知错误码里；
 `details` 目前恒为 `None`（没有通路的字段不要假装有）。
 
 两类失败，不要混：
@@ -636,7 +636,7 @@ revalidate_instances="always")`——拒未知键，并且传进来的已构造�
 | 形态 | 什么时候 | 调用方拿到 |
 | --- | --- | --- |
 | 控制面异常 | 调用本身无效：未知 Operation、未知执行 id、非主线程、引擎已关闭、对后台操作调 `run_sync` | 抛 `FrameworkError`，有 `.code`/`.message`，**不建记录** |
-| `FAILED` 记录 | 调用有效但执行失败：入参校验、路径策略、GIS 动作、输出校验、任务提交失败 | `ExecutionRecord.status == "FAILED"`，`record.error.code` 是 24 个码之一 |
+| `FAILED` 记录 | 调用有效但执行失败：入参校验、路径策略、GIS 动作、输出校验、任务提交失败 | `ExecutionRecord.status == "FAILED"`，`record.error.code` 是 23 个码之一 |
 
 ### 6.7 状态机（`ExecutionStore._TRANSITIONS`）
 
@@ -968,14 +968,14 @@ absolute_path(raw: str) -> Path
 
 ### 7.4 错误码
 
-24 个码是完整词表，多一个少一个都是缺陷（`FrameworkError` 与 `ErrorDetail` 构造时都校验）。
+23 个码是完整词表，多一个少一个都是缺陷（`FrameworkError` 与 `ErrorDetail` 构造时都校验）。
 按"什么时候产生"分三类，调用方的处理方式完全不同：
 
 | 类 | 出现方式 | 有没有记录 | 码 |
 | --- | --- | --- | --- |
 | 注册期 | 插件加载时抛异常，插件起不来 | 无 | `INVALID_OPERATION_DEFINITION`、`DUPLICATE_OPERATION` |
 | 控制面 | 调用本身无效，抛 `FrameworkError` | **无** | `OPERATION_NOT_FOUND`、`WRONG_THREAD`、`ENGINE_CLOSING`、`UNSUPPORTED_EXECUTION_MODE`、`EXECUTION_NOT_FOUND` |
-| 执行面 | 调用有效但失败，返回 `FAILED` 记录 | 有 | 其余 18 个 |
+| 执行面 | 调用有效但失败，返回 `FAILED` 记录 | 有 | 其余 16 个 |
 
 `record.error` 的形状是 `{"code": "…", "message": "…", "details": null}`：`details` 存在但
 **恒为 `null`**（`FrameworkError` 只带 code 与 message，没有 details 通路）；`message` 是给人看的
