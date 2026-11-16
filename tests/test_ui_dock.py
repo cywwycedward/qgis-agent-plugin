@@ -482,9 +482,12 @@ def test_a_checkbox_has_no_blank_state_to_promise(qapp: Any) -> None:
     register_all(registry)
     real = OperationDock(registry, FakeEngine())
     assert real.operations.currentText() == "layer.add"
+    # layer.add 没有布尔参数了（add_to_legend 已删），换一个有复选框的操作。
+    # layer.add has no boolean parameter any more (add_to_legend is gone), so use one that has.
+    real.operations.setCurrentText("project.create")
     fixture = _dock(FakeEngine(), _spec(schema=FORM))
 
-    assert "留空" not in real.editors["add_to_legend"][1].toolTip()
+    assert "留空" not in real.editors["discard_current"][1].toolTip()
     assert "留空" not in fixture.editors["flag"][1].toolTip()
 
 

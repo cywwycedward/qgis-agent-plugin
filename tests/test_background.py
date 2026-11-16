@@ -133,10 +133,14 @@ class FakeVectorLayer:
         rows: list[tuple[Any, ...]],
         fields: list[FakeField] | None = None,
         valid: bool = True,
+        selected_rows: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.rows = rows
         self._fields = FakeFields(fields if fields is not None else [FakeField(FIELD)])
         self._valid = valid
+        # 选择集：空列表就是“没有选中任何要素”。
+        # The selection: an empty list means nothing is selected.
+        self.selected_rows = list(selected_rows or [])
         # 最后一次读请求，快照裁剪那条用例查它 / the last request; the trim test checks it
         self.last_request: Any = None
 
@@ -149,6 +153,13 @@ class FakeVectorLayer:
     def getFeatures(self, request: Any = None) -> Any:  # noqa: N802 - the QGIS name
         self.last_request = request
         return iter([FakeFeature(row) for row in self.rows])
+
+    def selectedFeatureCount(self) -> int:  # noqa: N802 - the QGIS name
+        return len(self.selected_rows)
+
+    def getSelectedFeatures(self, request: Any = None) -> Any:  # noqa: N802 - the QGIS name
+        self.last_request = request
+        return iter([FakeFeature(row) for row in self.selected_rows])
 
 
 @pytest.fixture(autouse=True)
@@ -226,9 +237,31 @@ def test_a_field_sum_is_computed_from_a_copied_snapshot() -> None:
         "count": 2,
         "skipped_null": 1,
         "total": 15.0,
+        "selected_only": False,
         "snapshot_project_epoch": 0,
     }
     assert record.progress == 100
+
+
+def test_a_selection_narrows_the_sum_and_says_so() -> None:
+    """有选择集时只算选中的：桌面版统计面板的“仅选中要素”开关就是这件事。
+
+    With a selection, only the selected features are summed: that is what the statistics
+    panel's "selected features only" switch does (qgsstatisticalsummarydockwidget.cpp:210,
+    :218 -> qgsvectorlayerutils.cpp:73-80).
+    """
+
+    harness = harness_with(make_layer([(1.0,), (2.0,), (3.0,)], selected_rows=[(2.0,), (3.0,)]))
+
+    record = settled(harness, submit_sum(harness))
+
+    assert record.status is SUCCEEDED
+    assert record.result is not None
+    assert record.result["count"] == 2
+    assert record.result["total"] == 5.0
+    assert record.result["selected_only"] is True
+    # 选择集也走同一个裁剪请求 / the selection read takes the same trimmed request.
+    assert harness.project.layers["layer-1"].last_request.attribute_indexes == [0]
 
 
 def test_a_null_that_arrives_as_the_qgis_null_value_is_skipped() -> None:
@@ -672,6 +705,7 @@ def test_the_worker_stops_when_the_control_reports_a_cancel() -> None:
         field_name=FIELD,
         values=tuple(float(value) for value in range(1000)),
         skipped_null=0,
+        selected_only=False,
         project_epoch=0,
     )
 
@@ -689,6 +723,7 @@ def test_the_worker_reports_progress_across_the_whole_range() -> None:
         field_name=FIELD,
         values=tuple(1.0 for _ in range(400)),
         skipped_null=0,
+        selected_only=False,
         project_epoch=0,
     )
     control = _NoCancel()
@@ -705,7 +740,12 @@ def test_the_finalize_refuses_a_snapshot_from_an_older_generation() -> None:
     operation = LayerSumNumericField()
     request = SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
     snapshot = FieldValues(
-        layer_id="layer-1", field_name=FIELD, values=(1.0,), skipped_null=0, project_epoch=0
+        layer_id="layer-1",
+        field_name=FIELD,
+        values=(1.0,),
+        skipped_null=0,
+        selected_only=False,
+        project_epoch=0,
     )
     result = operation.execute_worker(snapshot, _NoCancel())
     harness.lifecycle.bump()

@@ -104,17 +104,12 @@ class LayerAddParams(Params):
     kind: LayerKind
     source_path: StrictStr = Field(min_length=1)
     name: StrictStr = Field(min_length=1)
-    # 名字是 provider 的自由文本（空格、斜杠、非 ASCII 都行），转义归 encodeUri；但空不是名字。
-    # The name is the provider's free text (spaces, slashes, non-ASCII); encodeUri owns the
-    # escaping. An empty string is not a name.
+    # 名字是 provider 的自由文本（空格、斜杠、非 ASCII 都行），但空不是名字。矢量与栅格都能有：
+    # 桌面版两个页签都提供子数据集清单（``qgsapplayerhandling.cpp:1363-1381`` 先按类型筛选）。
+    # The name is the provider's free text (spaces, slashes, non-ASCII); an empty string is
+    # not a name. Vector and raster alike can have one: both tabs of desktop's add dialog
+    # offer a subdataset list (``qgsapplayerhandling.cpp:1363-1381`` filters by type first).
     sub_layer: StrictStr | None = Field(default=None, min_length=1)
-    add_to_legend: StrictBool = True
-
-    @model_validator(mode="after")
-    def _sub_layer_is_vector_only(self) -> LayerAddParams:
-        if self.sub_layer is not None and self.kind != "vector":
-            raise ValueError("sub_layer is only valid for a vector source")
-        return self
 
 
 class LayerAddResult(Result):
@@ -178,23 +173,43 @@ class LayerSetVisibilityResult(Result):
     changed: StrictBool
 
 
-def layer_source_uri(source: Path, sub_layer: str | None) -> str:
-    """返回一个数据源的 provider URI。
+def layer_source_uri(provider: str, source: Path, kind: LayerKind, sub_layer: str | None) -> str:
+    """provider 为这个源（或它里面的一个子图层）给的 URI，先回答“认得出来吗”。
 
-    调用方给的字符串只经过绝对路径检查，是不是本地文件由 provider 决定——``/vsicurl/`` 与
-    WMS 地址都是合法的源。子图层仍然要靠 ogr provider 自己的编码器：它的 URI 怎么把路径和图层名
-    拼在一起、每一段怎么转义，是 provider 的规则——自己照 ``path|layername=name`` 重建形状，就是
-    对那条规则的猜测。
+    桌面版加图层的门槛是 provider 认不认得这个源，不是图层读不读得出来：它先问
+    ``providerMetadata.querySublayers``（``qgsapplayerhandling.cpp:1363-1391``），清单为空就在消息栏
+    报 "Invalid Data Source" 并且什么也不加；清单不空则把认出的子图层交给
+    ``QgsProviderSublayerDetails::toLayer``，即使它的 ``isValid()`` 为假（``:796-815``），
+    坏掉的靠图例里的坏图层图标提示。所以这里只查清单，不查 ``isValid()``。
+
+    子图层的 URI 直接取那条 detail 的 ``uri()``——那是 ``toLayer`` 交给
+    ``QgsMapLayerFactory`` 的同一个字符串（``qgsprovidersublayerdetails.cpp:22-28``）。
+    自己拼是对 provider 规则的猜测：GDAL 把子数据集写成别的形状，实测用
+    ``encodeUri({"path", "layerName"})`` 拼出来的 ``…\\dem.tif|name`` 解回来
+    ``layerName`` 是 NULL、建出来的栅格无效。子图层也必须在这份清单里：桌面版的选择框只列得出来的
+    东西（``qgsprovidersublayersdialog.cpp:215``），点不出一个不存在的名字。
 
     shortcut: 这里只审调用方点名的文件，不审该文件自己点名的源——本地 ``.vrt`` 里可能装着
     ``/vsicurl/`` 或 WMS 源，不可信 VRT 变成输入时得升级。
 
-    The caller's string has been checked for being absolute and nothing more; whether
-    it is a local file is the provider's decision -- ``/vsicurl/`` and a WMS URL are both
-    legitimate sources.  A sub-layer still needs the ogr provider's own encoder: how its
-    URI joins a path and a layer name, and how it escapes each part, is the provider's
-    rule -- re-deriving the ``path|layername=name`` shape by hand is a guess about that
-    rule.
+    The URI the provider itself gives for this source, or for one sublayer inside it, after
+    answering "does the provider recognise it at all".
+
+    Desktop's gate for adding a layer is whether the provider recognises the source, not
+    whether the layer loads: it asks ``providerMetadata.querySublayers`` first
+    (``qgsapplayerhandling.cpp:1363-1391``), reports "Invalid Data Source" and adds nothing
+    when the list is empty, and otherwise hands every recognised sublayer to
+    ``QgsProviderSublayerDetails::toLayer`` even when its ``isValid()`` is false
+    (``:796-815``), leaving a broken one to the legend's bad-layer icon.  So only the list
+    is checked here, not ``isValid()``.
+
+    A sublayer's URI is that detail's own ``uri()`` -- the same string ``toLayer`` hands to
+    ``QgsMapLayerFactory`` (``qgsprovidersublayerdetails.cpp:22-28``).  Deriving it by hand
+    is a guess about the provider's rule: GDAL spells subdatasets differently, and the
+    ``…\\dem.tif|name`` form ``encodeUri({"path", "layerName"})`` produced decodes with a
+    NULL ``layerName`` and builds an invalid raster (measured).  A sublayer also has to be
+    in that list: desktop's dialog only lists what exists
+    (``qgsprovidersublayersdialog.cpp:215``), so a name it never offered is not an answer.
 
     shortcut: this vets the file the caller named, not the sources that file
     itself names -- a local ``.vrt`` may carry a ``/vsicurl/`` or WMS source
@@ -202,55 +217,28 @@ def layer_source_uri(source: Path, sub_layer: str | None) -> str:
     become an input.
     """
 
-    if sub_layer is None:
-        return str(source)
-    from qgis.core import QgsProviderRegistry
-
-    return (
-        QgsProviderRegistry.instance()
-        .providerMetadata("ogr")
-        .encodeUri({"path": str(source), "layerName": sub_layer})
-    )
-
-
-def layer_source_recognised(
-    provider: str, source: Path, kind: LayerKind, sub_layer: str | None
-) -> None:
-    """按 provider 自己的清单回答“这个源认得出来吗”。
-
-    桌面版加图层的门槛是 provider 认不认得这个源，不是图层读不读得出来：它先问
-    ``providerMetadata.querySublayers``（``qgsapplayerhandling.cpp:1363-1391``），清单为空就在消息栏
-    报 "Invalid Data Source" 并且什么也不加；清单不空则把认出的子图层逐个加进图例，即使它们的
-    ``isValid()`` 为假（``:796-815``），坏掉的靠图例里的坏图层图标提示。所以这里只查清单，不查
-    ``isValid()``。子图层也必须在这份清单里：桌面版的选择框只列得出来的东西
-    （``qgsprovidersublayersdialog.cpp:215``），点不出一个不存在的名字。
-
-    Desktop's gate for adding a layer is whether the provider recognises the source, not
-    whether the layer loads: it asks ``providerMetadata.querySublayers`` first
-    (``qgsapplayerhandling.cpp:1363-1391``), reports "Invalid Data Source" and adds
-    nothing when the list is empty, and otherwise adds every recognised sublayer even
-    when its ``isValid()`` is false (``:796-815``), leaving a broken one to the legend's
-    bad-layer icon. So only the list is checked here, not ``isValid()``. A sub-layer has
-    to be in that list too: desktop's dialog only lists what exists
-    (``qgsprovidersublayersdialog.cpp:215``), so a name it never offered is not an answer.
-    """
-
     from qgis.core import Qgis, QgsProviderMetadata, QgsProviderRegistry
 
     metadata = QgsProviderRegistry.instance().providerMetadata(provider)
-    if not metadata.capabilities() & QgsProviderMetadata.QuerySublayers:
-        # 不能查子图层的 provider 就直接建图层（桌面版的 else 分支，``:1451-1469``）。
-        # A provider that cannot list sublayers gets its layer built directly (desktop's
-        # else branch, ``:1451-1469``).
-        return
-    wanted = Qgis.LayerType.Vector if kind == "vector" else Qgis.LayerType.Raster
-    recognised = [
-        detail for detail in metadata.querySublayers(str(source)) if detail.type() == wanted
-    ]
-    if not recognised:
-        raise FrameworkError(INVALID_LAYER, "the layer source could not be loaded")
-    if sub_layer is not None and all(detail.name() != sub_layer for detail in recognised):
-        raise FrameworkError(INVALID_LAYER, "the layer source has no such sub-layer")
+    recognised: list[Any] | None = None
+    if metadata.capabilities() & QgsProviderMetadata.QuerySublayers:
+        wanted = Qgis.LayerType.Vector if kind == "vector" else Qgis.LayerType.Raster
+        recognised = [
+            detail for detail in metadata.querySublayers(str(source)) if detail.type() == wanted
+        ]
+        if not recognised:
+            raise FrameworkError(INVALID_LAYER, "the layer source could not be loaded")
+    if sub_layer is None:
+        return str(source)
+    if recognised is None:
+        # 不能列子图层的 provider 也给不出子图层的 URI，桌面版那条分支同样不提供子数据集选择。
+        # A provider that cannot list sublayers cannot name one either; desktop's branch for
+        # it offers no subdataset choice at all (``:1451-1469``).
+        raise FrameworkError(INVALID_LAYER, "the provider cannot name a sub-layer")
+    for detail in recognised:
+        if detail.name() == sub_layer:
+            return detail.uri()
+    raise FrameworkError(INVALID_LAYER, "the layer source has no such sub-layer")
 
 
 def layer_kind(layer: Any) -> LayerSummaryKind:
@@ -332,13 +320,19 @@ class LayerAdd(
         # declared kind, 所以没人能自己指定一个 / so a caller cannot name one.
         provider = "ogr" if request.kind == "vector" else "gdal"
         layer_class = QgsVectorLayer if request.kind == "vector" else QgsRasterLayer
-        layer_source_recognised(provider, source, request.kind, request.sub_layer)
-        layer = layer_class(layer_source_uri(source, request.sub_layer), request.name, provider)
+        uri = layer_source_uri(provider, source, request.kind, request.sub_layer)
+        layer = layer_class(uri, request.name, provider)
         # 不查 isValid()：桌面版把 provider 认出的子图层直接加进图例，读不出来的靠坏图层图标提示
         # （qgsapplayerhandling.cpp:796-815 与 :1383-1390 的分工）。
         # No isValid() check: desktop adds every recognised sublayer to the legend and leaves a
         # broken one to the bad-layer icon. The two source lines above are that split.
-        ctx.project.addMapLayer(layer, request.add_to_legend)
+        #
+        # 永远进图例：桌面版的 addToLegend=false 是“先进工程、随后进分组”，图层仍在图例里
+        # （qgsapplayerhandling.cpp:802-808），所以这里没有那个参数。
+        # Always into the legend: desktop's addToLegend=false is "into the project, then into a
+        # group", and the layer is still in the legend (qgsapplayerhandling.cpp:802-808), so
+        # there is no such parameter here.
+        ctx.project.addMapLayer(layer)
         return LayerAddResult(
             layer_id=layer.id(),
             name=layer.name(),
@@ -468,6 +462,7 @@ class SumNumericFieldResult(Result):
     count: int
     skipped_null: int
     total: float
+    selected_only: StrictBool
     snapshot_project_epoch: int
 
 
@@ -482,6 +477,7 @@ class FieldValues:
     field_name: str
     values: tuple[float, ...]
     skipped_null: int
+    selected_only: bool
     project_epoch: int
 
 
@@ -495,6 +491,7 @@ class FieldSum:
     count: int
     total: float
     skipped_null: int
+    selected_only: bool
     project_epoch: int
 
 
@@ -538,9 +535,21 @@ class LayerSumNumericField(
             .setFlags(QgsFeatureRequest.NoGeometry)
             .setSubsetOfAttributes([index])
         )
+        # 跟随桌面版统计面板的选择集规则：有选择集时只算选中的，没有时算全部；面板那个开关
+        # 就是这件事（qgsstatisticalsummarydockwidget.cpp:210 读它、:218 交给
+        # getValuesIterator，后者在 qgsvectorlayerutils.cpp:73-80 选 getSelectedFeatures
+        # 还是 getFeatures）。没有新参数：那是图层的状态，不是调用方的一个问句。
+        # Follow desktop's statistics-panel selection rule: with a selection, sum the selected
+        # features only; without one, sum them all. That is exactly what the panel's checkbox
+        # does (it is read at qgsstatisticalsummarydockwidget.cpp:210, handed to
+        # getValuesIterator at :218, which picks getSelectedFeatures or getFeatures at
+        # qgsvectorlayerutils.cpp:73-80). No new parameter: this is layer state, not a question
+        # for the caller.
+        selected_only = bool(layer.selectedFeatureCount())
+        features = layer.getSelectedFeatures(read) if selected_only else layer.getFeatures(read)
         values: list[float] = []
         skipped = 0
-        for feature in layer.getFeatures(read):
+        for feature in features:
             value = feature[index]
             # QGIS 把空属性交回它自己的 NULL 单例（一个 QVariant）/ QGIS hands a null
             # attribute back as its own NULL singleton (a QVariant), 有些构建则返回 None /
@@ -565,6 +574,7 @@ class LayerSumNumericField(
             field_name=request.field_name,
             values=tuple(values),
             skipped_null=skipped,
+            selected_only=selected_only,
             project_epoch=ctx.lifecycle.current_epoch,
         )
 
@@ -595,6 +605,7 @@ class LayerSumNumericField(
             count=count,
             total=total,
             skipped_null=snapshot.skipped_null,
+            selected_only=snapshot.selected_only,
             project_epoch=snapshot.project_epoch,
         )
 
@@ -611,6 +622,7 @@ class LayerSumNumericField(
             count=result.count,
             skipped_null=result.skipped_null,
             total=result.total,
+            selected_only=result.selected_only,
             snapshot_project_epoch=result.project_epoch,
         )
 

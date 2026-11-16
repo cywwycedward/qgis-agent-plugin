@@ -54,6 +54,7 @@ from qgis_agent_plugin.core.models import (
     INVALID_INPUT,
     INVALID_LAYER,
     LAYER_NOT_FOUND,
+    LAYER_NOT_IN_TREE,
     OUTPUT_VALIDATION_FAILED,
     PATH_NOT_ALLOWED,
     PROJECT_OPEN_FAILED,
@@ -425,12 +426,47 @@ def at_06_submit_field_sum(ctx: Context) -> str:
     equal(values["total"], fixtures.POP_TOTAL, "the sum of pop")
     equal(values["count"], fixtures.POP_COUNT, "the number of summed values")
     equal(values["skipped_null"], fixtures.POP_NULLS, "the number of null values skipped")
+    equal(values["selected_only"], False, "no selection, so the whole layer")
     equal(values["snapshot_project_epoch"], ctx.lifecycle.current_epoch, "the snapshot epoch")
     return (
         f"QgsTask added (id {watch.added[0]}) and deleted by QGIS (id {watch.deleted[0]}), "
         f"status {record.status}, progress readable ({during.progress} while live, 100 at the "
         f"end); pop sum {values['total']} over {values['count']} values, "
-        f"{values['skipped_null']} nulls — matches the baseline"
+        f"{values['skipped_null']} nulls — matches the baseline, selected_only=false"
+    )
+
+
+def at_06b_sum_follows_the_selection(ctx: Context) -> str:
+    """有选择集时只算选中的：桌面版统计面板的“仅选中要素”开关就是这件事。
+
+    With a selection, only the selected features are summed: the statistics panel's
+    "selected features only" switch (qgsstatisticalsummarydockwidget.cpp:210, :218 ->
+    qgsvectorlayerutils.cpp:73-80).
+    """
+
+    layer_id = cities_layer(ctx, "at06b cities")
+    layer = project_layer(layer_id)
+    layer.selectByExpression("pop > 50")
+    equal(layer.selectedFeatureCount(), 2, "the features the expression selected")
+
+    submitted = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+    record = ctx.wait_terminal(submitted.execution_id)
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"the field sum: {record.error}")
+    values = result_of(record)
+    equal(values["selected_only"], True, "the record says the selection was used")
+    equal(values["count"], 2, "the summed values are the selected ones")
+    equal(values["total"], 160.0, "the sum of pop over the selection")
+    equal(values["skipped_null"], 0, "the selection holds no null")
+
+    layer.removeSelection()
+    again = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+    second = ctx.wait_terminal(again.execution_id)
+    equal(second.status, ExecutionStatus.SUCCEEDED, "the sum after clearing the selection")
+    equal(result_of(second)["selected_only"], False, "no selection, so the whole layer")
+    equal(result_of(second)["total"], fixtures.POP_TOTAL, "back to the whole layer")
+    return (
+        "with 2 of 5 cities selected the sum is count=2, total=160.0 and selected_only=true; "
+        "after removeSelection() the same call is selected_only=false with the layer's 200.0"
     )
 
 
@@ -1032,16 +1068,44 @@ def at_20_invalid_source(ctx: Context) -> str:
 
 
 def at_21_layer_without_tree_node(ctx: Context) -> str:
+    """加载来的工程里可以有不图层里的图层；两种读照样给答案，切可见性无从下手。
+
+    A loaded project can hold a layer that is not in the legend; both reads still answer,
+    and toggling its visibility has nothing to act on.
+    """
+
+    from qgis.core import QgsProject, QgsVectorLayer
+
     reset_project(ctx)
-    layer_id = ctx.add_layer(ctx.fixtures.cities, "at21 not in the tree", add_to_legend=False)
+    # layer.add 已经没有“不进图例”的参数了（A4），所以这里直接造工程文件能表达的那个形状：
+    # 图层进注册表、不进图层树。
+    # layer.add no longer has an "into the legend or not" parameter (A4), so build the shape a
+    # project file can express directly: in the registry, absent from the tree.
+    layer = QgsVectorLayer(
+        f"{ctx.fixtures.cities}|layername={fixtures.CITIES_LAYER}",
+        "at21 not in the tree",
+        "ogr",
+    )
+    require(layer.isValid(), "the probe layer is not valid")
+    require(QgsProject.instance().addMapLayer(layer, False) is not None, "the layer was not added")
+    require(
+        QgsProject.instance().layerTreeRoot().findLayer(layer.id()) is None,
+        "the probe layer ended up in the tree",
+    )
+
     rows = result_of(ctx.run("layer.list"))["layers"]
-    row = next(item for item in rows if item["layer_id"] == layer_id)
+    row = next(item for item in rows if item["layer_id"] == layer.id())
     equal(row["in_layer_tree"], False, "in_layer_tree")
     equal(row["visible"], None, "visible")
     equal(row["effective_visible"], None, "effective_visible")
+
+    record = ctx.run("layer.set_visibility", {"layer_id": layer.id(), "visible": True})
+    equal(record.status, ExecutionStatus.FAILED, "set_visibility on a tree-less layer")
+    equal(error_code(record), LAYER_NOT_IN_TREE, "the code for a tree-less layer")
     return (
         "a registered layer with no layer tree node lists as in_layer_tree=false, "
-        "visible=null and effective_visible=null"
+        "visible=null and effective_visible=null, and set_visibility is "
+        "FAILED(LAYER_NOT_IN_TREE)"
     )
 
 
@@ -1353,10 +1417,39 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
         1,
         "the project after a refused sub-layer name",
     )
+    # 栅格也有子数据集清单：同一个源、kind=raster、点名那个子数据集也能加（A5）。
+    # A raster has a subdataset list too: the same kind of call with kind=raster and the
+    # name the provider reports (A5).
+    from qgis.core import QgsProviderRegistry
+
+    gdal = QgsProviderRegistry.instance().providerMetadata("gdal")
+    raster_name = gdal.querySublayers(str(ctx.fixtures.raster))[0].name()
+    raster_record = ctx.run(
+        "layer.add",
+        {
+            "kind": "raster",
+            "source_path": str(ctx.fixtures.raster),
+            "name": "at28 raster sub",
+            "sub_layer": raster_name,
+        },
+    )
+    equal(
+        raster_record.status,
+        ExecutionStatus.SUCCEEDED,
+        f"layer.add(kind='raster', sub_layer={raster_name!r}): {raster_record.error}",
+    )
+    raster_layer_id = result_of(raster_record)["layer_id"]
+    equal(
+        QgsProject.instance().mapLayer(raster_layer_id).providerType(),
+        "gdal",
+        "the provider of a raster sub-dataset add",
+    )
     return (
         f"layer.add(sub_layer='{fixtures.ROADS_LAYER}') on {source.name!r} SUCCEEDED, provider "
-        f"ogr, featureCount 1 (cities holds 5): the OGR encoder chose the named table; a "
-        f"sub_layer the provider never reported is FAILED(INVALID_LAYER) and adds nothing"
+        f"ogr, featureCount 1 (cities holds 5): the provider's own sublayer URI chose the named "
+        f"table; a sub_layer the provider never reported is FAILED(INVALID_LAYER) and adds "
+        f"nothing; and kind='raster' with the name gdal reports ({raster_name!r}) SUCCEEDED as "
+        f"a gdal layer"
     )
 
 
@@ -4155,7 +4248,11 @@ CASES = (
     ("AT-03", at_03_run_sync),
     ("AT-04", at_04_submit_layer_add),
     ("AT-05", at_05_run_sync_refuses_background),
-    ("AT-06", at_06_submit_field_sum),
+    (
+        "AT-06",
+        at_06_submit_field_sum,
+    ),
+    ("AT-06B", at_06b_sum_follows_the_selection),
     ("AT-07", at_07_worker_exception),
     ("AT-08", at_08_cancel_running),
     ("AT-08B", at_08b_cancel_scheduled),

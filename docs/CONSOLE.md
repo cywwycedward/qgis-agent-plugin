@@ -169,9 +169,15 @@ engine.get(submitted.execution_id).status  # 下一轮事件循环后
 submit -> QUEUED
 observed statuses (polling): QUEUED -> SCHEDULED -> SUCCEEDED    # RUNNING 落在两次采样之间
 result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
-         "skipped_null": 1, "total": 225.0, "snapshot_project_epoch": 0}
+         "skipped_null": 1, "total": 225.0, "selected_only": false,
+         "snapshot_project_epoch": 0}
 progress: 100.0
 ```
+
+选择集跟随桌面版统计面板的规则：有选择集时只算选中的要素，没有时算全部；结果里的
+`selected_only` 如实说这次用了哪一种（面板上那个“仅选中要素”开关就是它，没有新参数）。实测（选中
+2 个城市、`pop > 50`）：`count=2`、`total=160.0`、`selected_only=true`；`removeSelection()` 之后
+同一调用回到 `count=3`、`total=200.0`、`selected_only=false`。
 
 几条实测到的事实：
 
@@ -298,12 +304,11 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
 | `run_sync("no.such", {})` | 抛 `FrameworkError: OPERATION_NOT_FOUND` |
 | `get("no-such-id")` | 抛 `FrameworkError: EXECUTION_NOT_FOUND` |
 | 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
-| `layer.add` 传 `add_to_legend="true"` | `FAILED` `INVALID_INPUT` at `add_to_legend` |
 | `layer.add` 的路径是相对路径 | `FAILED` `PATH_NOT_ALLOWED` |
 | `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
-| `layer.add(kind="raster", sub_layer="x", ...)` | `FAILED` `INVALID_INPUT` at `<root>` |
+| `layer.add` 的 `sub_layer` 不在 provider 的清单里（矢量或栅格） | `FAILED` `INVALID_LAYER` |
 | `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |
-| `layer.set_visibility` 对一个 `add_to_legend=false` 的图层 | `FAILED` `LAYER_NOT_IN_TREE` |
+| `layer.set_visibility` 对一个不在图层树里的图层（加载来的工程可以这样） | `FAILED` `LAYER_NOT_IN_TREE` |
 | `layer.sum_numeric_field` 对文本字段 | `FAILED` `INVALID_FIELD_TYPE` |
 | `project.save` 不给路径且工程无关联文件 | `FAILED` `PROJECT_PATH_REQUIRED` |
 | `project.create` 传 `crs_authid="NOT:A_CRS"` | `FAILED` `INVALID_CRS`（当前工程未被替换） |

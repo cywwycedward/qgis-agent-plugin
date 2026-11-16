@@ -143,7 +143,6 @@ _FIELD_LABELS = {
     "source_path": "来源路径",
     "name": "名称",
     "sub_layer": "子图层",
-    "add_to_legend": "加入图例",
     "layer_id": "图层 ID",
     "visible": "可见",
     "field_name": "字段名",
