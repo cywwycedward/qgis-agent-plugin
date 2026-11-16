@@ -21,7 +21,7 @@ npm run check      # lint + 格式 + 规范组测试（12 条，约 5 s）
 ```
 
 规范组断言的是全仓规则（注释双语、导入位置、文档索引、注册面），**每次改完都要绿**。其余按需：
-`npm run test`（全量 744）、裸解释器 `pytest`（导入层）、`run_acceptance.py`（真实 QGIS，98 条）。
+`npm run test`（全量 721）、裸解释器 `pytest`（导入层）、`run_acceptance.py`（真实 QGIS，93 条）。
 判据、按改动类型的对应表、以及"裸解释器少 3 个用例属预期"这类坑，见 `docs/agents/DEVELOP.md` §2.3。
 
 ## 目录

@@ -138,18 +138,18 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 ```
 
 通过的判据（三行都要在输出里）：`All checks passed`、`N files already formatted`、
-`12 passed, 666 deselected`。
+`12 passed, 709 deselected`。
 
 **按需加跑**（碰了什么跑什么）：
 
 | 改动 | 加跑 | 通过长什么样 |
 | --- | --- | --- |
-| `src/` 里任何逻辑 | `npm run test`（全量） | `678 passed` |
-| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `625 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
+| `src/` 里任何逻辑 | `npm run test`（全量） | `721 passed` |
+| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `668 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
 | 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
 | 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
 | 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
-| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `678 passed` |
+| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `721 passed` |
 | 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
 | 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
 

@@ -1,4 +1,4 @@
-﻿# 静态分析器自己的解释器里没有 qgis/pydantic，所以本文件只关掉“找不到模块”这一类报告；能不能
+# 静态分析器自己的解释器里没有 qgis/pydantic，所以本文件只关掉“找不到模块”这一类报告；能不能
 # 真的加载由 QGIS 解释器的验收跑证明。
 # The analyzer's own interpreter has no qgis/pydantic, so this file turns off only the
 # missing-module report; whether it really loads is proven by the QGIS interpreter's run.
