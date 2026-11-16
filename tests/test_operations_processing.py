@@ -67,9 +67,9 @@ LOGGER_NAME = "qgis_agent_plugin.operations.processing"
 
 
 class FakeProject:
-    """一次调用手里的工程句柄；processing 的操作只把它交给 QGIS。
+    """一次调用手里的工程句柄；processing 的操作不直接用它。
 
-    The project handle one call holds; a processing operation only hands it to QGIS.
+    The project handle one call holds; a processing operation does not read it.
     """
 
 
@@ -623,7 +623,7 @@ def test_the_list_parameters_accept_only_an_empty_object() -> None:
 
 def test_an_undeclared_field_is_refused_on_every_model() -> None:
     with pytest.raises(ValidationError):
-        ops.AlgorithmSummary(id="a", name="A", group="G", runnable=True)
+        ops.AlgorithmSummary(id="a", name="A", group="G", provider="native")
     with pytest.raises(ValidationError):
         ops.AlgorithmDetails(id="a", name="A", short_description="", help="", group="G")
     with pytest.raises(ValidationError):
@@ -1440,6 +1440,19 @@ def test_a_failed_run_is_reported_as_internal_error_with_qgis_sentence(
     assert native in caplog.text
     assert "RunFailed" in caplog.text
     assert "the algorithm did not finish" in caplog.text
+
+
+def test_an_empty_exception_text_falls_back_to_the_type_name(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis)
+    fake_qgis.processing.error = RunFailed()
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis)
+
+    # 记录的消息不能是空串：QGIS 没给文本时用异常的类型名。
+    # A record's message is never empty: with no text from QGIS the exception's type name is used.
+    assert caught.value.code == INTERNAL_ERROR
+    assert caught.value.message == "RunFailed"
 
 
 def test_a_failed_run_reports_the_call_shape_and_no_result(fake_qgis: FakeQgis) -> None:

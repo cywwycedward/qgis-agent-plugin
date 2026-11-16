@@ -2165,9 +2165,9 @@ def processing_probe_provider() -> None:
     )
 
     class NonJsonResult(QgsProcessingAlgorithm):
-        """先交出一个真的结果图层，再交一个没有 JSON 映像的值。
+        """先交出一个真的结果图层的 id，再交一个没有 JSON 映像的值。
 
-        Hands over a real result layer, then a value with no JSON image.
+        Hands over the id of a real result layer, then a value with no JSON image.
         """
 
         def name(self) -> str:
@@ -2531,8 +2531,8 @@ def p05_unknown_key(ctx: Context) -> str:
     equal(len(project_layer_ids()), len(before) + 1, "the layers after the run")
     return (
         "P5_NOT_A_PARAMETER reached QGIS untouched and native:buffer SUCCEEDED, adding a valid "
-        f"{layer.featureCount()}-feature layer to the project: the plugin has no parameter-name "
-        "whitelist any more, so an undeclared key is QGIS's to ignore"
+        f"{layer.featureCount()}-feature layer to the project: an undeclared key is QGIS's to "
+        "ignore"
     )
 
 
@@ -2781,7 +2781,7 @@ def p12_input_path_policy(ctx: Context) -> str:
         "the CRS of the reprojected result",
     )
     return (
-        f"{outside_evidence}, so no file is refused by the plugin any more; "
+        f"{outside_evidence}; "
         "TARGET_CRS='EPSG:32633' on the same entry point SUCCEEDED and the result really is in "
         "EPSG:32633, so a CRS code is still handed through as data"
     )

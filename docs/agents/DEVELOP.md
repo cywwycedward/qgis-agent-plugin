@@ -1192,7 +1192,7 @@ absolute_path(raw: str) -> Path
 | 参数 | 无 |
 | 返回 | `algorithms`（按（分组名、算法名、id）排序的 `{id, name, group}`；扁平投影，工具箱的 provider/分组树不复刻） |
 | 业务错误码 | 无 |
-| 行为 | 列工具箱能看到的算法：`HideFromToolbox` 总是挡掉，`KnownIssues` 只在 `Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES` 关着时挡掉（缺键时默认关）；没有 allow-list、没有“能不能跑”的字段；`get_algorithm_info` 仍能读被挡掉的算法 |
+| 行为 | 列工具箱能看到的算法：`HideFromToolbox` 总是挡掉，`KnownIssues` 只在 `Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES` 关着时挡掉（缺键时默认关）；`get_algorithm_info` 仍能读被挡掉的算法 |
 
 #### processing.get_algorithm_info
 
@@ -1210,7 +1210,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `algorithm_id`（≥1）、`parameters`（以原生参数名为键的 JSON 树）、`continue_on_crs_mismatch`（StrictBool，默认 `false`；参数 CRS 不一致时那句“要继续吗”的答案，QGIS 的默认按钮是“否”） |
 | 返回 | `algorithm_id`、`outputs`（原生键下的输出；图层输出是工程里的图层 id 或调用方给的路径，取决于 QGIS 交给 `runAndLoadResults` 的值）、`messages`（`level`/`text`/`fatal`，七种级别） |
 | 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象；未知算法 id，消息是运行路径那句 `Error: Algorithm <id> not found`（含结尾换行）；参数值过不了 QGIS 的 `checkValueIsAcceptable`；输出值过不了 `isSupportedOutputValue`；`checkParameterValues` 拒绝；CRS 不一致且 `continue_on_crs_mismatch=false`）、`INTERNAL_ERROR`（`runAndLoadResults` 抛异常，消息是异常的原文；结果无无损 JSON 形式） |
-| 行为 | 运行前的问题都是 QGIS 自己的函数，顺序与参数面板一致：`createAlgorithmById` 取实例，补上控件会交出的值（缺席的可见参数用 `defaultValueForGui()`，缺席的输出参数是临时输出，可选且不默认创建的保持缺席），按参数定义顺序逐个问 `checkValueIsAcceptable` / 对每个有值的输出问 `isSupportedOutputValue`，过一遍 `preprocessParameters`，问 CRS 不一致的确认（受 `Processing/Configuration/WARN_UNMATCHING_CRS` 约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息是 QGIS 对同一问题说的那一句。通过后把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.runAndLoadResults()`：结果图层由 QGIS 的后处理加载进当前工程（磁盘输出也一样），图层名、样式与结果分组都由 QGIS 决定。七个 `push*`/`reportError` 覆写都先调 `super()`，再把同一条文本记进 `messages`；提供者的 `warningMessage()` 在运行前用 `reportError` 报出；未声明的参数键、远程 URI 一律原样透传；运行失败抛 `FrameworkError(INTERNAL_ERROR, 异常原文)`，`FAILED` 记录没有 `messages` 字段，所以那一批消息另有一份进本地日志 |
+| 行为 | 运行前的问题都是 QGIS 自己的函数，顺序与参数面板一致：`createAlgorithmById` 取实例，补上控件会交出的值（缺席的可见参数用 `defaultValueForGui()`，缺席的输出参数是临时输出，可选且不默认创建的保持缺席），按参数定义顺序逐个问 `checkValueIsAcceptable` / 对每个有值的输出问 `isSupportedOutputValue`，过一遍 `preprocessParameters`，问 CRS 不一致的确认（受 `Processing/Configuration/WARN_UNMATCHING_CRS` 约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息是 QGIS 对同一问题说的那一句。通过后把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.runAndLoadResults()`：结果图层由 QGIS 的后处理加载进当前工程（磁盘输出也一样），图层名、样式与结果分组都由 QGIS 决定；后处理没能读回某个输出图层时记录仍是 `SUCCEEDED`（`runAndLoadResults` 丢掉 `handleAlgorithmResults` 的返回值），错误文本在 `messages` 里。七个 `push*`/`reportError` 覆写都先调 `super()`，再把同一条文本记进 `messages`；提供者的 `warningMessage()` 在运行前用 `reportError` 报出；未声明的参数键、远程 URI 一律原样透传；运行失败抛 `FrameworkError(INTERNAL_ERROR, 异常原文（空则类型名）)`，`FAILED` 记录没有 `messages` 字段，所以那一批消息另有一份进本地日志 |
 | 输出目标 | 输出参数是调用方的回答，缺席不是“随便”：参数面板对每个输出参数都自带一个值，默认就是临时输出，所以缺席的必填输出会被补成 `QgsProcessing.TEMPORARY_OUTPUT`（字符串，JSON 安全），可选且不默认创建的输出保持缺席（面板的“跳过输出”），显式 `None` 也是跳过输出。远程字形先过 `isSupportedOutputValue`，再由 QGIS 打开。实测：`native:buffer` + `TEMPORARY_OUTPUT`（或缺席）→ 结果图层进工程（名字是输出参数的描述）；`gdal:convertformat` + 磁盘路径 → 文件写出、`outputs` 里就是该路径，图层由后处理读进工程；`gdal:buffervectors` + `memory:` → `INVALID_INPUT`、消息 `This algorithm only supports disk-based outputs`；`.zzz` 这种扩展名同样被拒（不然 QGIS 会自己补成 `.zzz.gpkg` 写出去）；`/vsicurl/…` 目标过判据后由 QGIS 报错 |
 
 ### 7.7 一次调用会碰到的其它码
@@ -1221,7 +1221,7 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | `TOO_MANY_EXECUTIONS` | `submit` 时排队数已达 `max_pending`（实测：32 时第 33 个 `submit` 得到 `FAILED`） |
 | `OUTPUT_VALIDATION_FAILED` | Operation 的返回值不合它自己声明的输出模型 |
-| `INTERNAL_ERROR` | 未预期异常；`message` 是下面几种之一：`<异常类型名>: unexpected failure`、`QGIS did not create a new project`、`the task ended without a result`、`the completion of this execution failed`、`<id>: <旧状态> -> <新状态> is not a transition`、`<id>: <状态> is final and cannot change` |
+| `INTERNAL_ERROR` | 未预期异常；`message` 是下面几种之一：`<异常类型名>: unexpected failure`、`QGIS did not create a new project`、`the task ended without a result`、`the completion of this execution failed`、`<id>: <旧状态> -> <新状态> is not a transition`、`<id>: <状态> is final and cannot change`；`processing.run_algorithm` 的失败是另一种：算法自己报的原文（§7.6），异常文本为空时用它的类型名 |
 
 ---
 

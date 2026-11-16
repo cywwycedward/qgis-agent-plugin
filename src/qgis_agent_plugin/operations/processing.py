@@ -4,8 +4,8 @@
 那个工程，所以它挪不到后台线程。
 
 ``list_algorithms`` 是注册表的扁平投影：``QgsProcessingRegistry.algorithms()`` 减去工具箱挡掉的
-算法（``HideFromToolbox`` 总是挡，``KnownIssues`` 跟着 ``SHOW_ALGORITHMS_KNOWN_ISSUES`` 开关），按
-分组名、算法名、id 排序；工具箱的 provider/分组树不复刻。
+算法（``HideFromToolbox`` 总是挡，``KnownIssues`` 只在 ``SHOW_ALGORITHMS_KNOWN_ISSUES`` 关着时挡），
+按分组名、算法名、id 排序；工具箱的 provider/分组树不复刻。
 
 ``get_algorithm_info`` 读一条算法自己的定义：``algorithmHelp()`` 印的那几个字段，隐藏参数跳过，
 枚举参数带它自己的选项列表。
@@ -30,7 +30,7 @@ project and the layers it holds, and a run hands result layers to that project, 
 cannot move to a worker.
 
 ``list_algorithms`` is a flat projection of the registry: ``QgsProcessingRegistry.algorithms()``
-minus what the toolbox hides (``HideFromToolbox`` always, ``KnownIssues`` while
+minus what the toolbox hides (``HideFromToolbox`` always, ``KnownIssues`` unless
 ``SHOW_ALGORITHMS_KNOWN_ISSUES`` is on), ordered by group name, algorithm name and id; the
 toolbox's provider/group tree is not reproduced.
 
@@ -691,7 +691,7 @@ class ProcessingRunAlgorithm(
                     "processing %s reported %s: %s", request.algorithm_id, record.level, record.text
                 )
             _LOGGER.exception("processing.runAndLoadResults(%s) raised", request.algorithm_id)
-            raise FrameworkError(INTERNAL_ERROR, str(error)) from error
+            raise FrameworkError(INTERNAL_ERROR, str(error) or type(error).__name__) from error
 
         return ProcessingRunAlgorithmResult(
             algorithm_id=request.algorithm_id,
