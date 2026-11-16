@@ -137,8 +137,6 @@ class FakeRenderer:
 
     def __init__(self, renderer_type: str) -> None:
         self._renderer_type = renderer_type
-        self.written: list[Any] = []
-        self.read: Any = None
 
     def type(self) -> str:
         return self._renderer_type
@@ -154,7 +152,6 @@ class FakeRenderer:
         child = document.createElement("rasterrenderer")
         child.attributes["type"] = self._renderer_type
         element.appendChild(child)
-        self.written.append(child)
 
 
 class FakeElement:
@@ -189,12 +186,6 @@ class FakeElement:
 
     def isNull(self) -> bool:
         return self.tag == ""
-
-    def cloneNode(self, deep: bool) -> FakeElement:
-        clone = FakeElement(self.tag, self.attributes)
-        if deep:
-            clone.children = [child.cloneNode(True) for child in self.children]
-        return clone
 
     def firstChildElement(self, tag: str) -> FakeElement:
         for child in self.children:
@@ -275,25 +266,18 @@ class FakeLayer:
         self.provider = provider
         self.authid = authid
         self.valid = valid
-        # 样式读侧：几何类型、渲染器和一次原生导出。
-        # 几何类型、渲染器、原生导出。
-        # The style read side.
-        # A geometry type, a renderer and a native export.
-        self.geometry = 0
+        # 样式读侧：一个渲染器和一次原生导出。
+        # The style read side: a renderer and a native export.
         self.renderer_value: FakeRenderer | None = None
         self.style_xml = "<qgis/>"
         self.style_error = ""
         self.style_exports: list[tuple[Any, Any]] = []
-        # 写侧：装上了什么、图层里有什么、以及调用记录。
-        # 装上了什么、图层里有什么、调用记录。
-        # The setter side.
-        # What was installed and what was called.
+        # 写侧：装上了什么与调用记录。
+        # The setter side: what was installed and what was called.
         self.renderer_sets: list[Any] = []
         self.repaints = 0
         self.events: list[str] = []
-        self.band_count = 1
         self.data_provider: Any = None
-        self.field_list: list[Any] = []
         # 栅格类型：默认普通栅格（GrayOrUndefined=0）。
         # The raster type: an ordinary raster by default (GrayOrUndefined = 0).
         self.raster_type = 0
@@ -319,9 +303,6 @@ class FakeLayer:
     def isSpatial(self) -> bool:
         return self.spatial
 
-    def geometryType(self) -> int:
-        return self.geometry
-
     def rasterType(self) -> int:
         return self.raster_type
 
@@ -332,9 +313,6 @@ class FakeLayer:
         self.style_exports.append((context, categories))
         document.setContent(self.style_xml)
         return self.style_error
-
-    def bandCount(self) -> int:
-        return self.band_count
 
     def dataProvider(self) -> Any:
         return self.data_provider
@@ -544,7 +522,6 @@ class FakeQgis:
         self.events: list[str] = []
         self.built: list[Any] = []
         self.loaded_documents: list[Any] = []
-        self.raster_data_type = 1  # 对应 Qgis.DataType.Byte / Qgis.DataType.Byte
 
         class QgsMapLayer:
             """一份样式分类的位标记：每项一位，另有原生那个“全部”。
@@ -643,6 +620,10 @@ class FakeQgis:
                     super().__init__(renderer_type)
                     self.provider = provider
                     self.arguments = arguments
+                    # ``create`` 把喂给它的元素记在这里，用例查的就是它。
+                    # ``create`` records the element it was handed here; that is what the tests
+                    # look at.
+                    self.read: Any = None
                     holder.built.append(self)
 
                 @staticmethod
@@ -781,7 +762,7 @@ def fake_module(name: str, **attributes: Any) -> types.ModuleType:
 @pytest.fixture
 def data_root(tmp_path: Path) -> Path:
     # 根目录里带个空格。
-    # 真实的 ogr URI 必须能扈住它。
+    # 真实的 ogr URI 必须能扛住它。
     # A space in the root.
     # The real ogr URI has to survive one.
     root = tmp_path / "data root"

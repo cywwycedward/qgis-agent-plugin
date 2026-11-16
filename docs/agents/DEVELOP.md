@@ -1172,7 +1172,7 @@ absolute_path(raw: str) -> Path
 | 业务错误码 | `INVALID_INPUT`（XML 解析失败——消息是解析器那句带行列号的话；解析出来了但没有这门图层类型认得的渲染器；类型不在这门图层的候选清单里）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（未预期异常，由引擎兜底） |
 | 行为 | 整份渲染器先建好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式，旧渲染器还在；矢量用 `QgsFeatureRenderer.load()`（QGIS 读样式文件时同一次调用），栅格用各类型自己的 `create(element, provider)`（注册表里那个建渲染器的函数，Python 拿不到函数指针所以按类型名写明）。只装候选清单里的类型，理由分两半：栅格那边实测有类型会被 QGIS 默不作声地保留（普通栅格上的 `singlebandcolordata`，报告成功就是谎报），矢量那边是下拉框已经按几何筛过、GUI 表达不出那个组合。类型名解析完就在文档根元素上，所以这道检查在建渲染器之前（建那一步会进注册表调对应元数据；清单里的类型照旧建）。成功后 `triggerRepaint()` + `setDirty(True)`，与属性对话框的 Apply 两步相同；只有这一个样式 op 是 destructive |
 
-文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读，所以能装的东西就等于注册表能建的东西（`heatmapRenderer`、第三方注册的矢量渲染器都装得上），没有本地的一份白名单。
+文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读。能装什么由注册表按图层类型给的清单决定，这里不维护另一张表：`heatmapRenderer` 只在列它的图层类型上装得上（多边形图层上同一份文档会被拒），而清单里、元数据是 Python 实现的那一类会在重建时结束进程（见本文末的“未确认”）。
 
 #### processing.list_algorithms
 
