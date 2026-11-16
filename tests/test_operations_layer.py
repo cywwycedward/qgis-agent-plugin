@@ -299,6 +299,9 @@ class FakeLayer:
         self.band_count = 1
         self.data_provider: Any = None
         self.field_list: list[Any] = []
+        # 栅格类型：默认普通栅格（GrayOrUndefined=0）。
+        # The raster type: an ordinary raster by default (GrayOrUndefined = 0).
+        self.raster_type = 0
 
     def id(self) -> str:
         return self.layer_id
@@ -317,6 +320,9 @@ class FakeLayer:
 
     def geometryType(self) -> int:
         return self.geometry
+
+    def rasterType(self) -> int:
+        return self.raster_type
 
     def renderer(self) -> FakeRenderer | None:
         return self.renderer_value
@@ -361,9 +367,13 @@ class FakeGroup:
         return self.checked
 
     def isVisible(self) -> bool:
-        return self.checked and (self.parent is None or self.parent.checked)
+        return self.checked and (self.parent is None or self.parent.isVisible())
 
     def setItemVisibilityChecked(self, visible: bool) -> None:
+        # 原生对同值早返回（qgslayertreenode.cpp:98-99），所以不记录一次空写。
+        # Native returns early on the same value, so a no-op write is not recorded.
+        if self.checked == visible:
+            return
         self.sets.append(visible)
         self.checked = visible
 
@@ -388,9 +398,11 @@ class FakeNode:
         return self.checked
 
     def isVisible(self) -> bool:
-        return self.checked and (self.parent is None or self.parent.checked)
+        return self.checked and (self.parent is None or self.parent.isVisible())
 
     def setItemVisibilityChecked(self, visible: bool) -> None:
+        if self.checked == visible:
+            return
         self.sets.append(visible)
         self.checked = visible
 
@@ -450,6 +462,11 @@ class FakeQgis:
         self.encoded: list[dict[str, str]] = []
         self.provider_names: list[str] = []
         self.valid = True
+        # provider 的清单：``querySublayers`` 报什么，能不能查。
+        # What the provider's ``querySublayers`` reports, and whether it can be asked.
+        self.sublayer_names: list[str] = ["roads"]
+        self.sublayer_queries: list[str] = []
+        self.query_sublayers_capability = 4  # 对应 QgsProviderMetadata.QuerySublayers
         holder = self
 
         # 活的注册表：渲染器名字要从这里读，不能猜。
@@ -475,7 +492,12 @@ class FakeQgis:
             "QgsMapLayer",
             (),
             {category: 1 << position for position, category in enumerate(VECTOR_CATEGORIES)}
-            | {"AllStyleCategories": (1 << len(VECTOR_CATEGORIES)) - 1},
+            | {
+                "AllStyleCategories": (1 << len(VECTOR_CATEGORIES)) - 1,
+                # 原生那个“一个都不选”的位标志（实测 ``QgsMapLayer.StyleCategories()`` 为 0）。
+                # The native "nothing selected" flag (measured: it is 0).
+                "StyleCategories": staticmethod(lambda: 0),
+            },
         )
 
         class QgsReadWriteContext:
@@ -501,8 +523,12 @@ class FakeQgis:
                 return list(holder.raster_renderer_types)
 
         Qgis = types.SimpleNamespace(
-            GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2),
+            GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2, Unknown=3, Null=4),
             DataType=types.SimpleNamespace(Byte=1, Float32=6),
+            LayerType=types.SimpleNamespace(Vector=0, Raster=1),
+            RasterLayerType=types.SimpleNamespace(
+                GrayOrUndefined=0, Palette=1, MultiBand=2, SingleBandColorData=3
+            ),
         )
         QVariant = FakeQVariant
 
@@ -735,20 +761,58 @@ class FakeQgis:
                 self.color = color
                 record("singlecolor", self)
 
-        class OgrMetadata:
+        class FakeSublayerDetails:
+            def __init__(self, name: str, uri: str, layer_type: int) -> None:
+                self._name = name
+                self._uri = uri
+                self._type = layer_type
+
+            def name(self) -> str:
+                return self._name
+
+            def uri(self) -> str:
+                return self._uri
+
+            def type(self) -> int:
+                return self._type
+
+        class ProviderMetadata:
+            """一个 provider 的元数据：会按自己的 key 报对应类型的子图层。
+
+            One provider's metadata: it reports sublayers of its own layer type.
+            """
+
+            def __init__(self, key: str) -> None:
+                self.key = key
+
             def encodeUri(self, parts: dict[str, str]) -> str:
                 holder.encoded.append(dict(parts))
                 return f"{parts['path']}|layername={parts['layerName']}"
+
+            def capabilities(self) -> int:
+                return holder.query_sublayers_capability
+
+            def querySublayers(self, uri: str) -> list[Any]:
+                holder.sublayer_queries.append(uri)
+                layer_type = 0 if self.key == "ogr" else 1
+                return [
+                    FakeSublayerDetails(name, f"{uri}|layername={name}", layer_type)
+                    for name in holder.sublayer_names
+                ]
+
+        class QgsProviderMetadata:
+            QuerySublayers = 4
 
         class QgsProviderRegistry:
             @staticmethod
             def instance() -> FakeQgis:
                 return holder
 
-        self.metadata = OgrMetadata()
         self.QgsVectorLayer = QgsVectorLayer
         self.QgsRasterLayer = QgsRasterLayer
+        self.ProviderMetadata = ProviderMetadata
         self.QgsProviderRegistry = QgsProviderRegistry
+        self.QgsProviderMetadata = QgsProviderMetadata
         self.QgsMapLayer = QgsMapLayer
         self.QgsReadWriteContext = QgsReadWriteContext
         self.QgsApplication = QgsApplication
@@ -780,7 +844,7 @@ class FakeQgis:
 
     def providerMetadata(self, name: str) -> Any:
         self.provider_names.append(name)
-        return self.metadata
+        return self.ProviderMetadata(name)
 
 
 @pytest.fixture
@@ -791,6 +855,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
         QgsVectorLayer=fake.QgsVectorLayer,
         QgsRasterLayer=fake.QgsRasterLayer,
         QgsProviderRegistry=fake.QgsProviderRegistry,
+        QgsProviderMetadata=fake.QgsProviderMetadata,
         QgsMapLayer=fake.QgsMapLayer,
         QgsReadWriteContext=fake.QgsReadWriteContext,
         QgsApplication=fake.QgsApplication,
@@ -917,26 +982,32 @@ def test_an_empty_source_path_is_refused() -> None:
         ops.LayerAddParams.model_validate(add_params(source_path=""))
 
 
-@pytest.mark.parametrize("name", ["", "x" * 129])
-def test_the_name_is_bounded(name: str) -> None:
+def test_an_empty_name_is_refused() -> None:
     with pytest.raises(ValidationError):
-        ops.LayerAddParams.model_validate(add_params(name=name))
+        ops.LayerAddParams.model_validate(add_params(name=""))
 
 
-def test_a_name_of_128_characters_is_accepted() -> None:
-    params = ops.LayerAddParams.model_validate(add_params(name="x" * 128))
-    assert len(params.name) == 128
+@pytest.mark.parametrize("length", [128, 200, 4096])
+def test_a_layer_name_of_any_length_is_accepted(length: int) -> None:
+    # 桌面版对图层名没有长度上限（实测：200 字的名字原样保住），所以插件也不设。
+    # Desktop puts no length limit on a layer name (measured: a 200-character name is kept
+    # as is), so neither does the plugin.
+    params = ops.LayerAddParams.model_validate(add_params(name="x" * length))
+    assert len(params.name) == length
 
 
-@pytest.mark.parametrize("sub_layer", ["", "roads/1", "roads 1", "roads|layername=x", "a" * 65])
-def test_a_sub_layer_outside_the_character_set_is_refused(sub_layer: str) -> None:
-    with pytest.raises(ValidationError):
-        ops.LayerAddParams.model_validate(add_params(sub_layer=sub_layer))
-
-
-@pytest.mark.parametrize("sub_layer", ["roads", "roads_1-A", "a" * 64])
-def test_a_plain_sub_layer_is_accepted(sub_layer: str) -> None:
+@pytest.mark.parametrize(
+    "sub_layer", ["roads", "roads_1-A", "路段 2024", "roads/1", "roads 1", "x" * 200]
+)
+def test_any_sub_layer_name_the_provider_can_report_is_accepted(sub_layer: str) -> None:
+    # 子图层的名字是 provider 的自由文本，转义由它的 encodeUri 负责。
+    # A sub-layer name is the provider's free text, and its encodeUri owns the escaping.
     assert ops.LayerAddParams.model_validate(add_params(sub_layer=sub_layer)).sub_layer == sub_layer
+
+
+def test_an_empty_sub_layer_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        ops.LayerAddParams.model_validate(add_params(sub_layer=""))
 
 
 def test_a_raster_cannot_carry_a_sub_layer() -> None:
@@ -959,8 +1030,15 @@ def test_a_visibility_flag_must_be_a_real_boolean() -> None:
 # --- layer.add：加图层 / adding a layer ----------------------------------
 
 
-def test_a_source_qgis_cannot_load_is_invalid_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
-    fake_qgis.valid = False
+def test_a_source_the_provider_does_not_recognise_is_invalid_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """provider 的清单为空才是拒的理由（桌面版那句 "Invalid Data Source"）。
+
+    An empty provider list is the refusal (desktop's "Invalid Data Source").
+    """
+
+    fake_qgis.sublayer_names = []
     project = FakeProject()
     code = refuse(
         ops.LayerAdd(),
@@ -970,6 +1048,49 @@ def test_a_source_qgis_cannot_load_is_invalid_layer(fake_qgis: FakeQgis, data_ro
     assert code == INVALID_LAYER
     assert project.added == []
     assert project.mapLayers() == {}
+    assert fake_qgis.sublayer_queries == [str(make_source(data_root).resolve())]
+
+
+def test_a_recognised_source_qgis_cannot_read_is_still_added(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """provider 认得、图层读不出：桌面版照样加进图例，靠坏图层图标提示。
+
+    Recognised by the provider but unreadable: desktop still adds it and leaves the
+    bad-layer icon to say so.
+    """
+
+    fake_qgis.valid = False
+    project = FakeProject()
+    ctx = make_context(project)
+    result = ops.LayerAdd().execute_main(
+        ctx,
+        ops.LayerAddParams(**add_params(source_path=str(make_source(data_root)))),
+    )
+
+    info = ops.LayerGetInfo().execute_main(ctx, ops.LayerGetInfoParams(layer_id=result.layer_id))
+    assert info.valid is False
+    assert project.mapLayer(result.layer_id) is fake_qgis.constructed[0]
+    assert result.crs_authid == "EPSG:4326"
+
+
+def test_a_sub_layer_the_provider_did_not_report_is_invalid_layer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """桌面版的选择框只列得出来的东西，所以点不出一个不存在的名字。
+
+    Desktop's dialog only lists what exists, so a name it never offered is not an answer.
+    """
+
+    fake_qgis.sublayer_names = ["roads"]
+    code = refuse(
+        ops.LayerAdd(),
+        make_context(FakeProject()),
+        ops.LayerAddParams(
+            **add_params(source_path=str(make_source(data_root)), sub_layer="parcels")
+        ),
+    )
+    assert code == INVALID_LAYER
 
 
 def test_a_vector_source_is_added_through_ogr_without_a_sub_layer(
@@ -1008,7 +1129,9 @@ def test_a_sub_layer_uri_comes_from_the_ogr_encoder(fake_qgis: FakeQgis, data_ro
     # 在这里加引号会变成双重转义。
     # The encoder gets the path untouched.
     # Quoting it here would double-escape it.
-    assert fake_qgis.provider_names == ["ogr"]
+    # 两次 providerMetadata：一次给清单门槛，一次给编码器。
+    # Two providerMetadata calls: one for the list gate, one for the encoder.
+    assert fake_qgis.provider_names == ["ogr", "ogr"]
     assert fake_qgis.encoded == [{"path": resolved, "layerName": "roads"}]
     assert fake_qgis.constructed[0].source_uri == f"{resolved}|layername=roads"
     assert result.provider == "ogr"
@@ -1269,7 +1392,10 @@ def test_checking_a_layer_inside_a_hidden_group_checks_the_group(
         ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
     )
     assert result.changed is True
-    assert node.sets == [True]
+    # 节点本来就勾着，所以它自己那次写是空写（原生同值早返回）；真正变的是两个分组。
+    # The node was already ticked, so its own write is a no-op (native early return);
+    # what changes are the two groups.
+    assert node.sets == []
     assert group.sets == [True]
     assert outer.sets == [True]
     assert (result.visible, result.effective_visible) == (True, True)
@@ -1295,7 +1421,7 @@ def test_an_unchecked_group_alone_makes_the_check_a_change(
         ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
     )
     assert (result.changed, result.visible, result.effective_visible) == (True, True, True)
-    assert node.sets == [True]
+    assert node.sets == []
     assert group.sets == [True]
 
 
@@ -1518,15 +1644,27 @@ def test_get_qml_exports_a_single_category(fake_qgis: FakeQgis, data_root: Path)
     assert layer.style_exports[0][1] == category_flag(fake_qgis, ("Symbology",))
 
 
-def test_get_qml_params_refuse_an_empty_category_list() -> None:
-    """给了列表就得给东西；不传仍然是“全部适用的”。
+def test_get_qml_with_an_empty_category_list_exports_the_empty_set(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """ "一个都不选」是桌面版的 Deselect All + OK，不是错误。
 
-    A named list must name something; omitted still means every applicable one.
+    "None of them" is desktop's Deselect All plus OK, not an error.
     """
 
     assert ops.LayerGetQmlParams(layer_id="roads").categories is None
-    with pytest.raises(ValidationError):
-        ops.LayerGetQmlParams.model_validate({"layer_id": "roads", "categories": []})
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "roads")
+
+    result = ops.LayerGetQml().execute_main(
+        make_context(project),
+        ops.LayerGetQmlParams.model_validate({"layer_id": "roads", "categories": []}),
+    )
+    assert result.qml == layer.style_xml
+    # 空标志就是原生那个“零分类”（实测 exportNamedStyle 接受它）。
+    # The empty flag is the native "zero categories" (measured: exportNamedStyle takes it).
+    assert layer.style_exports[0][1] == 0
+    assert category_flag(fake_qgis, ()) == 0
 
 
 def test_get_qml_refuses_a_repeating_category_list(fake_qgis: FakeQgis, data_root: Path) -> None:
@@ -1614,10 +1752,20 @@ def test_the_vector_renderer_list_is_sorted_and_deduplicated(
     assert fake_qgis.raster_registries_built == 0
 
 
-def test_the_raster_renderer_list_comes_from_the_raster_registry(
+def test_the_raster_renderer_list_is_the_registry_filtered_by_the_raster_type(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    fake_qgis.raster_renderer_types = ["singlecolor", "multibandcolor", "singlecolor"]
+    """普通栅格的下拉框不列 ``singlebandcolordata``（qgsrasterlayerproperties.cpp:443-455）。
+
+    An ordinary raster's combo does not list ``singlebandcolordata``.
+    """
+
+    fake_qgis.raster_renderer_types = [
+        "singlecolor",
+        "multibandcolor",
+        "singlebandcolordata",
+        "singlecolor",
+    ]
     project = FakeProject()
     style_layer(fake_qgis, project, "dem", kind="raster")
 
@@ -1628,6 +1776,30 @@ def test_the_raster_renderer_list_comes_from_the_raster_registry(
     assert result.renderer_types == ["multibandcolor", "singlecolor"]
     assert fake_qgis.renderer_registry_layers == []
     assert fake_qgis.raster_registries_built == 1
+
+
+def test_a_single_band_color_data_raster_lists_only_that_renderer(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """``SingleBandColorData`` 栅格的下拉框里只有那一个（实测枚举值 3）。
+
+    A ``SingleBandColorData`` raster's combo holds only that one (enum value 3, measured).
+    """
+
+    fake_qgis.raster_renderer_types = [
+        "singlecolor",
+        "multibandcolor",
+        "singlebandcolordata",
+    ]
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "rgba", kind="raster")
+    layer.raster_type = 3
+
+    result = ops.LayerListAvailableRenderers().execute_main(
+        make_context(project),
+        ops.LayerListAvailableRenderersParams(layer_id="rgba"),
+    )
+    assert result.renderer_types == ["singlebandcolordata"]
 
 
 def test_get_renderer_reads_the_active_type_of_vector_and_raster(
@@ -1648,6 +1820,57 @@ def test_get_renderer_reads_the_active_type_of_vector_and_raster(
 
     assert renderer_type("roads") == "categorizedSymbol"
     assert renderer_type("dem") == "singlebandgray"
+
+
+def test_a_spatial_layer_of_unknown_geometry_still_answers_the_renderer_reads(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """几何未知的空间图层有符号页，所以两个读都得给答案（旧判据会拒）。
+
+    A spatial layer with unknown geometry has a symbology page, so both reads answer it
+    (the old geometry whitelist refused it).
+    """
+
+    fake_qgis.vector_renderer_types = ["heatmapRenderer", "singleSymbol"]
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "unknown")
+    layer.geometry = 3  # 对应 Qgis.GeometryType.Unknown / Qgis.GeometryType.Unknown
+    layer.renderer_value = FakeRenderer("heatmapRenderer")
+    ctx = make_context(project)
+
+    renderer = ops.LayerGetRenderer().execute_main(
+        ctx, ops.LayerGetRendererParams(layer_id="unknown")
+    )
+    assert renderer.renderer_type == "heatmapRenderer"
+
+    listed = ops.LayerListAvailableRenderers().execute_main(
+        ctx, ops.LayerListAvailableRenderersParams(layer_id="unknown")
+    )
+    assert listed.renderer_types == ["heatmapRenderer", "singleSymbol"]
+    assert fake_qgis.renderer_registry_layers == [layer]
+
+
+def test_the_setter_on_an_unknown_geometry_refuses_at_the_symbol_step(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """放行到符号那一步：空符号装得上，带符号的配置在几何上被拒。
+
+    Admitted up to the symbol step: a null symbol installs, a real one is refused on the
+    geometry.
+    """
+
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "unknown")
+    layer.geometry = 3  # 对应 Qgis.GeometryType.Unknown / Qgis.GeometryType.Unknown
+    ctx = make_context(project)
+
+    installed = set_renderer(
+        make_context(project), setter_payload("unknown", {"type": "nullSymbol"})
+    )
+    assert installed.renderer_type == "nullSymbol"
+
+    code = refuse_renderer(ctx, setter_payload("unknown", {"type": "singleSymbol", "symbol": FILL}))
+    assert code == INVALID_LAYER
 
 
 @pytest.mark.parametrize(

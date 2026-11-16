@@ -1334,9 +1334,29 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
         "ogr",
         "the provider layer.get_info reports",
     )
+    # 一个 provider 从未报过的子图层名不是答案（桌面版的选择框点不出它）。
+    # A sub-layer name the provider never reported is not an answer (desktop's dialog cannot
+    # offer it).
+    missing = ctx.run(
+        "layer.add",
+        {
+            "kind": "vector",
+            "source_path": str(source),
+            "name": "at28 missing",
+            "sub_layer": "p5 no such table",
+        },
+    )
+    equal(missing.status, ExecutionStatus.FAILED, "layer.add with a name the provider lacks")
+    equal(error_code(missing), INVALID_LAYER, "the code for a name the provider lacks")
+    equal(
+        len(QgsProject.instance().mapLayers()),
+        1,
+        "the project after a refused sub-layer name",
+    )
     return (
         f"layer.add(sub_layer='{fixtures.ROADS_LAYER}') on {source.name!r} SUCCEEDED, provider "
-        f"ogr, featureCount 1 (cities holds 5): the OGR encoder chose the named table"
+        f"ogr, featureCount 1 (cities holds 5): the OGR encoder chose the named table; a "
+        f"sub_layer the provider never reported is FAILED(INVALID_LAYER) and adds nothing"
     )
 
 
@@ -3220,20 +3240,35 @@ def s03_invalid_categories(ctx: Context) -> str:
     vector_id = sub_layer(ctx, "s03 polygon", fixtures.PARCELS_LAYER)
     raster_id = raster_layer(ctx, "s03 raster")
     requests = {
-        "an empty list": (vector_id, []),
         "a repeated category": (vector_id, ["Symbology", "Symbology"]),
         "an unknown name": (vector_id, ["p5NotAStyleCategory"]),
         "a vector-only category on a raster": (raster_id, ["Symbology3D"]),
-        "an empty list on a raster": (raster_id, []),
+        "a vector-only category on a raster, doubled": (raster_id, ["Fields", "Fields"]),
     }
     for label, (layer_id, categories) in requests.items():
         record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": categories})
         equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
         equal(error_code(record), INVALID_INPUT, f"{label}: code")
         require(record.result is None, f"{label}: a half-finished export was returned")
+    # 一个都不选是桌面版的 Deselect All + OK：合法，导出的是零分类文档。
+    # "None of them" is desktop's Deselect All plus OK: legal, and it exports the
+    # zero-category document.
+    for label, layer_id in (("vector", vector_id), ("raster", raster_id)):
+        record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": []})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{label}: an empty list")
+        qml = result_of(record)["qml"]
+        # 零分类导出的是 ``styleCategories=""``（实测），所以断言原始属性而不是集合。
+        # A zero-category export writes ``styleCategories=""`` (measured), so the raw
+        # attribute is what this asserts.
+        equal(
+            xml_root(qml).get("styleCategories") or "",
+            "",
+            f"{label}: the categories an empty list declares",
+        )
     return (
-        "an empty list, a repeated category, an unknown name and a vector-only category on a "
-        "raster are all FAILED(INVALID_INPUT) with no partial XML"
+        "a repeated category, an unknown name and a vector-only category on a raster are all "
+        "FAILED(INVALID_INPUT) with no partial XML, while an empty list on a vector and on a "
+        "raster both SUCCEED with a document that declares no style categories"
     )
 
 
@@ -3329,26 +3364,44 @@ def a01_vector_candidates(ctx: Context) -> str:
 
 
 def a02_raster_candidates(ctx: Context) -> str:
-    from qgis.core import QgsRasterRendererRegistry
+    from qgis.core import Qgis, QgsRasterRendererRegistry
 
     native = QgsRasterRendererRegistry().renderersList()
     equal(sorted(native), RASTER_RENDERER_TYPES, "the eight built-in raster renderers")
     equal(sorted(set(native)), sorted(native), "the raster registry repeats itself")
 
-    layer_id = raster_layer(ctx, "a02 raster", ctx.fixtures.raster3)
-    record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
-    equal(
-        record.status,
-        ExecutionStatus.SUCCEEDED,
-        f"layer.list_available_renderers: {record.error}",
-    )
-    types = result_of(record)["renderer_types"]
-    equal(types, sorted(set(native)), "the raster list against QgsRasterRendererRegistry")
-    equal(len(types), 8, "the registered raster renderer count")
+    layers = {
+        "one-band": raster_layer(ctx, "a02 one-band", ctx.fixtures.raster),
+        "three-band": raster_layer(ctx, "a02 three-band", ctx.fixtures.raster3),
+    }
+    for label, layer_id in layers.items():
+        layer = project_layer(layer_id)
+        # 桌面版的下拉框 = 注册表清单再按 rasterType() 过滤一层
+        # (qgsrasterlayerproperties.cpp:443-455)。
+        # Desktop's combo is the registry list filtered by rasterType().
+        single_band_color_data = layer.rasterType() == Qgis.RasterLayerType.SingleBandColorData
+        expected = sorted(
+            name
+            for name in set(native)
+            if (name == "singlebandcolordata") == single_band_color_data
+        )
+        record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
+        equal(
+            record.status,
+            ExecutionStatus.SUCCEEDED,
+            f"{label}: layer.list_available_renderers: {record.error}",
+        )
+        types = result_of(record)["renderer_types"]
+        equal(types, expected, f"{label}: the layer's own combo list")
+        require(
+            "singlebandcolordata" not in types,
+            f"{label}: singlebandcolordata is not in an ordinary raster's combo ({types})",
+        )
+    require(len(native) == 8, f"the registry count changed: {len(native)}")
     return (
-        "a raster layer reports the same eight types QgsRasterRendererRegistry().renderersList() "
-        "holds for the whole environment, not a per-layer selection "
-        f"({', '.join(types)})"
+        "the registry holds eight raster renderers, while a raster layer's list is the registry "
+        "filtered by its own rasterType() as desktop's combo does: seven names each for a "
+        "one-band and a three-band raster, with singlebandcolordata left out"
     )
 
 

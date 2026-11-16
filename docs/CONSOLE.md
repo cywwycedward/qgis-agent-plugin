@@ -188,8 +188,8 @@ progress: 100.0
   丢掉，记录就是 `PREPARING 0 → SCHEDULED 0 → RUNNING 0 → FINALIZING 0 → SUCCEEDED 100`（实测）：
   这里的 `RUNNING` 来自完成路径补写，不是进度报告。
 - 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
-- 超过 `max_snapshot_features`（默认 10000）：10001 个要素 → `FAILED`
-  `SNAPSHOT_LIMIT_EXCEEDED`，不做静默截断。
+- 要素数没有上限（桌面版的统计面板也不设，`qgsvectorlayerutils.cpp:73-80`）：拷列成本实测
+  10 万要素 0.11 s / 800 KB、100 万要素 3.14 s / 8 MB。
 - 在 Console 里不要忙等：打完下一行代码就是一次事件循环，`get` 即可；等任务真正跑完再 `get`
   才会看到终态。
 
@@ -309,7 +309,6 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
 | `project.create` 传 `crs_authid="NOT:A_CRS"` | `FAILED` `INVALID_CRS`（当前工程未被替换） |
 | `project.create` 在有内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
 | 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
-| 全新安装（允许目录为空）调 `layer.add` / `project.save` | `FAILED` `PATH_NOT_ALLOWED` |
 
 ## 10. 未实测清单
 

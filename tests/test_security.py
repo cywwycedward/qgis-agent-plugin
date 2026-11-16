@@ -73,7 +73,6 @@ COUNT_KEYS = (
     "max_pending",
     "max_terminal_records",
     "terminal_ttl_seconds",
-    "max_snapshot_features",
 )
 
 

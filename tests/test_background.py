@@ -34,7 +34,6 @@ from qgis_agent_plugin.core.models import (
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     OUTPUT_VALIDATION_FAILED,
-    SNAPSHOT_LIMIT_EXCEEDED,
     STALE_PROJECT,
     UNSUPPORTED_EXECUTION_MODE,
     ExecutionRecord,
@@ -425,21 +424,6 @@ def test_a_sum_of_finite_values_is_still_written_and_parsed_strictly() -> None:
     assert record.status is SUCCEEDED
     assert record.result is not None and record.result["total"] == 4.0
     assert json.loads(json.dumps(record.result, allow_nan=False))["total"] == 4.0
-
-
-def test_more_features_than_the_limit_is_refused_not_truncated() -> None:
-    harness = harness_with(
-        make_layer([(1,), (2,), (3,)]), settings=Settings(max_snapshot_features=2)
-    )
-
-    record = settled(harness, submit_sum(harness))
-
-    # 看起来完整的残缺和不如直接拒绝 / a partial sum that looks complete is worse than a refusal
-    assert record.status is FAILED
-    assert record.error is not None
-    assert record.error.code == SNAPSHOT_LIMIT_EXCEEDED
-    assert record.result is None
-    assert harness.tasks == []
 
 
 # --- 取消 / cancellation ------------------------------------------------------
