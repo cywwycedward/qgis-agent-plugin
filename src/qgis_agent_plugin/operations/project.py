@@ -482,14 +482,14 @@ def _refuse_if_ends_the_process(path: Path) -> None:
     """在 ``read()`` 之前拒掉实测能让进程直接消失的两种文件形状。
 
     别的都不在这里判：读不懂、解不开、CRC 对不上、压缩方法少见、声明尺寸撒谎、远程数据源，``read()``
-    都能自己回答，而 GUI 打得开的工程这里也不能拒。拒的这两条都发生在 ``ctx.project.clear()`` 之前，
-    所以当前工程没被动过，拒语说的就是这一点。
+    都能自己回答，而 QGIS 打得开的工程这里也不能拒。这两条都拒在 ``ctx.project.clear()`` 之前，所以
+    当前工程没被动过，拒语说的就是这一点。
 
     Refuses the two file shapes measured to end the process outright, before ``read()`` runs.
 
     Nothing else is judged here: a file this scan cannot read, an archive with a broken CRC or an
     unusual compression method, one whose declared sizes lie, a remote data source -- ``read()``
-    answers all of those, and a project the GUI opens must not be refused.  Both refusals happen
+    answers all of those, and a project QGIS opens must not be refused.  Both refusals happen
     before ``ctx.project.clear()``, so the current project is untouched, which is what the message
     says.
     """
