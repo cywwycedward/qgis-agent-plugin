@@ -66,13 +66,12 @@ VECTOR_CATEGORIES = (
 RASTER_CATEGORIES = (
     "LayerConfiguration",
     "Symbology",
-    "Labeling",
     "MapTips",
-    "AttributeTable",
     "Rendering",
     "CustomProperties",
     "Temporal",
     "Elevation",
+    "AttributeTable",
     "Notes",
 )
 
@@ -347,24 +346,31 @@ class FakeLayer:
 
 
 class FakeGroup:
-    """父分组；任何图层操作都不许改它。
+    """父分组；取消勾选图层时它保持不变，打勾时跟着勾。
 
-    A parent group; nothing a layer operation does may change it.
+    A parent group; it stays as it is while a layer is unchecked, and is ticked along
+    with one that is checked.
     """
 
-    def __init__(self, checked: bool = True) -> None:
+    def __init__(self, checked: bool = True, parent: FakeGroup | None = None) -> None:
         self.checked = checked
+        self.parent = parent
         self.sets: list[bool] = []
 
     def itemVisibilityChecked(self) -> bool:
         return self.checked
 
     def isVisible(self) -> bool:
-        return self.checked
+        return self.checked and (self.parent is None or self.parent.checked)
 
     def setItemVisibilityChecked(self, visible: bool) -> None:
         self.sets.append(visible)
         self.checked = visible
+
+    def setItemVisibilityCheckedParentRecursive(self, visible: bool) -> None:
+        self.setItemVisibilityChecked(visible)
+        if self.parent is not None:
+            self.parent.setItemVisibilityCheckedParentRecursive(visible)
 
 
 class FakeNode:
@@ -387,6 +393,13 @@ class FakeNode:
     def setItemVisibilityChecked(self, visible: bool) -> None:
         self.sets.append(visible)
         self.checked = visible
+
+    def setItemVisibilityCheckedParentRecursive(self, visible: bool) -> None:
+        # 就是原生那个递归：自己，然后所有祖先。
+        # The native recursion: this node, then every ancestor.
+        self.setItemVisibilityChecked(visible)
+        if self.parent is not None:
+            self.parent.setItemVisibilityCheckedParentRecursive(visible)
 
 
 class FakeTreeRoot:
@@ -1217,11 +1230,12 @@ def test_setting_the_same_state_changes_nothing(fake_qgis: FakeQgis, data_root: 
     assert (result.visible, result.effective_visible) == (True, True)
 
 
-def test_setting_a_new_state_toggles_only_that_node(fake_qgis: FakeQgis, data_root: Path) -> None:
+def test_unchecking_touches_only_that_node(fake_qgis: FakeQgis, data_root: Path) -> None:
     project = FakeProject()
     layer = make_layer(fake_qgis, "roads")
     project.layers[layer.id()] = layer
-    node = FakeNode()
+    group = FakeGroup(checked=True)
+    node = FakeNode(parent=group)
     project.root.nodes[layer.id()] = node
 
     result = ops.LayerSetVisibility().execute_main(
@@ -1230,32 +1244,59 @@ def test_setting_a_new_state_toggles_only_that_node(fake_qgis: FakeQgis, data_ro
     )
     assert result.changed is True
     assert node.sets == [False]
+    assert group.sets == []
     assert (result.visible, result.effective_visible) == (False, False)
 
 
-def test_a_hidden_parent_group_is_never_touched(fake_qgis: FakeQgis, data_root: Path) -> None:
+def test_checking_a_layer_inside_a_hidden_group_checks_the_group(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """图例的勾选框对一个叶子节点打勾时连祖先一起勾，否则勾了也看不见。
+
+    The legend checkbox ticks a leaf's ancestors along with it, or the tick shows nothing.
+    """
+
     project = FakeProject()
-    ctx = make_context(project)
+    layer = make_layer(fake_qgis, "grouped")
+    project.layers[layer.id()] = layer
+    outer = FakeGroup(checked=False)
+    group = FakeGroup(checked=False, parent=outer)
+    node = FakeNode(parent=group)
+    project.root.nodes[layer.id()] = node
+
+    result = ops.LayerSetVisibility().execute_main(
+        make_context(project),
+        ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
+    )
+    assert result.changed is True
+    assert node.sets == [True]
+    assert group.sets == [True]
+    assert outer.sets == [True]
+    assert (result.visible, result.effective_visible) == (True, True)
+
+
+def test_an_unchecked_group_alone_makes_the_check_a_change(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """节点已经勾着时，可见性仍未达成，所以这一次仍是改变。
+
+    With the node already ticked, the layer is still not visible, so this call is a change.
+    """
+
+    project = FakeProject()
     layer = make_layer(fake_qgis, "grouped")
     project.layers[layer.id()] = layer
     group = FakeGroup(checked=False)
     node = FakeNode(parent=group)
     project.root.nodes[layer.id()] = node
 
-    same = ops.LayerSetVisibility().execute_main(
-        ctx, ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True)
+    result = ops.LayerSetVisibility().execute_main(
+        make_context(project),
+        ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
     )
-    assert same.changed is False
-    assert (same.visible, same.effective_visible) == (True, False)
-
-    toggled = ops.LayerSetVisibility().execute_main(
-        ctx, ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=False)
-    )
-    assert toggled.changed is True
-    assert node.sets == [False]
-    assert group.sets == []
-    assert group.checked is False
-    assert toggled.effective_visible is False
+    assert (result.changed, result.visible, result.effective_visible) == (True, True, True)
+    assert node.sets == [True]
+    assert group.sets == [True]
 
 
 # --- 声明与导入规则 / the declarations and the import rule ----------------
@@ -1320,6 +1361,9 @@ def style_layer(
     name: str = "layer",
 ) -> Any:
     layer = make_layer(fake, layer_id, name=name, kind=kind)
+    # 一个空间图层总是带着渲染器；没有几何的图层没有（实测）。
+    # A spatial layer always carries a renderer; a geometry-less one does not (measured).
+    layer.renderer_value = FakeRenderer("singleSymbol")
     project.layers[layer.id()] = layer
     return layer
 
@@ -1350,7 +1394,7 @@ def test_a_spatial_vector_layer_has_the_eighteen_categories_in_order(
     assert set(result.model_dump()) == {"layer_id", "categories"}
 
 
-def test_a_raster_layer_has_the_ten_categories_in_order(
+def test_a_raster_layer_has_the_nine_categories_in_order(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
     project = FakeProject()
@@ -1361,6 +1405,9 @@ def test_a_raster_layer_has_the_ten_categories_in_order(
         ops.LayerListStyleCategoriesParams(layer_id="dem"),
     )
     assert tuple(result.categories) == RASTER_CATEGORIES
+    # 桌面版给栅格的勾选框里没有 Labeling。
+    # Desktop's raster checkboxes do not include Labeling.
+    assert "Labeling" not in result.categories
 
 
 @pytest.mark.parametrize("operation", STYLE_READS)
@@ -1384,17 +1431,36 @@ def test_every_style_read_refuses_an_invalid_layer(
 
 
 @pytest.mark.parametrize("operation", STYLE_READS)
-def test_every_style_read_refuses_a_layer_without_a_style(
+def test_every_style_read_refuses_another_layer_kind(
     fake_qgis: FakeQgis, data_root: Path, operation: Any
 ) -> None:
     project = FakeProject()
-    table = style_layer(fake_qgis, project, "table")
-    table.geometry = 4  # 对应 Qgis.GeometryType.NullGeometry / Qgis.GeometryType.NullGeometry
     project.layers["plugin-1"] = FakeLayer("plugin-1", "annotations", provider="custom", authid="")
 
     ctx = make_context(project)
-    for layer_id in ("table", "plugin-1"):
-        assert refuse(operation(), ctx, style_request(operation, layer_id)) == INVALID_LAYER
+    assert refuse(operation(), ctx, style_request(operation, "plugin-1")) == INVALID_LAYER
+
+
+def test_a_geometry_less_vector_table_keeps_its_style_reads(
+    fake_qgis: FakeQgis, data_root: Path
+) -> None:
+    """属性表也有字段、表单、属性表设置这些分类，也能导出 QML。
+
+    A table still has fields, forms and attribute-table settings to export.
+    """
+
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "table")
+    layer.geometry = 4  # 对应 Qgis.GeometryType.NullGeometry / Qgis.GeometryType.NullGeometry
+    ctx = make_context(project)
+
+    categories = ops.LayerListStyleCategories().execute_main(
+        ctx, ops.LayerListStyleCategoriesParams(layer_id="table")
+    )
+    assert tuple(categories.categories) == VECTOR_CATEGORIES
+
+    qml = ops.LayerGetQml().execute_main(ctx, ops.LayerGetQmlParams(layer_id="table"))
+    assert qml.qml == layer.style_xml
 
 
 def test_get_qml_without_categories_exports_the_whole_applicable_set(
@@ -1584,17 +1650,33 @@ def test_get_renderer_reads_the_active_type_of_vector_and_raster(
     assert renderer_type("dem") == "singlebandgray"
 
 
-def test_a_layer_without_a_renderer_reports_an_empty_type(
-    fake_qgis: FakeQgis, data_root: Path
+@pytest.mark.parametrize(
+    "operation",
+    (
+        ops.LayerListAvailableRenderers,
+        ops.LayerGetRenderer,
+        ops.LayerSetRenderer,
+    ),
+)
+def test_every_renderer_operation_refuses_a_layer_without_a_renderer(
+    fake_qgis: FakeQgis, data_root: Path, operation: Any
 ) -> None:
-    project = FakeProject()
-    style_layer(fake_qgis, project, "roads")
+    """没有渲染器的图层（例如一张属性表）在桌面版里没有符号页。
 
-    result = ops.LayerGetRenderer().execute_main(
-        make_context(project), ops.LayerGetRendererParams(layer_id="roads")
-    )
-    assert result.renderer_type == ""
-    assert set(result.model_dump()) == {"layer_id", "renderer_type"}
+    A layer without a renderer (a geometry-less table, measured) has no symbology page.
+    """
+
+    project = FakeProject()
+    layer = style_layer(fake_qgis, project, "table")
+    layer.geometry = 4  # 对应 Qgis.GeometryType.NullGeometry / Qgis.GeometryType.NullGeometry
+    layer.renderer_value = None
+
+    request = {
+        ops.LayerSetRenderer: {"renderer": {"type": "nullSymbol"}},
+    }.get(operation, {})
+    code = refuse(operation(), make_context(project), style_request(operation, "table", **request))
+    assert code == INVALID_LAYER
+    assert layer.renderer_sets == []
 
 
 @pytest.mark.parametrize(
@@ -2830,11 +2912,17 @@ def test_the_setter_refuses_an_invalid_layer(fake_qgis: FakeQgis, data_root: Pat
     assert layer.renderer_sets == []
 
 
-def test_the_setter_refuses_a_layer_without_a_geometry(
+def test_the_setter_refuses_a_layer_without_a_renderer(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
+    """没有渲染器的图层（例如一张属性表）在桌面版里没有符号页。
+
+    A layer without a renderer (a geometry-less table, measured) has no symbology page.
+    """
+
     project = FakeProject()
     layer = setter_layer(fake_qgis, project, "table", geometry=NULL_GEOMETRY)
+    layer.renderer_value = None
 
     code = refuse_renderer(make_context(project), setter_payload("table", {"type": "nullSymbol"}))
     assert code == INVALID_LAYER

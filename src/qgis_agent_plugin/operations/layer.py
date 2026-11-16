@@ -12,11 +12,13 @@
 
 样式读取（``layer.list_style_categories``、``layer.get_qml``、
 ``layer.list_available_renderers``、``layer.get_renderer``）描述图层已经带着什么，不改它。
-哪些分类适用是一张固定清单，不是从 XML 反读出来的；QML 来自图层自己的原生导出；两份渲染器清单
-都来自活的 QGIS 注册表，不是这里维护的表。
+哪些分类适用是一张固定清单，不是从 XML 反读出来的——清单就是桌面版那两个样式对话框里的勾选框
+（``QgsMapLayerStyleCategoriesModel``）；QML 来自图层自己的原生导出；两份渲染器清单都来自活的
+QGIS 注册表，不是这里维护的表。
 
 渲染器设值是这个文件里唯一替换状态的操作。它先把整个原生渲染器建好再碰图层，然后用一次调用装
-上去，所以被拒的配置不会给图层留下半套或零套样式。
+上去，所以被拒的配置不会给图层留下半套或零套样式。桌面版只在图层有渲染器时才给出符号页
+（``QgsVectorLayerProperties``），所以没有渲染器的图层在这里也换不了。
 
 Every operation here but ``layer.sum_numeric_field`` runs on the main thread and
 works through ``ctx.project``, so it reads the project the engine holds rather than
@@ -35,13 +37,16 @@ for both would make a toggle look like it failed.
 The style reads (``layer.list_style_categories``, ``layer.get_qml``,
 ``layer.list_available_renderers``, ``layer.get_renderer``) describe what a layer
 already carries without changing it.  Which categories apply is a fixed list, not
-something read back out of the XML; the QML itself comes from the layer's own native
-export; and both renderer lists come from the live QGIS registries rather than a
-table kept here.
+something read back out of the XML -- it is the checkboxes of desktop's two style
+dialogs (``QgsMapLayerStyleCategoriesModel``); the QML itself comes from the layer's
+own native export; and both renderer lists come from the live QGIS registries rather
+than a table kept here.
 
 The renderer setter is the one operation here that replaces state.  It builds the
 whole native renderer before the layer is touched, then installs it in one call,
 so a refused configuration cannot leave the layer with half a style or with none.
+Desktop only shows the symbology page when the layer has a renderer
+(``QgsVectorLayerProperties``), so a layer without one cannot have one set here.
 """
 
 from __future__ import annotations
@@ -351,9 +356,18 @@ class LayerSetVisibility(
     BaseCommand[LayerSetVisibilityParams, LayerSetVisibilityResult],
     MainThreadOperationMixin[LayerSetVisibilityParams, LayerSetVisibilityResult],
 ):
-    """切一个图层自己的勾选状态；父分组保持原样。
+    """切一个图层在图例里的勾选；勾上时连祖先分组一起勾，取消只动这一个节点。
 
-    Toggle one layer's own check state; a parent group stays as it is.
+        勾选框不是“只改自己”：桌面版对一个叶子节点打勾时会连它的祖先一起勾
+        （``QgsLayerTreeModel.setData`` 对没有子节点的节点调
+        ``setItemVisibilityCheckedParentRecursive``），否则勾了也看不见；取消只写节点自己。
+
+        Toggle one layer's legend check; checking also checks the ancestor groups, unchecking
+    touches only this node.
+        The checkbox is not "this node only": desktop ticks a leaf's ancestors along with
+        it (``QgsLayerTreeModel.setData`` calls ``setItemVisibilityCheckedParentRecursive``
+        for a childless node), or the tick would show nothing; unchecking writes the node
+        alone.
     """
 
     name = "layer.set_visibility"
@@ -368,9 +382,16 @@ class LayerSetVisibility(
         node = layer_tree_node(ctx.project, request.layer_id)
         if node is None:
             raise FrameworkError(LAYER_NOT_IN_TREE, "layer has no layer tree node")
-        changed = bool(node.itemVisibilityChecked()) != request.visible
+        # 勾上要连祖先，所以“已经对了”不是“节点已勾”而是“真的可见”/ checking must reach the
+        # ancestors, so "already there" means "already visible", not "node checked".
+        changed = bool(node.itemVisibilityChecked()) != request.visible or (
+            request.visible and not node.isVisible()
+        )
         if changed:
-            node.setItemVisibilityChecked(request.visible)
+            if request.visible:
+                node.setItemVisibilityCheckedParentRecursive(request.visible)
+            else:
+                node.setItemVisibilityChecked(request.visible)
         return LayerSetVisibilityResult(
             layer_id=request.layer_id,
             visible=bool(node.itemVisibilityChecked()),
@@ -612,13 +633,12 @@ VECTOR_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
 RASTER_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
     "LayerConfiguration",
     "Symbology",
-    "Labeling",
     "MapTips",
-    "AttributeTable",
     "Rendering",
     "CustomProperties",
     "Temporal",
     "Elevation",
+    "AttributeTable",
     "Notes",
 )
 
@@ -636,32 +656,46 @@ def project_layer(project: Any, layer_id: str) -> Any:
 
 
 def layer_for_style(project: Any, layer_id: str) -> Any:
-    """id 背后的图层，前提它是一个有效的空间矢量或栅格。
+    """id 背后的图层，前提它是一个有效的矢量或栅格。
 
-    整个读取侧只对这两种形体有定义。一个矢量表、一个无效图层或别人的图层类型都是
-    ``INVALID_LAYER`` 而不是空答案，因为「没有分类」和「不适用」是两个不同结果。
+    样式读写只对这两种形体有定义，所以别人的图层类型是 ``INVALID_LAYER`` 而不是空答案：「没有分类」
+    和「不适用」是两个结果。几何不是条件：一个没有几何的矢量表（属性表）也有字段、表单、属性表
+    设置这些分类，也能导出 QML——桌面版对它给出的正是整张 18 项清单。
 
-    The whole read side is defined only for those two shapes.  A vector table, an
-    invalid layer or somebody else's layer type is ``INVALID_LAYER`` rather than
-    an empty answer, because "no categories" and "not applicable" are different
-    results.
+    Style reads and writes are defined only for those two shapes, so somebody else's
+    layer type is ``INVALID_LAYER`` rather than an empty answer: "no categories" and
+    "not applicable" are different results.  Geometry is not a condition: a
+    geometry-less vector table still has fields, forms and attribute-table settings to
+    export, and desktop's two style dialogs hand it the whole 18-item list.
     """
 
-    from qgis.core import Qgis
-
     layer = project_layer(project, layer_id)
-    if not layer.isValid():
-        raise FrameworkError(INVALID_LAYER, "the layer is not valid")
-    kind = layer_kind(layer)
-    if kind == "raster":
-        return layer
-    if kind == "vector" and layer.geometryType() in (
-        Qgis.GeometryType.Point,
-        Qgis.GeometryType.Line,
-        Qgis.GeometryType.Polygon,
-    ):
-        return layer
-    raise FrameworkError(INVALID_LAYER, "the layer is not a spatial vector or raster layer")
+    if not layer.isValid() or layer_kind(layer) == "other":
+        raise FrameworkError(INVALID_LAYER, "the layer is not a valid vector or raster layer")
+    return layer
+
+
+def layer_for_renderer(project: Any, layer_id: str) -> Any:
+    """一个能读、能换渲染器的图层：桌面版给它符号页的那个。
+
+    两个图层属性对话框都只看一件事：图层有没有渲染器。没有的话整个符号页被禁用
+    （``QgsVectorLayerProperties.updateSymbologyPage``），里面那个渲染器下拉框、当前渲染器和
+    “换上这个渲染器”的按钮就都不存在。一个没有几何的矢量表就是这样（实测 ``renderer()`` 是
+    ``None``）。所以没有渲染器的图层在这里也是 ``INVALID_LAYER``：同一个前置条件，同一句话。
+
+    A layer whose renderer can be read or replaced: the one desktop gives a symbology
+    page to.  Both layer properties dialogs look at one thing: whether the layer has a
+    renderer.  Without one the whole page is disabled
+    (``QgsVectorLayerProperties.updateSymbologyPage``), and its renderer combo box, its
+    current renderer and its install button do not exist.  A geometry-less vector table
+    is exactly that case (measured: ``renderer()`` is ``None``).  So a layer without a
+    renderer is ``INVALID_LAYER`` here too: one precondition, one sentence.
+    """
+
+    layer = layer_for_style(project, layer_id)
+    if layer.renderer() is None:
+        raise FrameworkError(INVALID_LAYER, "the layer has no renderer")
+    return layer
 
 
 def style_categories(layer: Any) -> tuple[StyleCategoryName, ...]:
@@ -814,7 +848,7 @@ class LayerListAvailableRenderers(
     ) -> LayerListAvailableRenderersResult:
         from qgis.core import QgsApplication, QgsRasterRendererRegistry
 
-        layer = layer_for_style(ctx.project, request.layer_id)
+        layer = layer_for_renderer(ctx.project, request.layer_id)
         if layer_kind(layer) == "raster":
             # 3.44 里 ``QgsApplication.rasterRendererRegistry()`` 是 SIP_SKIP / it is SIP_SKIP
             # in 3.44, 而且类没绑 ``instance()`` / and the class does not bind instance(),
@@ -844,11 +878,10 @@ class LayerGetRenderer(
     def execute_main(
         self, ctx: OperationContext, request: LayerGetRendererParams
     ) -> LayerGetRendererResult:
-        layer = layer_for_style(ctx.project, request.layer_id)
-        renderer = layer.renderer()
+        layer = layer_for_renderer(ctx.project, request.layer_id)
         return LayerGetRendererResult(
             layer_id=request.layer_id,
-            renderer_type="" if renderer is None else renderer.type(),
+            renderer_type=layer.renderer().type(),
         )
 
 
@@ -1427,7 +1460,7 @@ class LayerSetRenderer(
     def execute_main(
         self, ctx: OperationContext, request: LayerSetRendererParams
     ) -> LayerSetRendererResult:
-        layer = layer_for_style(ctx.project, request.layer_id)
+        layer = layer_for_renderer(ctx.project, request.layer_id)
         try:
             renderer = build_renderer(layer, request.renderer)
             layer.setRenderer(renderer)

@@ -1127,7 +1127,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1）、`visible`（StrictBool） |
 | 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible`、`changed`（本次是否真的改了） |
 | 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE` |
-| 行为 | 只动这一个节点：不碰父级组、不碰其他图层、不改数据源 |
+| 行为 | 勾上时连祖先分组一起勾（图例的勾选框对叶子节点就是这么做的：`QgsLayerTreeModel.setData` → `setItemVisibilityCheckedParentRecursive`），取消只写这一个节点；`changed` 说“本次有没有真的改变可见结果”，所以节点已勾而父组未勾时仍算改变 |
 
 #### layer.sum_numeric_field
 
@@ -1144,9 +1144,9 @@ absolute_path(raw: str) -> Path
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`categories`（按 QGIS 声明顺序；矢量 18 个、栅格 10 个） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或矢量没有点线面几何） |
-| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
+| 返回 | `layer_id`、`categories`（桌面版那两个样式对话框的勾选框名单；矢量 18 个按枚举声明顺序，栅格 9 个按 `QgsMapLayerStyleCategoriesModel` 的顺序，不含 `Labeling`） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，含别人的图层类型） |
+| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推；没有几何的矢量表也算数（桌面版照样给它整张 18 项）；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
 
 #### layer.get_qml
 
@@ -1154,7 +1154,7 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部适用项；给了就非空、不重复、必须适用） |
 | 返回 | `layer_id`、`qml`（XML 字符串，只在内存里） |
-| 业务错误码 | `INVALID_INPUT`（重复或不适用的 category）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（导出失败） |
+| 业务错误码 | `INVALID_INPUT`（重复或不适用的 category）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格）、`INTERNAL_ERROR`（导出失败） |
 | 行为 | QML 来自图层自己的 `exportNamedStyle`；不写文件、不回显导出器的原始错误文本（可能带路径） |
 
 #### layer.list_available_renderers
@@ -1163,17 +1163,17 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
 | 返回 | `renderer_types`（去重、排序；来自活动的 QGIS 注册表，不是本地表） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER` |
-| 行为 | 矢量走 `QgsApplication.rendererRegistry()`，栅格走 `QgsRasterRendererRegistry()`（3.44 没有绑定实例化那个访问器） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器） |
+| 行为 | 矢量走 `QgsApplication.rendererRegistry()`，栅格走 `QgsRasterRendererRegistry()`（3.44 没有绑定实例化那个访问器）；前置条件是桌面版那个符号页存在，即图层有渲染器 |
 
 #### layer.get_renderer
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`renderer_type`（没有 renderer 时为 `""`） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER` |
-| 行为 | 只读一个类型名，不返回 renderer 对象或它的配置 |
+| 返回 | `layer_id`、`renderer_type`（图层当前渲染器的类型名） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器） |
+| 行为 | 只读一个类型名，不返回 renderer 对象或它的配置；没有渲染器的图层（例如一张属性表）在桌面版里连符号页都没有，所以也是 `INVALID_LAYER` |
 
 #### layer.set_renderer
 
@@ -1181,8 +1181,8 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `layer_id`（≥1）、`renderer`（判别联合，`type` 字段选型） |
 | 返回 | `layer_id`、`renderer_type`（安装后的类型名） |
-| 业务错误码 | `INVALID_INPUT`（符号与几何不符、category 重复、category 值与字段类型不符、band 越界、规则过滤器语法错、min≥max、ranges 重叠或未排序、stops 未严格递增）、`INVALID_FIELD_TYPE`（没有该字段/不是数值）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（原生设置失败，原生文本只进日志） |
-| 行为 | 整张 renderer 先在本地搭好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式；成功后 `triggerRepaint()` + `setDirty(True)`；只有这一个样式 op 是 destructive |
+| 业务错误码 | `INVALID_INPUT`（符号与几何不符、category 重复、category 值与字段类型不符、band 越界、规则过滤器语法错、min≥max、ranges 重叠或未排序、stops 未严格递增）、`INVALID_FIELD_TYPE`（没有该字段/不是数值）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（原生设置失败，原生文本只进日志） |
+| 行为 | 整张 renderer 先在本地搭好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式；成功后 `triggerRepaint()` + `setDirty(True)`（与桌面版 `apply()` 的两步相同）；只有这一个样式 op 是 destructive；前置条件也是桌面版的：图层有渲染器才有符号页 |
 
 配置矩阵（`renderer.type`，共 9 种）：
 

@@ -1064,11 +1064,17 @@ def at_21b_group_hides_layer(ctx: Context) -> str:
 
     record = ctx.run("layer.set_visibility", {"layer_id": layer_id, "visible": True})
     equal(record.status, ExecutionStatus.SUCCEEDED, "set_visibility on a hidden layer")
-    equal(result_of(record)["changed"], False, "the layer was already checked")
-    equal(group.itemVisibilityChecked(), False, "the parent group's check state")
+    equal(
+        result_of(record)["changed"],
+        True,
+        "checking a layer under a hidden group also checks the group",
+    )
+    equal(result_of(record)["effective_visible"], True, "the layer after the check")
+    equal(group.itemVisibilityChecked(), True, "the parent group's check state")
     return (
-        "visible=true while effective_visible=false under an unchecked group; "
-        "set_visibility(true) reported changed=false and left the group unchecked"
+        "visible=true while effective_visible=false under an unchecked group; the legend's "
+        "check acts on the ancestors too, so set_visibility(true) reported changed=true and "
+        "left the layer and its group checked"
     )
 
 
@@ -2311,13 +2317,12 @@ VECTOR_CATEGORY_NAMES = [
 RASTER_CATEGORY_NAMES = [
     "LayerConfiguration",
     "Symbology",
-    "Labeling",
     "MapTips",
-    "AttributeTable",
     "Rendering",
     "CustomProperties",
     "Temporal",
     "Elevation",
+    "AttributeTable",
     "Notes",
 ]
 
@@ -3200,12 +3205,14 @@ def s02_raster_categories(ctx: Context) -> str:
         record = ctx.run("layer.list_style_categories", {"layer_id": layer_id})
         equal(record.status, ExecutionStatus.SUCCEEDED, f"{name}: status")
         categories = result_of(record)["categories"]
-        equal(categories, RASTER_CATEGORY_NAMES, f"{name}: the ten categories")
-        for required in ("Labeling", "AttributeTable"):
+        equal(categories, RASTER_CATEGORY_NAMES, f"{name}: the nine categories")
+        for required in ("AttributeTable", "Notes"):
             require(required in categories, f"{name}: {required} is missing from {categories}")
+        require("Labeling" not in categories, f"{name}: Labeling is not a raster checkbox")
     return (
-        "a one-band and a three-band raster both report the same ten categories, including "
-        "Labeling and AttributeTable, in the PRD's fixed order"
+        "a one-band and a three-band raster both report the same nine categories, including "
+        "AttributeTable and Notes and without Labeling, in the order desktop's category model "
+        "lists them"
     )
 
 
@@ -3442,14 +3449,33 @@ def a04_bad_layers(ctx: Context) -> str:
         record = ctx.run(operation, {"layer_id": "a04-no-such-layer"})
         equal(record.status, ExecutionStatus.FAILED, f"{operation}: an unknown id")
         equal(error_code(record), LAYER_NOT_FOUND, f"{operation}: the code for an unknown id")
-    for label, layer_id in (("a vector table", table.id()), ("an invalid layer", invalid.id())):
-        for operation in (*operations, "layer.get_qml"):
-            record = ctx.run(operation, {"layer_id": layer_id})
-            equal(record.status, ExecutionStatus.FAILED, f"{operation} on {label}")
-            equal(error_code(record), INVALID_LAYER, f"{operation}: the code for {label}")
+    # 一张没有几何的矢量表：两个样式对话框对任何矢量图层都给出整张分类清单，QML 也导得出来；
+    # 但没有渲染器的图层在桌面版里连符号页都没有，所以三个渲染器操作拒。
+    # A geometry-less table: both style dialogs hand any vector layer the whole category list
+    # and the QML exports; a layer without a renderer has no symbology page, so the three
+    # renderer operations refuse it.
+    for operation in ("layer.list_style_categories", "layer.get_qml"):
+        record = ctx.run(operation, {"layer_id": table.id()})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{operation} on a vector table")
+    for operation in ("layer.list_available_renderers", "layer.get_renderer"):
+        record = ctx.run(operation, {"layer_id": table.id()})
+        equal(record.status, ExecutionStatus.FAILED, f"{operation} on a vector table")
+        equal(error_code(record), INVALID_LAYER, f"{operation}: the code for a vector table")
+    rendered = ctx.run(
+        "layer.set_renderer", {"layer_id": table.id(), "renderer": {"type": "nullSymbol"}}
+    )
+    equal(rendered.status, ExecutionStatus.FAILED, "layer.set_renderer on a vector table")
+    equal(error_code(rendered), INVALID_LAYER, "layer.set_renderer: the code for a vector table")
+    for operation in (*operations, "layer.get_qml"):
+        record = ctx.run(operation, {"layer_id": invalid.id()})
+        equal(record.status, ExecutionStatus.FAILED, f"{operation} on an invalid layer")
+        equal(error_code(record), INVALID_LAYER, f"{operation}: the code for an invalid layer")
     return (
-        "an unknown id is LAYER_NOT_FOUND on all three renderer/style reads; a valid vector table "
-        "(no geometry) and a registered but invalid layer are INVALID_LAYER on all four"
+        "an unknown id is LAYER_NOT_FOUND on all three renderer/style reads; a registered but "
+        "invalid layer is INVALID_LAYER on all four; a geometry-less vector table still answers "
+        "list_style_categories and get_qml (desktop gives any vector layer the whole list) while "
+        "the three renderer operations are INVALID_LAYER, the precondition desktop's symbology "
+        "page itself has"
     )
 
 

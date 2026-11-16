@@ -149,8 +149,11 @@ engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
 {"visible": true,  "effective_visible": true,  "changed": true }   # 再显示
 ```
 
-`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性；父组被隐藏时
-会出现 `visible=true, effective_visible=false`（单测覆盖，本文件未实测该组合）。
+`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性。打勾还会把祖先
+分组一起勾上（图例的勾选框就是这么做的：对一个叶子节点打勾会连父组一起勾，否则勾了也看不见），
+所以 `set_visibility(true)` 之后两者都是 `true`；取消只写这一个节点，父组保持原样。`changed` 说的
+是“本次有没有真的改变可见结果”，所以节点已经勾着、但父组被手动取消时，`set_visibility(true)` 仍然
+是 `changed=true`（验收用例 at_21b 实测）。
 
 ## 6. 后台求和（唯一的 background Operation）
 
