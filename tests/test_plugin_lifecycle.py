@@ -406,7 +406,8 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
         # Console 就是这样调用的，底下是伪造的工程 / what the Console does, on a fake project
         record = engine.run_sync("project.get_info", {})
         assert record.status is ExecutionStatus.SUCCEEDED
-        assert record.result is not None and record.result["project_epoch"] == 0
+        # 记录自己带着它被接受时的工程代数 / a record carries the epoch it was accepted under
+        assert record.project_epoch == 0
 
         instance.unload()
 

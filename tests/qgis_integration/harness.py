@@ -205,25 +205,53 @@ def qt_deleted(obj: Any) -> bool:
     return sip.isdeleted(obj)
 
 
+class CanvasStandIn:
+    """无界面时的画布：一个固定的矩形，没有旋转。
+
+    保存工程时要问画布要范围和旋转，存成工程的默认视图；headless 里没有画布，所以用这个替身，
+    真实值取决于 GUI 里那一次保存看到了什么。
+
+    The canvas when there is no GUI: a fixed rectangle and no rotation.
+
+    Saving a project asks the canvas for its extent and rotation and stores them as the project's
+    default view; headless has no canvas, so this stands in and the real value is whatever a save
+    in the GUI saw.
+    """
+
+    def extent(self) -> Any:
+        from qgis.core import QgsRectangle  # pyright: ignore[reportMissingImports]
+
+        return QgsRectangle(0.0, 0.0, 1.0, 1.0)
+
+    def rotation(self) -> float:
+        return 0.0
+
+
 class FakeIface:
-    """操作真正用到的那一个界面调用：``newProject``。
+    """操作真正用到的那两个界面调用：``newProject`` 与 ``mapCanvas``。
 
     QGIS Desktop 里的实现会清空当前工程并报告是否清空；无界面时这就是它的全部内容。用例测的是调
     用它的那个操作，不是这个替身。``agent_engine`` 与 ``agent_registry`` 由 ``Plugin.initGui``
     挂上去，和真实界面一样。
 
-    The one interface call the operations make: ``newProject``.  QGIS Desktop's own
-    implementation clears the current project and reports whether it did; headless, that is the
+    The two interface calls the operations make: ``newProject`` and ``mapCanvas``.  QGIS Desktop's
+    own implementation clears the current project and reports whether it did; headless, that is the
     whole of it.  A case measures the operation that calls it, not this stand-in.
     ``agent_engine`` and ``agent_registry`` are published on it by ``Plugin.initGui``, exactly as
     on the real one.
     """
 
-    def newProject(self, promptToSaveFlag: bool = False) -> bool:
-        from qgis.core import QgsProject
+    def __init__(self) -> None:
+        self.canvas = CanvasStandIn()
+
+    def newProject(self, promptToSaveFlag: bool = False) -> bool:  # noqa: N802 - a PyQGIS name
+        from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
         QgsProject.instance().clear()
         return True
+
+    def mapCanvas(self) -> CanvasStandIn:  # noqa: N802 - a PyQGIS name
+        return self.canvas
 
 
 # ----------------------------------------------------------------- 探针 / probes
