@@ -1217,6 +1217,16 @@ def test_a_provider_that_cannot_list_sublayers_takes_the_path_itself(
     assert fake_qgis.constructed[0].source_uri == str(source.resolve())
     assert result.provider == "ogr"
 
+    # 那条分支不提供子数据集选择，所以点名一个子图层在那里无法达成。
+    # That branch offers no subdataset choice, so naming a sublayer there cannot be satisfied.
+    with pytest.raises(FrameworkError) as caught:
+        ops.LayerAdd().execute_main(
+            make_context(FakeProject()),
+            ops.LayerAddParams(**add_params(source_path=str(source), sub_layer="roads")),
+        )
+    assert caught.value.code == INVALID_LAYER
+    assert caught.value.message == f"{source.resolve()} does not offer sub-layers"
+
 
 def test_a_sub_layer_uri_comes_from_the_providers_own_detail(
     fake_qgis: FakeQgis, data_root: Path

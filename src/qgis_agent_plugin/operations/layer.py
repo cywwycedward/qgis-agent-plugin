@@ -247,7 +247,7 @@ def layer_source_uri(provider: str, source: Path, kind: LayerKind, sub_layer: st
         # A provider that cannot list sublayers cannot name one either; that branch offers no
         # subdataset choice at all.
         if sub_layer is not None:
-            raise FrameworkError(INVALID_LAYER, f"{source} cannot name a sub-layer")
+            raise FrameworkError(INVALID_LAYER, f"{source} does not offer sub-layers")
         return str(source)
     if not details:
         raise FrameworkError(INVALID_LAYER, f"{source} is not a valid or recognized data source.")
