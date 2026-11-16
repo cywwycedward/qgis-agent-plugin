@@ -388,6 +388,7 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
   dataclass；`OperationRegistry` 与 `ExecutionStore` 交出的是深拷贝，调用方改不动内部状态。
 - 记录里的 `error.message` 是给调用方看的：不带原始路径、provider URI，也不带异常原文。异常
   文本进日志（`log.exception`），进记录只有类型名（`"ValueError: unexpected failure"`）。
+  `processing.run_algorithm` 是唯一例外：失败的运行把 QGIS 报给用户的那一句当 message（§7.6）。
 - 不写"以后可能用到"的参数、配置、抽象。没有第二个调用方的包装层不要建。
 
 ### 5.3 日志
@@ -820,7 +821,7 @@ class OperationTask(QgsTask):
 
 没有用到、也不要随手引入的两种机制：`QgsTask.fromFunction`（拿不到 `setDependentLayers` 这类
 实例方法）与 `QgsProcessingAlgRunnerTask`/`QgsMapRendererParallelJob`（自带一套生命周期或自带
-线程；`processing.run_algorithm` 是在主线程直接调 `qgis.processing.run`）。
+线程；`processing.run_algorithm` 是在主线程直接调 `qgis.processing.runAndLoadResults`）。
 
 ### 6.11 插件生命周期：`Plugin`
 
@@ -984,7 +985,8 @@ absolute_path(raw: str) -> Path
 
 `record.error` 的形状是 `{"code": "…", "message": "…", "details": null}`：`details` 存在但
 **恒为 `null`**（`FrameworkError` 只带 code 与 message，没有 details 通路）；`message` 是给人看的
-一句话，不含原始路径、provider URI 或异常文本，堆栈只进本机日志。
+一句话，不含原始路径、provider URI 或异常文本，堆栈只进本机日志。唯一的例外是
+`processing.run_algorithm` 的失败：那一句是算法自己报的原文（§7.6）。
 
 | 码 | 何时用 | 谁用 |
 | --- | --- | --- |
@@ -1188,9 +1190,9 @@ absolute_path(raw: str) -> Path
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无 |
-| 返回 | `algorithms`（按（分组名、算法名、id）排序的 `{id, name, group}`；这是扁平投影，不是工具箱的 provider/分组树序——顺序不是判据） |
+| 返回 | `algorithms`（按（分组名、算法名、id）排序的 `{id, name, group}`；扁平投影，工具箱的 provider/分组树不复刻） |
 | 业务错误码 | 无 |
-| 行为 | 列桌面版工具箱能看到的算法：`HideFromToolbox` 总是挡掉，`KnownIssues` 只在"显示有已知问题的算法"开关关着时挡掉（默认关着）；没有 allow-list、没有"能不能跑"的字段；`get_algorithm_info` 仍能读被挡掉的算法（与 `algorithmHelp()` 一致） |
+| 行为 | 列工具箱能看到的算法：`HideFromToolbox` 总是挡掉，`KnownIssues` 只在 `Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES` 关着时挡掉（缺键时默认关）；没有 allow-list、没有“能不能跑”的字段；`get_algorithm_info` 仍能读被挡掉的算法 |
 
 #### processing.get_algorithm_info
 
@@ -1199,17 +1201,17 @@ absolute_path(raw: str) -> Path
 | 参数 | `algorithm_id`（≥1） |
 | 返回 | `algorithm`（`id`、`name`、`short_description`、`help`）；`parameters[]`（`name`、`description`、`help`、`type`、`options`、`accepted_types`）；`outputs[]`（`name`、`type`、`description`） |
 | 业务错误码 | `INVALID_INPUT`（算法未注册——是调用方输入错误，不是未知插件操作；消息是 `algorithmHelp()` 打印的那句 `Algorithm "<id>" not found.`） |
-| 行为 | 隐藏参数直接跳过（与 `algorithmHelp()` 一致）；`options` 只有枚举才有，其余是 `null`；字段取值来自原生定义，不在这里翻译或校验 |
+| 行为 | 隐藏参数直接跳过；`options` 只有枚举才有，其余是 `null`；字段取值来自原生定义，不在这里翻译或校验 |
 
 #### processing.run_algorithm
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `algorithm_id`（≥1）、`parameters`（以原生参数名为键的 JSON 树）、`continue_on_crs_mismatch`（StrictBool，默认 `false`；桌面版在参数 CRS 不一致时问的那句"要继续吗"，默认按钮是"否"） |
-| 返回 | `algorithm_id`、`outputs`（原生键下的输出，结果图层报 id）、`messages`（`level`/`text`/`fatal`，七种级别） |
-| 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象；未知算法 id，消息是运行路径那句 `Error: Algorithm <id> not found`（含结尾换行）；参数值过不了 QGIS 的 `checkValueIsAcceptable`；输出值过不了 `isSupportedOutputValue`；`checkParameterValues` 拒绝；CRS 不一致且 `continue_on_crs_mismatch=false`）、`INTERNAL_ERROR`（`qgis.processing.run` 抛异常、结果无无损 JSON 形式、结果图层没加进工程、结果键不是字符串） |
-| 行为 | 不重新实现 QGIS，但运行前问的每个问题与桌面版窗口一样，而且都是 QGIS 自己的函数：`createAlgorithmById` 取实例，补上参数面板会交出的值（非输出参数缺席时用它自己的 `defaultValueForGui()`，输出参数没有默认值就是临时输出），逐个参数问 `checkValueIsAcceptable`、对每个有值的输出问 `isSupportedOutputValue`、问 CRS 不一致的确认（受桌面版"参数 CRS 不一致就先警告"开关约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息就是桌面版对同一问题说的那一句。通过后才把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.run()`。七个 `push*`/`reportError` 覆写都先调 `super()`，保留 QGIS 自己的日志，再把同一条文本记进 `messages`；未声明的参数键、远程 URI 一律原样透传；异常文本与 feedback 消息只进日志，调用方只拿到引擎的未预期失败码；结果图层会加进当前工程并报 id，结果无法返回时只移除这次调用加的那几个（算法自己的外部副作用不声称回滚） |
-| 输出目标 | 输出参数是调用方的回答，缺席不是"随便"：桌面版参数面板对每个输出参数都自带一个值，默认就是临时输出，所以缺席的必填输出会被补成 `QgsProcessing.TEMPORARY_OUTPUT`（字符串，JSON 安全），可选且不默认创建的输出保持缺席（面板的"跳过输出"），显式 `None` 也是跳过输出。远程字形先过 `isSupportedOutputValue`，再由 QGIS 打开。实测：`native:buffer` + `TEMPORARY_OUTPUT`（或缺席）→ 结果图层进工程；`gdal:convertformat` + 磁盘路径 → 文件写出且 `outputs` 里就是该路径；`gdal:buffervectors` + `memory:` → `INVALID_INPUT`、消息 `This algorithm only supports disk-based outputs`（桌面版输出控件同一判据；QGIS 自己会误报 `SUCCEEDED` 并把字面量 `memory:` 当输出值）；`.zzz` 这种扩展名在桌面版会被拒，插件同样拒（不然 QGIS 会自己补成 `.zzz.gpkg` 写出去）；`/vsicurl/…` 目标过判据后由 QGIS 报错 |
+| 参数 | `algorithm_id`（≥1）、`parameters`（以原生参数名为键的 JSON 树）、`continue_on_crs_mismatch`（StrictBool，默认 `false`；参数 CRS 不一致时那句“要继续吗”的答案，QGIS 的默认按钮是“否”） |
+| 返回 | `algorithm_id`、`outputs`（原生键下的输出；图层输出是工程里的图层 id 或调用方给的路径，取决于 QGIS 交给 `runAndLoadResults` 的值）、`messages`（`level`/`text`/`fatal`，七种级别） |
+| 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象；未知算法 id，消息是运行路径那句 `Error: Algorithm <id> not found`（含结尾换行）；参数值过不了 QGIS 的 `checkValueIsAcceptable`；输出值过不了 `isSupportedOutputValue`；`checkParameterValues` 拒绝；CRS 不一致且 `continue_on_crs_mismatch=false`）、`INTERNAL_ERROR`（`runAndLoadResults` 抛异常，消息是异常的原文；结果无无损 JSON 形式） |
+| 行为 | 运行前的问题都是 QGIS 自己的函数，顺序与参数面板一致：`createAlgorithmById` 取实例，补上控件会交出的值（缺席的可见参数用 `defaultValueForGui()`，缺席的输出参数是临时输出，可选且不默认创建的保持缺席），按参数定义顺序逐个问 `checkValueIsAcceptable` / 对每个有值的输出问 `isSupportedOutputValue`，过一遍 `preprocessParameters`，问 CRS 不一致的确认（受 `Processing/Configuration/WARN_UNMATCHING_CRS` 约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息是 QGIS 对同一问题说的那一句。通过后把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.runAndLoadResults()`：结果图层由 QGIS 的后处理加载进当前工程（磁盘输出也一样），图层名、样式与结果分组都由 QGIS 决定。七个 `push*`/`reportError` 覆写都先调 `super()`，再把同一条文本记进 `messages`；提供者的 `warningMessage()` 在运行前用 `reportError` 报出；未声明的参数键、远程 URI 一律原样透传；运行失败抛 `FrameworkError(INTERNAL_ERROR, 异常原文)`，`FAILED` 记录没有 `messages` 字段，所以那一批消息另有一份进本地日志 |
+| 输出目标 | 输出参数是调用方的回答，缺席不是“随便”：参数面板对每个输出参数都自带一个值，默认就是临时输出，所以缺席的必填输出会被补成 `QgsProcessing.TEMPORARY_OUTPUT`（字符串，JSON 安全），可选且不默认创建的输出保持缺席（面板的“跳过输出”），显式 `None` 也是跳过输出。远程字形先过 `isSupportedOutputValue`，再由 QGIS 打开。实测：`native:buffer` + `TEMPORARY_OUTPUT`（或缺席）→ 结果图层进工程（名字是输出参数的描述）；`gdal:convertformat` + 磁盘路径 → 文件写出、`outputs` 里就是该路径，图层由后处理读进工程；`gdal:buffervectors` + `memory:` → `INVALID_INPUT`、消息 `This algorithm only supports disk-based outputs`；`.zzz` 这种扩展名同样被拒（不然 QGIS 会自己补成 `.zzz.gpkg` 写出去）；`/vsicurl/…` 目标过判据后由 QGIS 报错 |
 
 ### 7.7 一次调用会碰到的其它码
 

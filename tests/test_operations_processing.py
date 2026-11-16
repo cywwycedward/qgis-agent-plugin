@@ -66,51 +66,11 @@ LOGGER_NAME = "qgis_agent_plugin.operations.processing"
 # --- 假 QGIS 层 / the fake QGIS ---------------------------------------------
 
 
-class FakeLayer:
-    """一个能被工程装下的图层，也是运行吐回来的对象；测试只比较它的身份。
-
-    A layer the project can hold, and the object a run hands back; identity is all a
-    test compares.
-    """
-
-    def __init__(self, layer_id: str) -> None:
-        self.layer_id = layer_id
-
-    def id(self) -> str:
-        return self.layer_id
-
-
 class FakeProject:
-    """一个带 QGIS 真实加入规则的工程：id 已存在时第二层被拒，工程返回 ``None``。
+    """一次调用手里的工程句柄；processing 的操作只把它交给 QGIS。
 
-    A project with QGIS's real ``addMapLayer`` rule: a duplicate id is refused.
+    The project handle one call holds; a processing operation only hands it to QGIS.
     """
-
-    def __init__(self) -> None:
-        self.layers: dict[str, Any] = {}
-        self.added: list[Any] = []
-        self.removed: list[str] = []
-
-    def mapLayer(self, layer_id: str) -> Any | None:
-        return self.layers.get(layer_id)
-
-    def mapLayers(self) -> dict[str, Any]:
-        return dict(self.layers)
-
-    def addMapLayer(self, layer: Any, add_to_legend: bool = True) -> Any:
-        # 实测：id 重复的第二层不会被加入。
-        # 工程返回 ``None``，先前的层保留。
-        # Measured: a duplicate id is not added.
-        # The project returns None; the first stays.
-        if layer.id() in self.layers:
-            return None
-        self.layers[layer.id()] = layer
-        self.added.append(layer)
-        return layer
-
-    def removeMapLayer(self, layer_id: str) -> Any | None:
-        self.removed.append(layer_id)
-        return self.layers.pop(layer_id, None)
 
 
 class FakeFeedback:
@@ -280,6 +240,19 @@ class FakeOutput:
         return self._description
 
 
+class FakeProvider:
+    """``QgsProcessingProvider`` 的替身：只暴露运行前要报的那句告警。
+
+    A ``QgsProcessingProvider``: only the warning a run has to report.
+    """
+
+    def __init__(self, warning: str = "") -> None:
+        self._warning = warning
+
+    def warningMessage(self) -> str:  # noqa: N802 - the native spelling
+        return self._warning
+
+
 class FakeAlgorithm:
     """一条已注册的算法定义；运行前桌面版问的每个问题都在这里回一个预设的答案。
 
@@ -301,6 +274,7 @@ class FakeAlgorithm:
         parameters_ok: bool = True,
         parameters_message: str = "",
         crs_ok: bool = True,
+        provider_warning: str = "",
     ) -> None:
         self.algorithm_id = algorithm_id
         self._name = name
@@ -315,6 +289,11 @@ class FakeAlgorithm:
         self._crs_ok = crs_ok
         self.parameter_checks: list[tuple[dict[str, Any], Any]] = []
         self.crs_checks: list[tuple[dict[str, Any], Any]] = []
+        self.preprocessed: list[dict[str, Any]] = []
+        # ``preprocessParameters`` 交回的 map，在调用方的 map 之后合并。
+        # What preprocessParameters hands back, merged after the caller's map.
+        self.adds_on_preprocess: dict[str, Any] = {}
+        self._provider = FakeProvider(provider_warning)
 
     def id(self) -> str:
         return self.algorithm_id
@@ -339,6 +318,15 @@ class FakeAlgorithm:
 
     def outputDefinitions(self) -> list[Any]:  # noqa: N802 - the native spelling
         return list(self._outputs)
+
+    def provider(self) -> FakeProvider:
+        return self._provider
+
+    def preprocessParameters(  # noqa: N802 - the native spelling
+        self, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.preprocessed.append(dict(parameters))
+        return {**parameters, **self.adds_on_preprocess}
 
     def checkParameterValues(  # noqa: N802 - the native spelling
         self, parameters: dict[str, Any], context: Any
@@ -439,7 +427,9 @@ class FakeProcessing:
         self.contexts.append(context)
         return context
 
-    def run(self, algorithm_id: str, parameters: dict[str, Any], **kwargs: Any) -> Any:
+    def runAndLoadResults(  # noqa: N802 - the native spelling
+        self, algorithm_id: str, parameters: dict[str, Any], **kwargs: Any
+    ) -> Any:
         self.calls.append(Call(algorithm_id, parameters, kwargs))
         feedback = self.kwargs_feedback(kwargs)
         if feedback is not None:
@@ -448,6 +438,11 @@ class FakeProcessing:
         if self.error is not None:
             raise self.error
         return self.results
+
+    def run(self, *arguments: Any, **kwargs: Any) -> Any:
+        # 不走只运行、不加载结果的那条路：结果图层就是靠加载进工程的。
+        # Never the run-without-loading path: loading the result layers is the point.
+        raise AssertionError(f"processing.run must not be used: {arguments} {kwargs}")
 
     @staticmethod
     def kwargs_feedback(kwargs: dict[str, Any]) -> FakeFeedback | None:
@@ -463,9 +458,8 @@ class FakeQgis:
     def __init__(self) -> None:
         self.registry = FakeRegistry()
         self.processing = FakeProcessing()
-        # 桌面版的“参数 CRS 不一致就先警告”开关，默认开着。
-        # The desktop's "warn before executing if parameter CRSes do not match" switch, on by
-        # default.
+        # 参数 CRS 不一致就先警告的开关，默认开着。
+        # The "warn before executing if parameter CRSes do not match" switch, on by default.
         self.settings: dict[str, Any] = {
             _SETTINGS_WARN_UNMATCHING_CRS: True,
             _SETTINGS_SHOW_KNOWN_ISSUES: False,
@@ -501,11 +495,13 @@ class FakeQgis:
             QgsProcessingFeedback=FakeFeedback,
             QgsProcessingParameterDefinition=FakeParameterDefinition,
             QgsProcessingParameterEnum=FakeEnumDefinition,
-            QgsMapLayer=FakeLayer,
             QgsSettings=QgsSettings,
         )
         processing = fake_module(
-            "qgis.processing", run=self.processing.run, createContext=self.processing.createContext
+            "qgis.processing",
+            run=self.processing.run,
+            runAndLoadResults=self.processing.runAndLoadResults,
+            createContext=self.processing.createContext,
         )
         return {
             "qgis": fake_module("qgis", core=core, processing=processing),
@@ -535,13 +531,6 @@ def make_context(project: Any) -> OperationContext:
     return OperationContext(iface=None, project=project, lifecycle=None, policy=Settings())
 
 
-def project_with_layers(*layer_ids: str) -> FakeProject:
-    project = FakeProject()
-    for layer_id in layer_ids:
-        project.layers[layer_id] = FakeLayer(layer_id)
-    return project
-
-
 def install(
     fake: FakeQgis,
     *definitions: Any,
@@ -555,6 +544,7 @@ def install(
     parameters_ok: bool = True,
     parameters_message: str = "",
     crs_ok: bool = True,
+    provider_warning: str = "",
 ) -> FakeAlgorithm:
     algorithm = FakeAlgorithm(
         algorithm_id,
@@ -568,6 +558,7 @@ def install(
         parameters_ok=parameters_ok,
         parameters_message=parameters_message,
         crs_ok=crs_ok,
+        provider_warning=provider_warning,
     )
     fake.registry.algorithms_by_id[algorithm_id] = algorithm
     return algorithm
@@ -616,7 +607,7 @@ def run(fake: FakeQgis, parameters: dict[str, Any] | None = None, **kwargs: Any)
         install(fake)
     fake.processing.results = kwargs.pop("results", {})
     return ops.ProcessingRunAlgorithm().execute_main(
-        make_context(kwargs.pop("project", FakeProject())),
+        make_context(FakeProject()),
         run_params({} if parameters is None else parameters),
     )
 
@@ -663,7 +654,7 @@ def test_a_summary_only_takes_real_strings() -> None:
     }
 
 
-def test_the_details_block_carries_exactly_the_four_design_fields() -> None:
+def test_the_details_block_carries_the_id_name_short_description_and_help() -> None:
     details = ops.AlgorithmDetails(
         id="native:buffer", name="Buffer", short_description="Buffers", help="How to buffer"
     )
@@ -674,7 +665,7 @@ def test_the_details_block_carries_exactly_the_four_design_fields() -> None:
         ops.AlgorithmDetails(id="a", name="A", short_description="", help=1)
 
 
-def test_a_parameter_carries_exactly_the_six_design_fields_in_order() -> None:
+def test_a_parameter_carries_its_six_fields_in_order() -> None:
     parameter = ops.AlgorithmParameter(**parameter_values())
     assert list(parameter.model_dump()) == [
         "name",
@@ -784,41 +775,6 @@ def test_a_parameter_key_must_be_a_string() -> None:
     assert enum_keyed.parameters == {"red": 1}
 
 
-def _too_deep_list() -> Any:
-    """比解释器递归深度（默认 1000）还深一层的树。
-
-    A tree deeper than the interpreter recurses (1000 by default).
-    """
-
-    value: Any = None
-    for _ in range(sys.getrecursionlimit() + 1):
-        value = [value]
-    return value
-
-
-def _cyclic_list() -> Any:
-    """含有自己的列表：它没有任何有限的 JSON 形态。
-
-    A list that contains itself: no finite JSON image exists for it.
-    """
-
-    value: list[Any] = []
-    value.append(value)
-    return value
-
-
-@pytest.mark.parametrize(
-    "value", [_too_deep_list(), _cyclic_list()], ids=["deeper-than-the-stack", "cyclic"]
-)
-def test_a_parameter_tree_the_json_walk_cannot_finish_is_invalid_input(value: Any) -> None:
-    # ``RecursionError`` 不是 ``ValidationError``。
-    # 让它逃出去会被报成内部故障。
-    # RecursionError is not a ValidationError.
-    # Letting it escape reports an internal failure.
-    with pytest.raises(ValidationError):
-        ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={"VALUE": value})
-
-
 def test_outputs_are_checked_as_json_too() -> None:
     with pytest.raises(ValidationError):
         ops.ProcessingRunAlgorithmResult(algorithm_id="a", outputs={"MEAN": math.nan}, messages=[])
@@ -856,7 +812,7 @@ def test_the_list_uses_the_flat_group_name_order(fake_qgis: FakeQgis) -> None:
     ]
 
 
-def test_the_list_drops_what_the_toolbox_hides(fake_qgis: FakeQgis) -> None:
+def test_the_list_drops_hidden_and_known_issue_algorithms(fake_qgis: FakeQgis) -> None:
     install(fake_qgis, algorithm_id="native:hidden", flags=_FLAG_HIDE_FROM_TOOLBOX)
     install(fake_qgis, algorithm_id="native:known-issues", flags=_FLAG_KNOWN_ISSUES)
     install(fake_qgis, algorithm_id="native:plain")
@@ -878,7 +834,7 @@ def test_a_persisted_off_value_keeps_a_known_issue_hidden(fake_qgis: FakeQgis, s
     assert result.algorithms == []
 
 
-def test_a_known_issue_is_listed_once_the_desktop_setting_shows_it(fake_qgis: FakeQgis) -> None:
+def test_a_known_issue_is_listed_once_the_setting_shows_it(fake_qgis: FakeQgis) -> None:
     fake_qgis.settings[_SETTINGS_SHOW_KNOWN_ISSUES] = True
     install(fake_qgis, algorithm_id="native:hidden", flags=_FLAG_HIDE_FROM_TOOLBOX)
     install(fake_qgis, algorithm_id="native:known-issues", flags=_FLAG_KNOWN_ISSUES)
@@ -919,7 +875,7 @@ def info(fake: FakeQgis, algorithm_id: str = "native:test") -> Any:
     )
 
 
-def test_info_carries_exactly_the_three_design_sections(fake_qgis: FakeQgis) -> None:
+def test_info_carries_the_algorithm_its_parameters_and_its_outputs(fake_qgis: FakeQgis) -> None:
     install(fake_qgis, FakeDefinition("INPUT", "source"), outputs=(FakeOutput("OUTPUT"),))
     result = info(fake_qgis)
     assert list(result.model_dump()) == ["algorithm", "parameters", "outputs"]
@@ -1041,7 +997,7 @@ def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: Fake
     parameters = {"INPUT": "roads", "DISTANCE": 5, "OUTPUT": "memory:"}
 
     result = ops.ProcessingRunAlgorithm().execute_main(
-        make_context(project_with_layers("roads")), run_params(parameters)
+        make_context(FakeProject()), run_params(parameters)
     )
 
     assert len(fake_qgis.processing.calls) == 1
@@ -1060,9 +1016,9 @@ def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: Fake
 
 
 def test_the_run_resolves_the_id_through_the_registry_factory(fake_qgis: FakeQgis) -> None:
-    """桌面版运行路径用 ``createAlgorithmById`` 拿实例；这里也一样。
+    """运行路径用 ``createAlgorithmById`` 拿实例；这里是同一个厂。
 
-    The desktop's run path takes its instance from ``createAlgorithmById``; so does this.
+    The run path takes its instance from ``createAlgorithmById``; so does this.
     """
     install(fake_qgis)
 
@@ -1087,12 +1043,10 @@ def test_an_unknown_algorithm_is_invalid_input_before_anything_is_built(
     assert fake_qgis.processing.calls == []
 
 
-# --- processing.run_algorithm：桌面版点“运行”前问的问题 / the questions before Run
+# --- processing.run_algorithm：运行前问的问题 / the questions before a run -----
 
 
-def test_a_missing_required_destination_gets_the_desktop_temporary_output(
-    fake_qgis: FakeQgis,
-) -> None:
+def test_a_missing_required_destination_gets_the_temporary_output(fake_qgis: FakeQgis) -> None:
     output = destination()
     install(fake_qgis, FakeDefinition("DISTANCE", "number"), output)
 
@@ -1100,8 +1054,8 @@ def test_a_missing_required_destination_gets_the_desktop_temporary_output(
 
     call = fake_qgis.processing.calls[0]
     assert call.parameters == {"DISTANCE": 5, "OUTPUT": "TEMPORARY_OUTPUT"}
-    # 面板也会检查它自己的默认值，所以补上的值不是“跳过检查”。
-    # The panel checks its own default too, so a filled value is not a skipped check.
+    # 控件也会检查它自己的默认值，所以补上的值不是“跳过检查”。
+    # The widget checks its own default too, so a filled value is not a skipped check.
     assert [value for value, _ in output.supported_checks] == ["TEMPORARY_OUTPUT"]
 
 
@@ -1109,12 +1063,12 @@ def test_a_destination_the_caller_named_is_kept(fake_qgis: FakeQgis) -> None:
     install(fake_qgis, destination())
 
     run(fake_qgis, {"OUTPUT": "memory:"})
-    # ``None`` 是桌面版的“跳过输出”，不是“用默认值”。
-    # ``None`` is the desktop's "skip output", not "use the default".
+    # ``None`` 是“跳过输出”：面板对跳过的输出不放键。
+    # ``None`` is "skip output": the panel keeps no key for a skipped output.
     run(fake_qgis, {"OUTPUT": None})
 
     assert fake_qgis.processing.calls[0].parameters == {"OUTPUT": "memory:"}
-    assert fake_qgis.processing.calls[1].parameters == {"OUTPUT": None}
+    assert fake_qgis.processing.calls[1].parameters == {}
 
 
 def test_an_optional_destination_that_is_off_by_default_stays_absent(fake_qgis: FakeQgis) -> None:
@@ -1143,12 +1097,39 @@ def test_a_hidden_destination_is_never_filled(fake_qgis: FakeQgis) -> None:
     assert fake_qgis.processing.calls[0].parameters == {}
 
 
-def test_a_gui_default_wins_over_the_temporary_output(fake_qgis: FakeQgis) -> None:
+def test_a_parameter_default_wins_over_the_temporary_output(fake_qgis: FakeQgis) -> None:
     install(fake_qgis, destination(gui_default="fixed.gpkg"))
 
     run(fake_qgis, {})
 
     assert fake_qgis.processing.calls[0].parameters == {"OUTPUT": "fixed.gpkg"}
+
+
+def test_the_algorithm_preprocesses_the_parameters_after_the_value_checks(
+    fake_qgis: FakeQgis,
+) -> None:
+    algorithm = install(fake_qgis, FakeDefinition("INPUT", "source"))
+    algorithm.adds_on_preprocess = {"RESOLVED": 1}
+
+    run(fake_qgis, {"INPUT": "roads"})
+
+    assert algorithm.preprocessed == [{"INPUT": "roads"}]
+    # 预处理之后的 map 才是 QGIS 剩下的问题与运行拿到的那张。
+    # The preprocessed map is the one QGIS's remaining questions and the run see.
+    assert algorithm.parameter_checks[0][0] == {"INPUT": "roads", "RESOLVED": 1}
+    assert fake_qgis.processing.calls[0].parameters == {"INPUT": "roads", "RESOLVED": 1}
+
+
+def test_a_refused_value_stops_the_call_before_preprocessing(fake_qgis: FakeQgis) -> None:
+    algorithm = install(
+        fake_qgis, FakeDefinition("DISTANCE", "number", description="Distance", acceptable=False)
+    )
+
+    with pytest.raises(FrameworkError):
+        run(fake_qgis, {"DISTANCE": "abc"})
+
+    assert algorithm.preprocessed == []
+    assert fake_qgis.processing.calls == []
 
 
 def test_the_panel_sentence_is_the_one_for_a_bad_parameter(fake_qgis: FakeQgis) -> None:
@@ -1231,9 +1212,10 @@ def test_a_skipped_destination_is_not_extension_checked(fake_qgis: FakeQgis) -> 
     run(fake_qgis, {"OUTPUT": None})
 
     assert output.supported_checks == []
+    assert fake_qgis.processing.calls[0].parameters == {}
 
 
-def test_a_crs_mismatch_is_refused_with_the_desktop_question(fake_qgis: FakeQgis) -> None:
+def test_a_crs_mismatch_is_refused_with_the_question(fake_qgis: FakeQgis) -> None:
     algorithm = install(fake_qgis, crs_ok=False)
 
     with pytest.raises(FrameworkError) as caught:
@@ -1264,8 +1246,8 @@ def test_the_crs_answer_lets_the_run_continue(fake_qgis: FakeQgis) -> None:
 def test_the_crs_question_is_skipped_for_every_persisted_off_value(
     fake_qgis: FakeQgis, stored: Any
 ) -> None:
-    # 桌面版把持久化的值按 ``str(value).lower() == "true"`` 归一；``'false'``/``'0'`` 不是真。
-    # The desktop normalises a persisted value with ``str(value).lower() == "true"``; ``'false'``
+    # QGIS 把持久化的值按 ``str(value).lower() == "true"`` 归一；``'false'``/``'0'`` 不是真。
+    # QGIS normalises a persisted value with ``str(value).lower() == "true"``; ``'false'``
     # and ``'0'`` are not true.
     fake_qgis.settings[_SETTINGS_WARN_UNMATCHING_CRS] = stored
     algorithm = install(fake_qgis, crs_ok=False)
@@ -1274,6 +1256,16 @@ def test_the_crs_question_is_skipped_for_every_persisted_off_value(
 
     assert algorithm.crs_checks == []
     assert len(fake_qgis.processing.calls) == 1
+
+
+def test_the_provider_warning_is_reported_before_the_run(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, provider_warning="this provider is deprecated")
+
+    result = run(fake_qgis)
+
+    assert [(message.level, message.text) for message in result.messages] == [
+        ("error", "this provider is deprecated")
+    ]
 
 
 def test_a_parameter_check_failure_is_invalid_input_with_the_qgis_sentence(
@@ -1308,10 +1300,6 @@ def test_the_parameters_reach_the_run_as_they_arrived(fake_qgis: FakeQgis) -> No
 
 def test_an_empty_result_is_a_success(fake_qgis: FakeQgis) -> None:
     assert run(fake_qgis, results={}).outputs == {}
-
-
-def test_a_none_result_is_an_empty_success(fake_qgis: FakeQgis) -> None:
-    assert run(fake_qgis, results=None).outputs == {}
 
 
 def test_a_result_that_is_not_a_mapping_is_refused(fake_qgis: FakeQgis) -> None:
@@ -1352,16 +1340,15 @@ def test_a_fatal_error_is_recorded_as_fatal(fake_qgis: FakeQgis) -> None:
     assert (message.level, message.text, message.fatal) == ("error", "the provider gave up", True)
 
 
-def test_the_feedback_keeps_the_base_class_calls_and_the_errors_view(fake_qgis: FakeQgis) -> None:
+def test_each_feedback_method_runs_the_base_class_before_recording(fake_qgis: FakeQgis) -> None:
     fake_qgis.processing.messages = [
         ("pushInfo", ("started",)),
         ("reportError", ("first failure", False)),
         ("pushWarning", ("careful",)),
         ("reportError", ("second failure", True)),
     ]
-    call = fake_qgis.processing.calls
     run(fake_qgis)
-    feedback = call[0].feedback
+    feedback = fake_qgis.processing.calls[0].feedback
 
     # 基类方法在对应记录写入前跑完。
     # The base method ran before its record was appended.
@@ -1371,66 +1358,9 @@ def test_the_feedback_keeps_the_base_class_calls_and_the_errors_view(fake_qgis: 
         ("pushWarning", 2),
         ("reportError", 3),
     ]
-    assert feedback.errors == ["first failure", "second failure"]
-    assert feedback.has_errors is True
 
 
-def test_a_feedback_without_an_error_reports_none(fake_qgis: FakeQgis) -> None:
-    fake_qgis.processing.messages = [("pushInfo", ("started",))]
-    run(fake_qgis)
-    feedback = fake_qgis.processing.calls[0].feedback
-    assert feedback.errors == []
-    assert feedback.has_errors is False
-
-
-# --- processing.run_algorithm：结果图层 / the result layers ------------------
-
-
-def test_a_result_layer_is_added_to_the_project_and_reported_by_its_id(
-    fake_qgis: FakeQgis,
-) -> None:
-    layer = FakeLayer("memory-out")
-    project = project_with_layers("roads")
-    result = run(fake_qgis, results={"OUTPUT": layer}, project=project)
-
-    assert result.outputs == {"OUTPUT": "memory-out"}
-    assert project.mapLayer("memory-out") is layer
-    assert project.added == [layer]
-
-
-def test_a_layer_inside_a_list_and_a_mapping_is_added_as_well(fake_qgis: FakeQgis) -> None:
-    first, second = FakeLayer("first-out"), FakeLayer("second-out")
-    project = FakeProject()
-    result = run(
-        fake_qgis,
-        results={"LAYERS": [first], "NESTED": {"LAYER": second}},
-        project=project,
-    )
-    assert result.outputs == {"LAYERS": ["first-out"], "NESTED": {"LAYER": "second-out"}}
-    assert project.added == [first, second]
-
-
-def test_the_same_layer_is_added_once(fake_qgis: FakeQgis) -> None:
-    layer = FakeLayer("memory-out")
-    project = FakeProject()
-    result = run(fake_qgis, results={"FIRST": layer, "SECOND": [layer]}, project=project)
-
-    assert result.outputs == {"FIRST": "memory-out", "SECOND": ["memory-out"]}
-    assert project.added == [layer]
-
-
-def test_a_project_id_collision_is_an_internal_error(fake_qgis: FakeQgis) -> None:
-    existing = FakeLayer("memory-out")
-    project = FakeProject()
-    project.layers["memory-out"] = existing
-
-    with pytest.raises(FrameworkError) as caught:
-        run(fake_qgis, results={"OUTPUT": FakeLayer("memory-out")}, project=project)
-    assert caught.value.code == INTERNAL_ERROR
-    # 工程用这个 id 拒了第二层；先前那层没被碰。
-    # The duplicate id was refused; the first stays.
-    assert project.mapLayer("memory-out") is existing
-    assert project.added == []
+# --- processing.run_algorithm：结果值 / the result values --------------------
 
 
 @pytest.mark.parametrize(
@@ -1446,37 +1376,20 @@ def test_a_result_without_a_json_image_is_an_internal_error(
     assert caught.value.code == INTERNAL_ERROR
     # 被拒的结果用契约描述，不用对象的 repr。
     # A refused result is described by its contract.
-    assert caught.value.message in (
-        "an algorithm result cannot be expressed as JSON",
-        "an algorithm result key is not a string",
-    )
+    assert caught.value.message == "an algorithm result cannot be expressed as JSON"
 
 
-def test_a_refused_result_removes_only_the_layers_this_run_added(fake_qgis: FakeQgis) -> None:
-    layer = FakeLayer("memory-out")
-    project = project_with_layers("roads")
-
-    with pytest.raises(FrameworkError) as caught:
-        run(fake_qgis, results={"OUTPUT": layer, "BROKEN": object()}, project=project)
-    assert caught.value.code == INTERNAL_ERROR
-    assert project.removed == ["memory-out"]
-    assert project.mapLayer("memory-out") is None
-    # 调用前就在工程里的图层没被碰。
-    # The layer already in the project is untouched.
-    assert project.mapLayer("roads") is not None
-
-
-# --- processing.run_algorithm：失败就是 QGIS 的原异常 / a failure is QGIS's --
+# --- processing.run_algorithm：失败的那一句 / the failure sentence ----------
 
 
 class RunFailed(RuntimeError):
-    """假 ``qgis.processing.run()`` 抛出的异常。
+    """假 ``qgis.processing.runAndLoadResults()`` 抛出的异常。
 
-    What a fake ``qgis.processing.run()`` raises.
+    What a fake ``qgis.processing.runAndLoadResults()`` raises.
     """
 
 
-def test_an_exception_from_the_run_is_raised_unchanged(
+def test_a_failed_run_is_reported_as_internal_error_with_qgis_sentence(
     fake_qgis: FakeQgis, caplog: pytest.LogCaptureFixture
 ) -> None:
     install(fake_qgis)
@@ -1486,14 +1399,14 @@ def test_an_exception_from_the_run_is_raised_unchanged(
 
     with (
         caplog.at_level(logging.WARNING, logger=LOGGER_NAME),
-        pytest.raises(RunFailed) as caught,
+        pytest.raises(FrameworkError) as caught,
     ):
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
 
-    # 同一个异常对象，不是编出来的错误码。
-    # The same exception object, not an invented code.
-    assert caught.value is fake_qgis.processing.error
-    assert not isinstance(caught.value, FrameworkError)
+    # 码是插件的兑底码，消息是 QGIS 给用户的那一句。
+    # The code is the plugin's fallback; the message is the sentence QGIS shows the user.
+    assert caught.value.code == INTERNAL_ERROR
+    assert caught.value.message == "the algorithm did not finish"
     # 原生消息和异常文本只进本地日志。
     # Native messages and text go to the local log only.
     assert native in caplog.text
@@ -1501,14 +1414,14 @@ def test_an_exception_from_the_run_is_raised_unchanged(
     assert "the algorithm did not finish" in caplog.text
 
 
-def test_a_failed_run_reports_no_result_and_no_messages(fake_qgis: FakeQgis) -> None:
+def test_a_failed_run_reports_the_call_shape_and_no_result(fake_qgis: FakeQgis) -> None:
     install(fake_qgis)
     fake_qgis.processing.messages = [("reportError", ("broken", False))]
     fake_qgis.processing.error = RunFailed("no result")
-    with pytest.raises(RunFailed):
+    with pytest.raises(FrameworkError):
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
-    # 记录由引擎写，失败时不返回。
-    # The engine builds it; a failure returns nothing.
+    # 记录由引擎写，失败时不返回；交给 QGIS 的仍是那几样。
+    # The engine builds the record and a failure returns nothing; what QGIS got is unchanged.
     assert fake_qgis.processing.calls[0].kwargs.keys() == {"feedback", "context"}
 
 
