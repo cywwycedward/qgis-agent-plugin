@@ -870,29 +870,31 @@ def at_14_submission_refused(ctx: Context) -> str:
 
 
 def at_15_stateful_replace_refused(ctx: Context) -> str:
-    """判据只有一条：工程有未保存内容时才问，且不问就是拒。
+    """未保存内容有四道问句；有图层但不是这四件事时 GUI 不问、operation 也不拒。
 
-    有图层不等于有未保存内容：GUI 只问 ``is_dirty()``，所以一个没改过的工程（哪怕在它上面加过
-    图层）照样被换掉，而一个标脏的工程没有 ``discard_current=true`` 就拒。
+    ``QgisApp::fileNew``/``openProject`` 调的是同一串 check（``qgisapp.cpp:5820`` / ``:6943``）：
+    图层编辑、memory/临时图层、工程脏、栅格 RAT。这里把最容易漏的那一条—
+    “图层有未提交编辑而工程 ``is_dirty()`` 仍是 false”—
+    在真 QGIS 上造出来，证明它是判据的一部分。
 
-    One criterion only: ask when the project holds unsaved content, and refuse when not asked.
-    Layers are not unsaved content: the GUI asks on ``is_dirty()`` alone, so a project nobody
-    edited (even one layers were added to) is replaced, and a dirty one is refused without
-    ``discard_current=true``.
+    Unsaved content is four questions, and ``QgisApp::fileNew``/``openProject`` call the same chain
+    (``qgisapp.cpp:5820`` / ``:6943``): layer edits, memory/temporary layers, a dirty project, a
+    raster attribute table.  This builds the easiest one to miss -- a layer with uncommitted edits
+    while ``is_dirty()`` is still false -- in real QGIS, to show it is part of the criterion.
     """
 
-    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+    from qgis.core import QgsProject, QgsVectorLayerUtils  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
     cities_layer(ctx, "at15 cities")
-    layers_before = [(layer_id, layer.name()) for layer_id, layer in project_layers().items()]
+    layers_before = [(item, layer.name()) for item, layer in project_layers().items()]
 
     QgsProject.instance().setDirty(True)
     record = ctx.run("project.create", {})
     equal(record.status, ExecutionStatus.FAILED, "project.create without discard_current")
     equal(error_code(record), PROJECT_REPLACE_REQUIRED, "the code for an unarmed replacement")
     equal(
-        [(layer_id, layer.name()) for layer_id, layer in project_layers().items()],
+        [(item, layer.name()) for item, layer in project_layers().items()],
         layers_before,
         "the project after the refused call",
     )
@@ -908,11 +910,51 @@ def at_15_stateful_replace_refused(ctx: Context) -> str:
         "project.open over a clean project that still holds layers",
     )
     equal(len(project_layers()), 2, "the layers the opened project brought")
+
+    # 图层有未提交的编辑，而工程自己没脏：``saveDirty()`` 的 markDirty 分支就是为这个缺口存在的
+    # （qgisapp.cpp:13509）。
+    # A layer holds uncommitted edits while the project itself is clean: that gap is exactly what
+    # ``saveDirty()``'s markDirty branch exists for (qgisapp.cpp:13509).
+    reset_project(ctx)
+    edited_id = cities_layer(ctx, "at15 edited")
+    layer = project_layer(edited_id)
+    layer.startEditing()
+    # ``createFeature`` 给 fid 一个自动值：cities 的主键是 fid，手动逐位赋属性会错位。
+    # ``createFeature`` autogenerates the fid: cities is keyed on fid, and setting attributes
+    # positionally would shift them.
+    feature = QgsVectorLayerUtils.createFeature(layer)
+    feature["name"] = "at15"
+    require(layer.addFeature(feature), "the edit was not added to the layer buffer")
+    QgsProject.instance().setDirty(False)
+    equal(layer.isEditable(), True, "the layer after startEditing()")
+    equal(layer.isModified(), True, "the layer after addFeature()")
+    equal(QgsProject.instance().isDirty(), False, "the project after setDirty(False)")
+
+    layers_with_edits = [(item, item_layer.name()) for item, item_layer in project_layers().items()]
+    edited = ctx.run("project.create", {})
+    equal(edited.status, ExecutionStatus.FAILED, "project.create over an edited layer")
+    equal(error_code(edited), PROJECT_REPLACE_REQUIRED, "the code for an edited layer")
+    edit_error = edited.error
+    if edit_error is None:
+        raise AssertionError("a failed record carries an error")
+    require(
+        "a layer with unsaved edits" in edit_error.message,
+        f"the message does not name the layer edits: {edit_error.message!r}",
+    )
+    equal(
+        [(item, item_layer.name()) for item, item_layer in project_layers().items()],
+        layers_with_edits,
+        "the project after the refused call on an edited layer",
+    )
+
+    armed = ctx.run("project.create", {"discard_current": True})
+    equal(armed.status, ExecutionStatus.SUCCEEDED, "project.create with the discard answer")
     reset_project(ctx)
     return (
-        f"dirty + no discard_current -> FAILED(PROJECT_REPLACE_REQUIRED) with {len(layers_before)} "
-        "layer(s) still registered; the same project once clean -> project.open SUCCEEDED "
-        "without any flag, because is_dirty is the only condition the GUI asks on"
+        f"dirty flag -> FAILED(PROJECT_REPLACE_REQUIRED) with {len(layers_before)} layer(s) still "
+        "registered; same project once clean -> SUCCEEDED; a layer with uncommitted edits while "
+        "is_dirty() is false -> FAILED(PROJECT_REPLACE_REQUIRED) naming 'a layer with unsaved "
+        "edits'; discard_current=true -> SUCCEEDED"
     )
 
 
@@ -1503,20 +1545,32 @@ def at_34_unreadable_member_is_a_project_read_failure(ctx: Context) -> str:
     error = record.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require("cleared" in error.message, f"the message: {error.message!r}")
+    # 拒在 clear() 之前，所以消息不能说“已清空”，也不能说 read() 的那句话。
+    # Refused before clear(), so the message may say neither "cleared" nor read()'s sentence.
+    require("encrypted" in error.message, f"the message: {error.message!r}")
+    require("not changed" in error.message, f"the message: {error.message!r}")
+    require("cleared" not in error.message, f"the message: {error.message!r}")
     reset_project(ctx)
     return (
-        "the member carries the zip encryption flag: FAILED(PROJECT_OPEN_FAILED) with 'the "
-        "current project was cleared', and read() never sees the archive (QGIS 3.44 ended the "
-        "process with 0xC0000005 on it, measured here)"
+        "the member carries the zip encryption flag: FAILED(PROJECT_OPEN_FAILED) saying the "
+        "archive 'was not opened and the current project was not changed', and read() never sees "
+        "it (QGIS 3.44 ended the process with 0xC0000005 on it, measured here)"
     )
 
 
 def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -> str:
     """嵌套过深的工程会让 ``read()`` 的解析器崩溃，所以它绝不能走到 read()。
 
-    A deeply nested project crashes ``read()``'s parser, so it never reaches it.
+    但“深”只算 ``read()`` 会解析的那个文档：一个归档里的第二个 ``.qgs`` 永远进不了 DOM
+    （``QgsProjectArchive::projectFile()`` 只取第一个，``qgsarchive.cpp:147``–``157``）。
+
+    A deeply nested project crashes ``read()``'s parser, so it never reaches it -- but "deep" only
+    counts the one document ``read()`` parses: a second ``.qgs`` inside an archive never reaches the
+    DOM (``QgsProjectArchive::projectFile()`` takes the first one only, ``qgsarchive.cpp:147``-
+    ``157``).
     """
+
+    import zipfile
 
     from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
@@ -1538,15 +1592,31 @@ def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -
     if error is None:
         raise AssertionError("a failed record carries an error")
     require("nests deeper" in error.message, f"the message: {error.message!r}")
+    require("not changed" in error.message, f"the message: {error.message!r}")
     require(elapsed < 1.0, f"the 8000-level project took {elapsed:.2f}s")
     equal(project_layer_ids(), before, "the project's layers after the refusal")
     equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
+
+    # 同一个归档里第二个 ``.qgs`` 很深：真 QGIS 只读第一个，所以这里也必须放行。
+    # A second, deep ``.qgs`` in the same archive: real QGIS reads only the first, so this must
+    # pass.
+    two_members = ctx.fixtures.root / "two project members.qgz"
+    with zipfile.ZipFile(two_members, "w") as archive:
+        archive.writestr("first.qgs", ctx.fixtures.grouped.read_bytes())
+        archive.writestr("second.qgs", ctx.fixtures.deep_project.read_bytes())
+    allowed = ctx.run("project.open", {"path": str(two_members), "discard_current": True})
+    equal(
+        allowed.status,
+        ExecutionStatus.SUCCEEDED,
+        "project.open on an archive whose second .qgs is deep",
+    )
     reset_project(ctx)
     return (
         "a 56 KB project nested 8000 levels deep: FAILED(PROJECT_OPEN_FAILED) in "
-        f"{elapsed * 1000:.0f} ms, before read(); the process is still here and the old "
-        f"project kept its layer (the bound is {MAX_PROJECT_DEPTH} levels; QGIS 3.44 ended the "
-        "process with 0xC00000FD when read() got 6000 levels, measured here)"
+        f"{elapsed * 1000:.0f} ms, saying the project was not changed, and the old project kept "
+        f"its layer (bound is {MAX_PROJECT_DEPTH}; QGIS 3.44 ended the process with 0xC00000FD at "
+        "6000 levels, measured here); the same 8000 levels inside the second .qgs of an archive "
+        "-> SUCCEEDED, because read() only parses the first one"
     )
 
 
@@ -1658,16 +1728,17 @@ def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context
     error = record.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require("cleared" in error.message, f"the message: {error.message!r}")
+    require("not changed" in error.message, f"the message: {error.message!r}")
+    require("cleared" not in error.message, f"the message: {error.message!r}")
     require(elapsed < 0.5, f"the {on_disk} byte archive took {elapsed:.2f}s")
     equal(project_layer_ids(), before, "the project's layers after the refusal")
     equal(QgsProject.instance().fileName(), file_before, "the project's file after the refusal")
     reset_project(ctx)
     return (
         f"a {on_disk} byte QGZ whose extra.db carries the encryption flag: "
-        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, before read(). The audit "
-        "measured read() exit code -1073741819 (0xC0000005) on this shape; this process is "
-        "still answering and the old project kept its layer"
+        f"FAILED(PROJECT_OPEN_FAILED) in {elapsed * 1000:.0f} ms, saying the project was not "
+        "changed, and the layers and file name are the ones from before the call. The audit "
+        "measured read() exit code -1073741819 (0xC0000005) on this shape"
     )
 
 

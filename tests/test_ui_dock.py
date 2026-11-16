@@ -715,7 +715,7 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     engine = FakeEngine(
         run_sync=_record(
             ExecutionStatus.FAILED,
-            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="outside the allowed roots"),
+            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="the path must be an absolute path"),
         )
     )
     dock = _dock(engine)
@@ -727,7 +727,7 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     assert dock.error_code.text() == PATH_NOT_ALLOWED
     assert dock.error_message.text() == "这个路径不能用。"
     # 引擎自己的消息留着，但只作提示 / the engine's own message is kept, as the tooltip only
-    assert "outside the allowed roots" in dock.error_message.toolTip()
+    assert "the path must be an absolute path" in dock.error_message.toolTip()
     assert "完整路径" in dock.error_hint.text()
     assert PATH_NOT_ALLOWED in dock.feedback.accessibleDescription()
     assert dock.result_summary.text() == "耗时 1.0 s"
@@ -798,7 +798,7 @@ def test_the_failed_state_survives_the_dock_minimum(qapp: Any) -> None:
     engine = FakeEngine(
         run_sync=_record(
             ExecutionStatus.FAILED,
-            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="outside the allowed roots"),
+            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="the path must be an absolute path"),
         )
     )
     registry = OperationRegistry()

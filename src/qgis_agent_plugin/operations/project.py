@@ -91,12 +91,23 @@ MAX_PROJECT_DEPTH = 4096
 # member ends the process.
 _ZIP_ENCRYPTED = 0x1
 
-# ``read()`` 读不出来时的那句话。读之前工程已经被清空（GUI 的 ``addProject`` 也在 ``read()``
+# ``read()`` 读不出来时的那句话。读失败之前工程已经被清空（GUI 的 ``addProject`` 也在 ``read()``
 # 之前 ``closeProject()``），所以这里说的是"已被清空"，不是"可能变了"。
 # What ``read()`` leaves behind when it fails.  The project has already been cleared at this point
 # (the GUI's ``addProject`` calls ``closeProject()`` before ``read()`` too), so the message says it
 # was cleared rather than that it may have changed.
 _READ_FAILED = "the project file could not be read; the current project was cleared"
+
+# ``read()`` 之前就拒掉的两种形状（P3 防死）共用这句尾巴：它们还没碰当前工程，所以不能沿用
+# ``_READ_FAILED`` 的"已清空"。
+# The two shapes refused before ``read()`` (P3, anti-death) share this tail: they have not touched
+# the current project, so they may not reuse ``_READ_FAILED``'s "was cleared".
+_NOT_CHANGED = "; it was not opened and the current project was not changed"
+
+# 归档里带加密成员的拒语：``QgsZipUtils::unzip`` 解开每个成员，加密的那个会让进程消失。
+# The refusal for an archive holding an encrypted member: ``QgsZipUtils::unzip`` unpacks every
+# member, and the encrypted one ends the process.
+_ENCRYPTED = "the project archive holds an encrypted member"
 
 # 流式喂给解析器的一块。整个文件不进内存，于是实体展开之类的放大不会变成本扫描的峰值。
 # One chunk fed to the parser.  The file never has to fit in memory, so amplification such as
@@ -333,13 +344,16 @@ class ProjectGetInfo(
 def _refuse_if_too_deep(path: Path) -> None:
     """在 ``read()`` 之前拒掉会打掉进程的嵌套深度，以及 ``read()`` 解不开的加密成员。
 
-    这是 P3 那一类：只有"进程直接死掉"才允许比 GUI 严，所以只留两条**实测**能杀掉进程的形状，
+    这是 P3 那一类：只有“进程直接死掉”才允许比 GUI 严，所以只留两条**实测**能杀掉进程的形状，
     其余一律交给 ``read()``：
 
     - 嵌套超过 ``MAX_PROJECT_DEPTH`` 层 → 栈溢出。实测 6000 层立刻 0xC00000FD，5500 层 0.10 s
       读完。
     - ``.qgz`` 里加密的成员 → 访问越界。实测整包一个成员带通用标志位 0x1，``read()`` 里直接
       0xC0000005，连异常都没有。
+
+    两条都拒在 ``ctx.project.clear()`` 之前，所以当前工程没被动过；用的消息（``_NOT_CHANGED``）
+    说的是这一点，与 ``read()`` 读失败后那句“已被清空”（``_READ_FAILED``）分开。
 
     被量过、但**不**杀进程的形状一个都不留：CRC 对不上的成员 ``read()`` 照读（实测 ok=True）、
     用的是 bzip2 压缩的成员也照读（实测 ok=True）、声明的解压尺寸撒谎只是让 ``read()`` 返回假
@@ -357,6 +371,10 @@ def _refuse_if_too_deep(path: Path) -> None:
     - an encrypted member inside a ``.qgz`` -> access violation.  Measured: one member with general
       purpose flag 0x1 took the process out with 0xC0000005 inside ``read()``, not even an
       exception.
+
+    Both refuse before ``ctx.project.clear()``, so the current project has not been touched, and the
+    message they use (``_NOT_CHANGED``) says so; that is why it is separate from the "was cleared"
+    sentence a failed ``read()`` reports (``_READ_FAILED``).
 
     Nothing that was measured and does **not** kill it survives: a member whose CRC does not match
     is read anyway (measured ok=True), so is one compressed with bzip2 (measured ok=True), a
@@ -379,15 +397,27 @@ def _refuse_if_too_deep(path: Path) -> None:
 
 
 def _walk_documents(path: Path) -> None:
-    """把工程文件（``.qgs``，或 ``.qgz`` 里每个 ``.qgs`` 成员）交给深度计数器。
+    """把 ``read()`` 会解析的那个工程文档交给深度计数器，并检查归档里有没有加密成员。
 
-    ``.qgz`` 的成员表要整份看：``read()`` 解开整个归档，所以一个加密的兄弟成员也足以杀掉进程，
-    哪怕它不是 ``.qgs``。成员表只看头部字段，不解压任何成员。
+    ``.qgz`` 的成员表要整份看：``QgsZipUtils::unzip`` 解开每个成员
+    （``src/core/qgsziputils.cpp:78``），所以一个加密的兄弟成员也足以杀掉进程，哪怕它不是
+    ``.qgs``。成员表只看头部字段，不解压任何成员。
 
-    Hand every project document (the ``.qgs``, or each ``.qgs`` member of a ``.qgz``) to the depth
-    counter.  The whole member list is looked at: ``read()`` unpacks the whole archive, so a single
-    encrypted sibling kills the process even when it is not the ``.qgs``.  Only header fields are
-    read here; no member is decompressed for that check.
+    深度却只数**一个**文档：``QgsProjectArchive::projectFile()`` 只返回归档里第一个后缀为 ``.qgs``
+    的成员（``src/core/qgsarchive.cpp:147``–``157``），``QgsProject::unzip`` 也只把它交给
+    ``readProjectFile()``（``src/core/project/qgsproject.cpp:4677``）。第二个 ``.qgs`` 再深也进不了
+    DOM，拒它就是拒一个 GUI 打得开的工程。
+
+    The whole member list of a ``.qgz`` is looked at: ``QgsZipUtils::unzip`` unpacks every member
+    (``src/core/qgsziputils.cpp:78``), so a single encrypted sibling kills the process even when it
+    is not the ``.qgs``; only header fields are read for that check, and no member is decompressed
+    for it.
+
+    The depth counts **one** document only: ``QgsProjectArchive::projectFile()`` returns the first
+    member whose suffix is ``.qgs`` (``src/core/qgsarchive.cpp:147``-``157``), and
+    ``QgsProject::unzip`` hands only that one to ``readProjectFile()``
+    (``src/core/project/qgsproject.cpp:4677``).  A second ``.qgs`` never reaches the DOM, however
+    deep it is, and refusing on it would refuse a project the GUI opens.
     """
 
     if path.suffix.lower() != ".qgz":
@@ -396,12 +426,15 @@ def _walk_documents(path: Path) -> None:
         return
 
     with zipfile.ZipFile(path) as archive:
-        for member in archive.infolist():
+        members = archive.infolist()
+        for member in members:
             if member.flag_bits & _ZIP_ENCRYPTED:
-                raise FrameworkError(PROJECT_OPEN_FAILED, _READ_FAILED)
-            if not member.filename.lower().endswith(".qgs"):
-                continue
-            with archive.open(member) as handle:
+                raise FrameworkError(PROJECT_OPEN_FAILED, _ENCRYPTED + _NOT_CHANGED)
+        project_member = next(
+            (item for item in members if item.filename.lower().endswith(".qgs")), None
+        )
+        if project_member is not None:
+            with archive.open(project_member) as handle:
                 _count_depth(handle)
 
 
@@ -429,7 +462,7 @@ class _Depth:
         if self.depth > MAX_PROJECT_DEPTH:
             raise FrameworkError(
                 PROJECT_OPEN_FAILED,
-                f"the project file nests deeper than {MAX_PROJECT_DEPTH} levels; it was not opened",
+                f"the project file nests deeper than {MAX_PROJECT_DEPTH} levels" + _NOT_CHANGED,
             )
 
     def end(self, name: str) -> None:
@@ -458,30 +491,120 @@ def _count_depth(handle: Any) -> None:
 def _refuse_replacement_unless_discarding(ctx: OperationContext, discard_current: bool) -> None:
     """只有明确的 ``discard_current=true`` 才能把有未保存内容的工程换掉。
 
-    条件是 GUI 唯一那个条件：``is_dirty``。``QgisApp::fileNew``/``openProject`` 先问"要保存
-    当前工程吗"，问不问由 ``qgis/askToSaveProjectChanges`` 与实际是否脏决定（``saveDirty()``：
-    ``if ( askThem && isDirty() )``），答案有三种，而"丢弃"就是这里的 ``discard_current``。
-    图层数与关联文件名都不在条件里：一个没改过的工程（哪怕有图层）GUI 不问就换掉。
+    GUI 在换掉工程之前会按同一个顺序问四句话（``QgisApp::fileNew`` 与 ``openProject(QString)``
+    调的是同一串，``qgisapp.cpp:5820`` / ``:6943``）：
 
-    开关本身不读：它只决定"问不问"，而 operation 那侧的问句就是参数；读它会让同一组入参在两种
-    设置下给出不同结果。想走"不问了、直接丢"那条路，调用方给 ``discard_current=true`` 即可。
+    1. ``checkUnsavedLayerEdits()``（``:13560``）：非 memory 的矢量图层里有
+       ``isEditable() && isModified()`` 的（``:13573``、``:13578``）就逐层问“要保存编辑吗”；
+    2. ``checkMemoryLayers()``（``:13669``）：有带要素的 memory 图层（``:13684``，设了
+       ``skipMemoryLayersCheck`` 的除外）或有临时图层（``:13690``）；
+    3. ``saveDirty()``（``:13481``）：先为同一批图层编辑 ``markDirty()``（``:13509``），再问
+       ``isDirty()``（``:13522``）；
+    4. ``checkUnsavedRasterAttributeTableEdits()``（``:13589``）：栅格波段自己的属性表脏了
+       （``:13615``）。
 
-    Only the one condition the GUI looks at: ``is_dirty``.  ``QgisApp::fileNew``/``openProject``
-    ask "save the current project?" first, and whether they ask depends on
-    ``qgis/askToSaveProjectChanges`` and on the project actually being dirty (``saveDirty()``:
-    ``if ( askThem && isDirty() )``); that question has three answers, and "discard" is
-    ``discard_current`` here.  Neither the layer count nor the associated file name is part of the
-    condition: the GUI replaces a project nobody edited, layers and all, without asking.
+    四句话合起来只有一个意思——“丢掉这些继续吗”。所以这里只要有一条成立就拒，而
+    ``discard_current=true`` 就是那句“丢掉”；这四句里没有一句能由 operation 答成“保存”，因为只有
+    GUI 能弹保存对话框。图层数与关联文件名都不在条件里：一个没改过的工程（哪怕有图层）GUI 不问
+    就换掉。
 
-    The setting itself is not read: it only decides whether to ask, and the operation's side of
-    that question is the parameter; reading it would make one set of arguments mean two things.
-    A caller that wants the "asked nothing, discarded anyway" path passes ``discard_current=true``.
+    两个设置不读（``qgis/askToSaveProjectChanges``、``askToSaveMemoryLayers``）：它们只决定 GUI
+    问不问，而 operation 那侧的问句就是参数；读它们会让同一组入参在两种设置下给出不同结果。想走
+    “不问了、直接丢”那条路，调用方给 ``discard_current=true`` 即可。
+
+    The GUI asks four questions before it replaces a project, in one fixed order
+    (``QgisApp::fileNew`` and ``openProject(QString)`` call the same chain, ``qgisapp.cpp:5820``
+    / ``:6943``): vector layers other than memory ones with ``isEditable() && isModified()``
+    (``:13573``, ``:13578``);
+    memory layers holding features (``:13684``, unless ``skipMemoryLayersCheck``) or temporary
+    layers (``:13690``); the project being dirty (``:13522``, after ``saveDirty()`` marks it at
+    ``:13509`` for those same layer edits); and a raster band's own attribute table being dirty
+    (``:13615``).
+
+    All four mean one thing -- "discard this and go on?" -- so one true condition is enough to
+    refuse, and ``discard_current=true`` is that answer.  None of the four can be answered "save"
+    from an operation, because only the GUI can show a save dialog.  Neither the layer count nor the
+    associated file name is part of the condition: the GUI replaces a project nobody edited, layers
+    and all, without asking.
+
+    Two settings are not read (``qgis/askToSaveProjectChanges``, ``askToSaveMemoryLayers``): they
+    only decide whether the GUI asks, and the operation's side of each question is the parameter;
+    reading them would make one set of arguments mean two things.
     """
 
     if discard_current:
         return
-    if ctx.project.isDirty():
+    asked = _unanswered_questions(ctx.project)
+    if asked:
         raise FrameworkError(
             PROJECT_REPLACE_REQUIRED,
-            "the current project has unsaved changes; pass discard_current=true to replace it",
+            f"the current project holds {', '.join(asked)}; "
+            "pass discard_current=true to replace it",
         )
+
+
+def _unanswered_questions(project: Any) -> list[str]:
+    """GUI 会问、而 operation 只能由 ``discard_current`` 回答的那几句话，命中的那些。
+
+    每一条只照抄 GUI 的条件，不多不少；顺序就是 GUI 问它们的顺序，所以报出来的第一句话就是用户
+    在桌面版上会先看到的那句。
+
+    Every entry is the GUI's condition copied, no more and no less; the order is the order the GUI
+    asks them in, so the first phrase reported is the question a desktop user would see first.
+    """
+
+    from qgis.core import QgsRasterLayer, QgsVectorLayer  # pyright: ignore[reportMissingImports]
+
+    asked: list[str] = []
+    layers = list(project.mapLayers().values())
+
+    # 1 非 memory 的矢量图层带着没提交的编辑（``qgisapp.cpp:13573``、``:13578``）。
+    # 1 A vector layer other than a memory one holds uncommitted edits (``:13573``, ``:13578``).
+    for layer in layers:
+        if not isinstance(layer, QgsVectorLayer) or layer.providerType() == "memory":
+            continue
+        if layer.isEditable() and layer.isModified():
+            asked.append("a layer with unsaved edits")
+            break
+
+    # 2 带要素的 memory 图层或有临时图层（``qgisapp.cpp:13684``、``:13690``）。两个都有时 GUI
+    # 先问临时图层那个警告（``:13698`` 的 ``if ( hasTemporaryLayers ) … else if``）。
+    # 2 A memory layer with features, or a temporary layer (``:13684``, ``:13690``).  With both, the
+    # GUI warns about the temporary ones first (``:13698``), so the message does too.
+    has_memory = False
+    has_temporary = False
+    for layer in layers:
+        if layer.providerType() == "memory":
+            if (
+                isinstance(layer, QgsVectorLayer)
+                and layer.featureCount() != 0
+                and not layer.customProperty("skipMemoryLayersCheck")
+            ):
+                has_memory = True
+                break
+        elif layer.isTemporary():
+            has_temporary = True
+    if has_temporary:
+        asked.append("temporary layers")
+    elif has_memory:
+        asked.append("scratch layers")
+
+    # 3 工程自己是脏的（``qgisapp.cpp:13522``）。
+    # 3 The project itself is dirty (``:13522``).
+    if project.isDirty():
+        asked.append("unsaved changes")
+
+    # 4 栅格的属性表脏了。上界就是 GUI 那个 ``bandNo < bandCount()``（``qgisapp.cpp:13615``）：
+    # 最高那一带 GUI 不问，这里也不问，否则就是比 GUI 严。
+    # 4 A raster's attribute table is dirty.  The bound is the GUI's own ``bandNo < bandCount()``
+    # (``:13615``): the top band is not asked about there either, and asking here would be stricter
+    # than the GUI.
+    for layer in layers:
+        if not isinstance(layer, QgsRasterLayer):
+            continue
+        for band in range(1, layer.bandCount()):
+            table = layer.attributeTable(band)
+            if table is not None and table.isDirty():
+                asked.append("a dirty raster attribute table")
+                break
+    return asked

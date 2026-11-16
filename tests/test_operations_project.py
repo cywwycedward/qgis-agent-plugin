@@ -74,6 +74,10 @@ def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
     core: Any = types.ModuleType("qgis.core")
     core.QgsCoordinateReferenceSystem = FakeCrs
+    # 判据按 QGIS 的类名区分矢量与栅格，所以假模块里要有这两个类。
+    # The criteria tell vector from raster by QGIS's own class names, so the fake module needs both.
+    core.QgsVectorLayer = FakeVectorLayer
+    core.QgsRasterLayer = FakeRasterLayer
     package: Any = types.ModuleType("qgis")
     package.core = core
     monkeypatch.setitem(sys.modules, "qgis", package)
@@ -81,12 +85,112 @@ def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return core
 
 
-class FakeLayer:
-    def __init__(self, *, valid: bool = True) -> None:
-        self._valid = valid
+class FakeVectorLayer:
+    """``QgsVectorLayer`` 在判据里被问到的那几个方法，于是 ``isinstance`` 也对得上。
 
-    def isValid(self) -> bool:
+    The ``QgsVectorLayer`` methods the criteria ask about, so ``isinstance`` matches too.
+    """
+
+    def __init__(
+        self,
+        *,
+        valid: bool = True,
+        provider: str = "ogr",
+        editable: bool = False,
+        modified: bool = False,
+        feature_count: int = 0,
+        temporary: bool = False,
+        skip_memory_check: bool = False,
+    ) -> None:
+        self._valid = valid
+        self._provider = provider
+        self._editable = editable
+        self._modified = modified
+        self._feature_count = feature_count
+        self._temporary = temporary
+        self._skip_memory_check = skip_memory_check
+
+    def isValid(self) -> bool:  # noqa: N802 - a PyQGIS name
         return self._valid
+
+    def providerType(self) -> str:  # noqa: N802 - a PyQGIS name
+        return self._provider
+
+    def isEditable(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._editable
+
+    def isModified(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._modified
+
+    def featureCount(self) -> int:  # noqa: N802 - a PyQGIS name
+        return self._feature_count
+
+    def isTemporary(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._temporary
+
+    def customProperty(self, key: str) -> Any:  # noqa: N802 - a PyQGIS name
+        # GUI 用 ``customProperty(...).toInt()`` 当布尔：设了就是 1。
+        # The GUI reads ``customProperty(...).toInt()`` as a flag: set means 1.
+        if key == "skipMemoryLayersCheck":
+            return int(self._skip_memory_check)
+        return None
+
+
+class FakeLayer(FakeVectorLayer):
+    """一个普通的图层：默认不脏、没在编辑、不是 memory。
+
+    An ordinary layer: not dirty, not being edited, not a memory one.
+    """
+
+
+class FakeRasterAttributeTable:
+    def __init__(self, dirty: bool) -> None:
+        self._dirty = dirty
+
+    def isDirty(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._dirty
+
+
+class FakeRasterLayer:
+    """``QgsRasterLayer`` 的波段与属性表：``dirty_bands`` 里的那条带是脏的。
+
+    The bands and attribute tables of a ``QgsRasterLayer``: the ones in ``dirty_bands`` are dirty.
+    """
+
+    def __init__(
+        self,
+        *,
+        band_count: int = 1,
+        dirty_bands: tuple[int, ...] = (),
+        provider: str = "gdal",
+        temporary: bool = False,
+    ) -> None:
+        self._band_count = band_count
+        self._dirty_bands = frozenset(dirty_bands)
+        self._provider = provider
+        self._temporary = temporary
+
+    def isValid(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return True
+
+    def providerType(self) -> str:  # noqa: N802 - a PyQGIS name
+        return self._provider
+
+    def isTemporary(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._temporary
+
+    def bandCount(self) -> int:  # noqa: N802 - a PyQGIS name
+        return self._band_count
+
+    def attributeTable(self, band: int) -> FakeRasterAttributeTable | None:  # noqa: N802
+        if band in self._dirty_bands:
+            return FakeRasterAttributeTable(True)
+        return None
+
+
+# 一个工程里装的两种图层：矢量被问 1、2、3，栅格被问 4。
+# The two kinds of layer a project holds: vector ones answer questions 1, 2 and 3, raster ones 4.
+FakeMapLayer = FakeVectorLayer | FakeRasterLayer
 
 
 class FakeProject:
@@ -98,13 +202,13 @@ class FakeProject:
     def __init__(
         self,
         *,
-        layers: dict[str, FakeLayer] | None = None,
+        layers: dict[str, FakeMapLayer] | None = None,
         file_name: str = "",
         dirty: bool = False,
         crs_authid: str = "EPSG:4326",
         title: str = "",
         read_result: bool = True,
-        layers_after_read: dict[str, FakeLayer] | None = None,
+        layers_after_read: dict[str, FakeMapLayer] | None = None,
         crs_after_read: str = "EPSG:4326",
         write_result: bool = True,
     ) -> None:
@@ -123,7 +227,7 @@ class FakeProject:
         self.writes: list[str] = []
         self.crs_set: FakeCrs | None = None
 
-    def mapLayers(self) -> dict[str, FakeLayer]:  # noqa: N802 - a PyQGIS name
+    def mapLayers(self) -> dict[str, FakeMapLayer]:  # noqa: N802 - a PyQGIS name
         return dict(self.layers)
 
     def fileName(self) -> str:  # noqa: N802 - a PyQGIS name
@@ -185,7 +289,7 @@ class FakeIface:
         *,
         result: bool = True,
         new_crs: str = "EPSG:3857",
-        new_layers: dict[str, FakeLayer] | None = None,
+        new_layers: dict[str, FakeMapLayer] | None = None,
     ) -> None:
         self.project = project_
         self.result = result
@@ -557,6 +661,144 @@ def test_open_clears_the_project_before_reading(qgis: types.ModuleType, tmp_path
     assert loaded.clears == 1
 
 
+@pytest.mark.parametrize(
+    "state",
+    [
+        # 1 非 memory 的矢量图层带着没提交的编辑，而工程自己没有脏标记：
+        # ``saveDirty()`` 自己就是为这个缺口存在的（qgisapp.cpp:13509）。
+        # 1 A vector layer holds uncommitted edits while the project carries no dirty flag: that
+        # gap is exactly why ``saveDirty()`` calls markDirty() (qgisapp.cpp:13509).
+        {"layers": {"a": FakeLayer(editable=True, modified=True)}},
+        # 2 带要素的 memory 图层（qgisapp.cpp:13684）。
+        # 2 A memory layer holding features (qgisapp.cpp:13684).
+        {"layers": {"a": FakeLayer(provider="memory", feature_count=3)}},
+        # 3 临时图层（qgisapp.cpp:13690）。
+        # 3 A temporary layer (qgisapp.cpp:13690).
+        {"layers": {"a": FakeLayer(temporary=True)}},
+        # 4 栅格属性表脏了（qgisapp.cpp:13615）。两带、第一带脏。
+        # 4 A dirty raster attribute table (qgisapp.cpp:13615): two bands, the first one dirty.
+        {"layers": {"a": FakeRasterLayer(band_count=2, dirty_bands=(1,))}},
+    ],
+    ids=["layer edits", "memory layer", "temporary layer", "raster attribute table"],
+)
+def test_open_asks_the_four_desktop_questions(
+    qgis: types.ModuleType, tmp_path: Path, state: dict[str, Any]
+) -> None:
+    target = tmp_path / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
+    loaded = FakeProject(**state)
+    assert loaded.isDirty() is False, "each state must be clean at the project level"
+    error = refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    assert error.message.endswith("pass discard_current=true to replace it")
+    # 没有回答的时就什么都不能动：既没读，也没清。
+    # Nothing may be touched while the question is unanswered: no read, no clear.
+    assert loaded.reads == 0
+    assert loaded.clears == 0
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"layers": {"a": FakeLayer(editable=True, modified=True)}},
+        {"layers": {"a": FakeLayer(provider="memory", feature_count=3)}},
+        {"layers": {"a": FakeRasterLayer(band_count=2, dirty_bands=(1,))}},
+    ],
+    ids=["layer edits", "memory layer", "raster attribute table"],
+)
+def test_create_asks_the_same_four_questions(qgis: types.ModuleType, state: dict[str, Any]) -> None:
+    # ``fileNew`` 调的是同一串 check（qgisapp.cpp:5820）。
+    # ``fileNew`` calls the same chain (qgisapp.cpp:5820).
+    loaded = FakeProject(**state)
+    iface = FakeIface(loaded)
+    refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectCreate().execute_main(
+            context(loaded, iface=iface), project.ProjectCreateParams()
+        ),
+    )
+    assert iface.new_project_calls == []
+
+
+def test_a_discard_answer_replaces_whatever_the_four_questions_found(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    target = tmp_path / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
+    loaded = FakeProject(
+        layers={
+            "a": FakeLayer(editable=True, modified=True),
+            "b": FakeLayer(provider="memory", feature_count=3),
+            "c": FakeRasterLayer(band_count=2, dirty_bands=(1,)),
+        }
+    )
+    result = project.ProjectOpen().execute_main(
+        context(loaded), project.ProjectOpenParams(path=str(target), discard_current=True)
+    )
+    assert result.file_path == str(target)
+    assert loaded.read_path == str(target)
+
+
+def test_a_dirty_table_on_the_top_band_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # GUI 的循环是 ``bandNo = 1; bandNo < bandCount()``（qgisapp.cpp:13615），最高那一带它不问；
+    # 这里问就是比 GUI 严，而且会拒一个 GUI 打得开的工程。
+    # The GUI's loop is ``bandNo = 1; bandNo < bandCount()`` (qgisapp.cpp:13615), so the top band is
+    # never asked about; asking here would be stricter than the GUI and refuse a project it opens.
+    target = tmp_path / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
+    loaded = FakeProject(layers={"a": FakeRasterLayer(band_count=2, dirty_bands=(2,))})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_scratch_layer_without_features_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``featureCount() != 0`` 是 GUI 的条件（qgisapp.cpp:13684）：空 scratch 图层不问。
+    # ``featureCount() != 0`` is the GUI's condition (qgisapp.cpp:13684): an empty scratch layer is
+    # not asked about.
+    target = tmp_path / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
+    loaded = FakeProject(layers={"a": FakeLayer(provider="memory", feature_count=0)})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_memory_layer_that_skips_the_check_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``skipMemoryLayersCheck`` 这个自定义属性就是 GUI 给“别问我”留的开关
+    # （qgisapp.cpp:13684）。
+    # ``skipMemoryLayersCheck`` is the custom property the GUI offers for "do not ask me"
+    # (qgisapp.cpp:13684).
+    target = tmp_path / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
+    loaded = FakeProject(
+        layers={"a": FakeLayer(provider="memory", feature_count=3, skip_memory_check=True)}
+    )
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_layer_that_is_editable_but_unmodified_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # 条件是 ``isEditable() && isModified()``（qgisapp.cpp:13578）：开始编辑但什么都没改，不问。
+    # The condition is ``isEditable() && isModified()`` (qgisapp.cpp:13578): an edit session with no
+    # change is not asked about.
+    target = tmp_path / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
+    loaded = FakeProject(layers={"a": FakeLayer(editable=True, modified=False)})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
 def test_open_reports_a_failed_read_with_the_project_cleared(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
@@ -614,6 +856,11 @@ def test_a_deeper_project_is_refused_before_it_is_read(
         ),
     )
     assert "nests deeper" in error.message
+    # 拒在 clear() 之前，消息不能声称工程被清空（那是 read() 失败才有的事）。
+    # Refused before clear(), so the message may not claim the project was cleared -- that is what a
+    # failed read() leaves behind.
+    assert "not changed" in error.message
+    assert "cleared" not in error.message
     assert loaded.reads == 0
     # 拒在清空之前：一个会被拒的文件不该把当前工程拿走。
     # Refused before the clear: a file that is going to be refused must not take the project.
@@ -638,6 +885,32 @@ def test_depth_counts_the_qgs_member_of_an_archive(qgis: types.ModuleType, tmp_p
     assert loaded.reads == 0
 
 
+def test_only_the_qgs_member_read_parses_counts_for_depth(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``QgsProjectArchive::projectFile()`` 只返回第一个 ``.qgs``（qgsarchive.cpp:147-157），
+    # ``QgsProject::unzip`` 也只把它交给 readProjectFile（qgsproject.cpp:4677），所以第二个再深
+    # 也进不了 DOM。拒它就是拒一个 GUI 打得开的工程。
+    # ``QgsProjectArchive::projectFile()`` returns the first ``.qgs`` only (qgsarchive.cpp:147-157),
+    # and ``QgsProject::unzip`` hands only that one to readProjectFile (qgsproject.cpp:4677), so a
+    # second one never reaches the DOM however deep it is.  Refusing on it would refuse a project
+    # the GUI opens.
+    directory = project_dir(tmp_path)
+    target = directory / "two projects.qgz"
+    deep = (
+        b"<qgis>"
+        + b"<a>" * (project.MAX_PROJECT_DEPTH + 1)
+        + b"</a>" * (project.MAX_PROJECT_DEPTH + 1)
+        + b"</qgis>"
+    )
+    with zipfile.ZipFile(target, "w") as handle:
+        handle.writestr("first.qgs", b"<qgis/>")
+        handle.writestr("second.qgs", deep)
+    loaded = FakeProject()
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
 def test_an_encrypted_archive_member_is_refused_before_it_is_read(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
@@ -646,14 +919,19 @@ def test_an_encrypted_archive_member_is_refused_before_it_is_read(
     # (measured here).
     target = archive(project_dir(tmp_path), "a.qgz", b"<qgis/>")
     set_encryption_flag(target)
-    loaded = FakeProject()
-    refused(
+    loaded = FakeProject(layers={"a": FakeLayer()})
+    error = refused(
         PROJECT_OPEN_FAILED,
         lambda: project.ProjectOpen().execute_main(
             context(loaded), project.ProjectOpenParams(path=str(target))
         ),
     )
+    assert "encrypted" in error.message
+    # 和深度那条同一个道理：没清空就不能说清空。
+    # Same rule as the depth case: nothing was cleared, so the message may not say it was.
+    assert "cleared" not in error.message
     assert loaded.reads == 0
+    assert loaded.clears == 0
 
 
 @pytest.mark.parametrize("shape", ["crc", "bzip2", "entities", "not xml at all"])

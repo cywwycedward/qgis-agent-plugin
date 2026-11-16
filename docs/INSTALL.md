@@ -1,6 +1,6 @@
 # 开发安装
 
-结论：三条命令就能在 QGIS Desktop 3.44 里装上本插件，再用两个配置键打开文件访问。
+结论：三条命令就能在 QGIS Desktop 3.44 里装上本插件，再只用绝对路径。
 
 ```powershell
 cd <repo>; npm run deploy          # 把 src/qgis_agent_plugin 镜像到 QGIS 插件目录
@@ -9,7 +9,7 @@ npm run lint
 ```
 
 装好之后：插件管理器里启用 “QGIS Agent”；Python Console 里用 `iface.agent_engine`
-调用（样例见 `CONSOLE.md`）。**默认两个允许目录都是空的，即默认拒绝一切文件访问**。
+调用（样例见 `CONSOLE.md`）。**路径只要求是绝对的；没有允许目录，也没有路径配置**。
 
 ## 1. 前置条件
 
@@ -136,17 +136,17 @@ layer.add 指向相对路径 -> FAILED PATH_NOT_ALLOWED | the path must be an ab
 layer.add 指向不存在的绝对路径 -> FAILED INVALID_LAYER（QGIS 的答案，不是插件的预检）
 ```
 
-即：没配之前所有文件访问都被拒，这是默认安全姿态，不是配置缺失的 bug。键缺失/为 `None` 时
+即：路径只要绝对就能用，插件不按目录判可达性——那是 ADR 0001 的决定，不是配置缺失。键缺失/为 `None` 时
 `Settings.from_mapping` 保留默认值；字符串形式的数字也会被转成 `int`。
 
 **未实测**：用 `QgsSettings().setValue(...)` 真正写盘并重载插件（会改用户的 `QGIS3.ini`，本条只
-验证了读：默认空根、缺失键返回 `None`、越界值拒绝）。
+验证了读：缺失键返回 `None`、小于 1 的计数被拒）。
 
 ## 5. 开发日常
 
 | 命令 | 作用 | 结果 |
 | --- | --- | --- |
-| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 本机最近一次 1 failed / 774 passed，见下 |
+| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 本机最近一次 678 passed，见下 |
 | `npm run test:verbose` | 同上，`-vv tests` | — |
 | `npm run lint` | `ruff check .` | `All checks passed!` |
 | `npm run format` | `ruff format .` | — |
@@ -163,12 +163,11 @@ layer.add 指向不存在的绝对路径 -> FAILED INVALID_LAYER（QGIS 的答�
 
 ```text
 $ npm run test                                                       # QGIS 解释器
-1 failed, 774 passed, 1 warning in 164.65s
+678 passed, 1 warning in 15.31s
 ```
 
-失败的是 `tests/test_operations_project.py::test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked`：
-它断言 ".qgz 成员太多要在 1.5 s 内被拒"，本机实测 3.39 s。那是性能敏感的时限断言（磁盘/病毒扫描
-快慢决定），不是逻辑错误，也不是这两层测试的问题；调阈值或放宽到有序性断言是测试侧的事。
+那段样例里的失败是一条已被删除的用例（`.qgz` 成员数上限那条判据按 P3 去掉了），所以现在这一行
+就是全绿的一次跑。
 
 ## 6. 排错
 

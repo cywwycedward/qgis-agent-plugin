@@ -252,8 +252,8 @@ open 缺失   -> FAILED     PROJECT_OPEN_FAILED | the project file could not be 
 open 损坏   -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project was cleared
 open demo   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
                            "invalid_layer_count": 0}
-open 已脏   -> FAILED     PROJECT_REPLACE_REQUIRED | the current project has unsaved changes; pass
-                          discard_current=true to replace it
+open 已脏   -> FAILED     PROJECT_REPLACE_REQUIRED | the current project holds unsaved changes;
+                          pass discard_current=true to replace it
 open 已脏 + discard -> SUCCEEDED  {"...", "layer_count": 1, "invalid_layer_count": 0}
 ```
 
@@ -262,10 +262,15 @@ open 已脏 + discard -> SUCCEEDED  {"...", "layer_count": 1, "invalid_layer_cou
 - **覆盖**只由 `Save As` 问：给了 `path` 且文件已存在才要 `overwrite=true`；`project.save` 不给
   `path` 写的是工程自己的关联文件，那条路不再问覆盖（`save assoc` 上面就是第二次写同一个文件），
   因为 GUI 的 Save 不弹对话框。
-- **替换**只看工程有没有未保存内容（`is_dirty()`）。一个有图层但没改过的工程不需要
-  `discard_current`；“缺失文件”归 `PROJECT_OPEN_FAILED`：插件不预检存在性，`read()` 打不开就是
-  打不开。失败时当前工程**已被清空**（GUI 的 `addProject` 也是先 `closeProject()` 再 `read()`），
-  消息里写的是这一点，不是“可能变了”。
+- **替换**看 GUI 的四道问句（`qgisapp.cpp:5820` / `:6943`）：非 memory 矢量图层有没提交的编辑
+  （`:13578`）、带要素的 memory 图层或临时图层（`:13684` / `:13690`）、工程 `isDirty()`（`:13522`）、
+  栅格波段的 RAT 脏了（`:13615`）。任一条成立就要 `discard_current=true`，它就是这四句共同的
+  Discard 答案。一个有图层但没改过的工程不需要它。“缺失文件”归 `PROJECT_OPEN_FAILED`：插件不预检
+  存在性，`read()` 打不开就是打不开。
+- **清空**只发生在 `read()` 之后失败：GUI 的 `addProject` 也是先 `closeProject()` 再 `read()`，所以
+  那时工程是空的、消息写的是 "the current project was cleared"。`read()` **之前**被拒的两种防死
+  形状（嵌套超过 4096 层、`.qgz` 里的加密成员）没碰当前工程，消息写的是 "it was not opened and the
+  current project was not changed"。
 
 ```python
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz", "discard_current": True})
@@ -326,7 +331,7 @@ get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": fa
 | `project.create` / `project.open` 在有未保存内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
 | `project.save` 给了 `path` 且文件已存在、不传 `overwrite` | `FAILED` `TARGET_EXISTS`；不给 `path` 写关联文件不问覆盖 |
 | 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
-| 全新安装（允许目录为空）调 `layer.add` / `project.save` | `FAILED` `PATH_NOT_ALLOWED` |
+| `layer.add` / `project.save` 传相对路径 | `FAILED` `PATH_NOT_ALLOWED`（绝对路径不再被任何白名单拒） |
 
 ## 10. 未实测清单
 
@@ -337,4 +342,4 @@ get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": fa
 | 运行中后台任务的 `CANCEL_REQUESTED -> CANCELLED` | 现有后台 Operation 太快，构造不出稳定窗口 |
 | 父级组隐藏时的 `visible=true / effective_visible=false` | 需要 GUI 图层树里的组；单测覆盖，Console 未跑 |
 | 多个后台任务排队（`max_active_background=2` 的 FIFO） | 探针里三次 9000 要素求和都在三轮事件循环内跑完，看不到第三个停在 `QUEUED`；单测覆盖该路径 |
-| 配置键写入（`QgsSettings().setValue(...)`） | 会改用户 `QGIS3.ini`，只验证了读：默认空根、缺失键返回 `None`、越界拒绝 |
+| 配置键写入（`QgsSettings().setValue(...)`） | 会改用户 `QGIS3.ini`，只验证了读：缺失键返回 `None`、小于 1 的计数被拒 |

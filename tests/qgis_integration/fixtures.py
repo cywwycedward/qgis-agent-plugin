@@ -2,7 +2,7 @@
 
 破坏性用例不能对着用户自己的工程做，所以这里每个文件都是现造的：一个装着三张表的 GeoPackage
 （其中一层带一个有空值的数值字段）、一张栅格、一个合法 QGZ、一个唯一数据源已被删掉的 QGZ、一个坏
-GeoPackage、一个坏 QGZ、“不要覆盖”用例要的那个已存在文件、一个允许目录之外的目录、一个指向外面的
+GeoPackage、一个坏 QGZ、“不要覆盖”用例要的那个已存在文件、一个工程目录之外的目录、一个指向外面的
 目录联接、两个数据源写成远程的项目，以及那些让 ``QgsProject.read()`` 崩掉、或者绕过读前扫描的工程
 与归档。``build`` 删掉并重建它自己的目录，所以重跑不需要清理。
 
@@ -17,7 +17,7 @@ The acceptance data, generated with PyQGIS into a throwaway directory.  A destru
 not be pointed at a user's own project, so every file here is generated from scratch: a
 GeoPackage holding three layers (one with a numeric field that has nulls), a raster, a valid
 QGZ, a QGZ whose only data source has been deleted, a corrupt GeoPackage, a corrupt QGZ, a file
-that already exists for the "do not overwrite" case, a directory outside the allowed roots, a
+that already exists for the "do not overwrite" case, a directory outside the fixture tree, a
 junction inside them that points out, a project that names a remote datasource, and the projects
 and archives whose nesting or encryption makes ``QgsProject.read()`` end the process.
 ``build`` deletes and rebuilds its own directory, so a rerun needs no cleanup.
@@ -178,8 +178,8 @@ def build(root: Path) -> Fixtures:
 
     root = root.resolve()
     data = _fresh(root / "data")
-    # 允许根目录的兄弟目录：这里的路径真的在允许目录之外，但它仍在本运行拥有的目录里。
-    # A sibling of the allowed root, so a path here is genuinely outside the roots the run allows
+    # 工程目录的兄弟目录：这里的路径真的在工程目录之外，但它仍在本运行拥有的目录里。
+    # A sibling of the project data, so a path here is genuinely outside it while still inside
     # while still inside a directory this run owns.
     outside = _fresh(root / "outside")
 
@@ -244,8 +244,8 @@ def build(root: Path) -> Fixtures:
     existing_project = data / "existing.qgs"
     existing_project.write_bytes(b"an existing project file whose bytes must not change")
 
-    # 工程在允许目录里，唯一图层却指向外面：工程文件过了路径策略，它的数据源没过。
-    # A project inside the allowed roots whose only layer names a source outside them: the project
+    # 工程在测试目录里，唯一图层却指向外面：路径只要求绝对，所以这个工程照样打开。
+    # A project inside the fixture tree whose only layer names a source outside it: paths only
     # file passes the path policy, its data source does not.
     secret = outside / "secret.gpkg"
     secret.write_bytes(cities.read_bytes())
@@ -258,9 +258,9 @@ def build(root: Path) -> Fixtures:
     remote_vsicurl = data / "remote vsicurl.qgs"
     _write_remote_project(remote_vsicurl, raster, REMOTE_VSICURL)
 
-    # 唯一数据源在已经被搬走的目录里：路径仍在允许目录之内，只是那儿已经没有文件了。
+    # 唯一数据源在已经被搬走的目录里：路径是绝对的，只是那儿已经没有文件了。
     # A project whose only source lives in a directory that was moved away: the path is inside the
-    # allowed roots, only nothing is there any more.
+    # have to be absolute, only nothing is there any more.
     moved_directory = data / "moved directory.qgs"
     _write_project(moved_directory, [(cities, CITIES_LAYER, "moved")], [])
     _rewrite_datasource(moved_directory, str(data / "moved-away" / "cities.gpkg"))
@@ -475,12 +475,12 @@ def _rewrite_datasource(path: Path, source: str) -> None:
 def write_vsi_directory_project(path: Path, source: Path, sub_layer: str) -> None:
     """真工程，数据源在一个名叫 ``vsi_data`` 的目录里。
 
-    ``/vsi`` 只有在打开路径时才是虚拟文件系统：目录名叫 ``vsi_data`` 的图层就是普通本地文件，而
-    按子串判断的实现把它当成远程数据源拒掉了。
+    ``/vsi`` 只有在打开路径时才是虚拟文件系统：目录名叫 ``vsi_data`` 的图层就是普通本地文件，
+    而按子串判远程源的旧扫描把它当成网络地址拒掉了。
 
     A real project whose datasource sits in a directory spelled ``vsi_data``.  ``/vsi`` is a
     virtual file system only when it opens the path: a layer in a directory called ``vsi_data``
-    is an ordinary local file, and a substring check refused it as a remote source.
+    is an ordinary local file, and the old value scan refused it as a remote source.
     """
 
     from qgis.core import QgsVectorLayer  # pyright: ignore[reportMissingImports]
@@ -504,16 +504,15 @@ def write_vsi_directory_project(path: Path, source: Path, sub_layer: str) -> Non
 def write_subdataset_project(path: Path, local_raster: Path) -> None:
     """真工程，唯一图层是本地 GDAL 子数据集。
 
-    GDAL 的栅格 provider 不拆这种写法：写出来的 ``<datasource>`` 整个是 ``GTIFF_DIR:1:<file>``；
-    把它当成路径的逐图层检查会读成“在允许目录之外”，然后把图层删掉。工程先用普通文件写出来、
-    再改文本，和 ``_write_remote_project`` 一样：拿这种写法建图层，正是 ``read()`` 在用例里做的事。
+    GDAL 的栅格 provider 不拆这种写法：写出来的 ``<datasource>`` 整个是 ``GTIFF_DIR:1:<file>``，
+    路径只要求绝对，所以它原样进 provider、图层建得出来。工程先用普通文件写出来、再改文本，和
+    ``_write_remote_project`` 一样：拿这种写法建图层，正是 ``read()`` 在用例里做的事。
 
     A real project whose one layer is a local GDAL subdataset.  GDAL's raster provider does not
-    split the spelling: the written ``<datasource>`` is ``GTIFF_DIR:1:<file>`` whole, which a
-    per-layer check that took it for a path read as outside the roots and removed the layer for.
-    The project is written from the plain file and the text is replaced afterwards, as
-    ``_write_remote_project`` does: building the layer from the spelling is what ``read()`` does
-    during the case.
+    split the spelling: the written ``<datasource>`` is ``GTIFF_DIR:1:<file>`` whole, paths only
+    have to be absolute, so it reaches the provider as written and the layer builds.  The project is
+    written from the plain file and the text is replaced afterwards, as ``_write_remote_project``
+    does: building the layer from the spelling is what ``read()`` does during the case.
     """
 
     _write_project(path, [], [local_raster])
@@ -743,11 +742,11 @@ def _write_entity_project(path: Path) -> None:
 
 
 def _junction(link: Path, target: Path) -> Path | None:
-    """允许目录里的一个目录联接，解析后指向外面。
+    """工程目录里的一个目录联接，解析后指向外面。
 
     用联接而不是符号链接：符号链接需要本机不一定给的特权；对 ``Path.resolve`` 来说两者行为一样。
 
-    A directory link inside the allowed roots that resolves outside them.  A junction is used
+    A directory link inside the fixture tree that resolves outside it.  A junction is used
     because a symbolic link needs a privilege this machine may not grant; it resolves exactly
     like one for ``Path.resolve``.
     """
