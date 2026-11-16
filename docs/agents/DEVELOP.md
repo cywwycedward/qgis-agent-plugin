@@ -1016,7 +1016,7 @@ absolute_path(raw: str) -> Path
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |
 | `TARGET_EXISTS` | 目标已存在且没有 `overwrite=true` | `project.save` |
 | `PATH_NOT_ALLOWED` | 路径不是绝对的，或不是本地路径字形；工程文件过大、声明 XML 实体、不是 UTF-8、点名远程数据源 | `absolute_path`、`project.open` 的读前扫描 |
-| `INVALID_LAYER` | 图层源加载不出有效图层，或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
+| `INVALID_LAYER` | provider 的清单为空（没有认得出的子图层），或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
 | `LAYER_NOT_FOUND` | 工程里没有这个 id | `layer.get_info/set_visibility/sum_numeric_field` 与样式读 |
 | `LAYER_NOT_IN_TREE` | 图层已注册但不在图层树里（加载来的工程可以这样；`layer.add` 已经造不出这种图层） | `layer.set_visibility` |
 | `INVALID_FIELD_TYPE` | 没有该字段、字段非数值、值或和不是有限数 | `layer.sum_numeric_field`、`layer.set_renderer` |
@@ -1124,7 +1124,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1）、`visible`（StrictBool） |
 | 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible`、`changed`（本次是否真的改了） |
 | 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE` |
-| 行为 | 勾上时连祖先分组一起勾（图例的勾选框对叶子节点就是这么做的：`QgsLayerTreeModel.setData` → `setItemVisibilityCheckedParentRecursive`），取消只写这一个节点；`changed` 说“本次有没有真的改变可见结果”，所以节点已勾而父组未勾时仍算改变 |
+| 行为 | 勾上时连祖先分组一起勾（图例的勾选框对叶子节点就是这么做的：`QgsLayerTreeModel.setData` → `setItemVisibilityCheckedParentRecursive`），取消只写这一个节点；`changed` 说“本次有没有真的改变可见结果”，所以节点已勾而父组未勾时仍算改变；按住 Ctrl 时桌面版取消也会连祖先一起取消（`qgslayertreemodel.cpp:406-412`），那一半没有参数表达 |
 
 #### layer.sum_numeric_field
 
@@ -1133,7 +1133,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1）、`field_name`（≥1，必须是整型或浮点字段） |
 | 返回 | `layer_id`、`field_name`、`count`（参与求和的非 null 要素数）、`skipped_null`、`total`、`selected_only`（本次是否只算了选择集）、`snapshot_project_epoch` |
 | 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没字段、非数值、值或和不是有限数）、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
-| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch；跟随桌面版统计面板的选择集规则：有选择集时只算选中的要素，没有时算全部，结果里的 `selected_only` 如实反映这件事（面板上那个开关就是它：`qgsstatisticalsummarydockwidget.cpp:210` 读它、`:218` 交给 `getValuesIterator`，后者在 `qgsvectorlayerutils.cpp:73-80` 选 `getSelectedFeatures` 还是 `getFeatures`）；不加参数（那是图层的状态，不是调用方的问句）；非有限值与溢出都拒（NaN/Infinity 不是合法 JSON）；要素数没有上限（桌面版统计面板也不限，`qgsvectorlayerutils.cpp:73-80`）；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
+| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch；跟随选择集：有选择集时只算选中的要素，没有时算全部——这是章程 A6 定的规则，面板上有这个开关（`qgsstatisticalsummarydockwidget.cpp:210` 读它、`:218` 交给 `getValuesIterator`，后者在 `qgsvectorlayerutils.cpp:73-80` 选 `getSelectedFeatures` 还是 `getFeatures`），但面板默认是否勾选不在本检出里，所以插件不声称“面板默认如此”；结果里的 `selected_only` 如实反映这次用了哪一种；不加参数（那是图层的状态，不是调用方的问句）；非有限值与溢出都拒（NaN/Infinity 不是合法 JSON）；要素数没有上限（桌面版统计面板也不限，`qgsvectorlayerutils.cpp:73-80`）；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
 | 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`、`selected_only=false`；选中 2 个（`pop > 50`）后同一调用 → `count=2`、`total=160.0`、`selected_only=true`，`removeSelection()` 后又回到整层 `total=200.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程（`Dummy-1`）、`finished` 回调在 `MainThread`；记录里的进度序列（4 要素）`PREPARING 0 → SCHEDULED 0 → RUNNING 0 → RUNNING 33.333 → RUNNING 66.667 → FINALIZING 66.667 → SUCCEEDED 100`，9000 要素 `RUNNING 0 → 1.0 → 99.0 → FINALIZING 99.0 → SUCCEEDED 100`；要素数不再有上限（实测 100 万要素的拷列成本 3.14 s / 8 MB 元组） |
 
 #### layer.list_style_categories

@@ -174,10 +174,10 @@ result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
 progress: 100.0
 ```
 
-选择集跟随桌面版统计面板的规则：有选择集时只算选中的要素，没有时算全部；结果里的
-`selected_only` 如实说这次用了哪一种（面板上那个“仅选中要素”开关就是它，没有新参数）。实测（选中
-2 个城市、`pop > 50`）：`count=2`、`total=160.0`、`selected_only=true`；`removeSelection()` 之后
-同一调用回到 `count=3`、`total=200.0`、`selected_only=false`。
+选择集跟随章程 A6 定的规则：有选择集时只算选中的要素，没有时算全部；结果里的 `selected_only` 如实
+说这次用了哪一种（面板上有那个“仅选中要素”开关，没有新参数）。实测（选中 2 个城市、`pop > 50`）：
+`count=2`、`total=160.0`、`selected_only=true`；`removeSelection()` 之后同一调用回到 `count=3`、
+`total=200.0`、`selected_only=false`。
 
 几条实测到的事实：
 

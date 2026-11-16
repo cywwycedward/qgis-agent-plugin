@@ -397,16 +397,16 @@ class LayerSetVisibility(
 ):
     """切一个图层在图例里的勾选；勾上时连祖先分组一起勾，取消只动这一个节点。
 
-        勾选框不是“只改自己”：桌面版对一个叶子节点打勾时会连它的祖先一起勾
-        （``QgsLayerTreeModel.setData`` 对没有子节点的节点调
-        ``setItemVisibilityCheckedParentRecursive``），否则勾了也看不见；取消只写节点自己。
+    勾选框不是“只改自己”：桌面版对一个叶子节点打勾时会连它的祖先一起勾
+    （``QgsLayerTreeModel.setData`` 对没有子节点的节点调
+    ``setItemVisibilityCheckedParentRecursive``，``qgslayertreemodel.cpp:401-405``），否则勾了也
+    看不见；取消只写节点自己（``:413-416``）。
 
-        Toggle one layer's legend check; checking also checks the ancestor groups, unchecking
-    touches only this node.
-        The checkbox is not "this node only": desktop ticks a leaf's ancestors along with
-        it (``QgsLayerTreeModel.setData`` calls ``setItemVisibilityCheckedParentRecursive``
-        for a childless node), or the tick would show nothing; unchecking writes the node
-        alone.
+    Toggle one layer's legend check; checking also checks the ancestor groups, unchecking
+    touches only this node.  The checkbox is not "this node only": desktop ticks a leaf's
+    ancestors along with it (``setData`` calls ``setItemVisibilityCheckedParentRecursive``
+    for a childless node, ``qgslayertreemodel.cpp:401-405``), or the tick would show
+    nothing; unchecking writes the node alone (``:413-416``).
     """
 
     name = "layer.set_visibility"
@@ -728,18 +728,27 @@ def layer_for_style(project: Any, layer_id: str) -> Any:
 def layer_for_renderer(project: Any, layer_id: str) -> Any:
     """一个能读、能换渲染器的图层：桌面版给它符号页的那个。
 
-    两个图层属性对话框都只看一件事：图层有没有渲染器。没有的话整个符号页被禁用
-    （``QgsVectorLayerProperties.updateSymbologyPage``），里面那个渲染器下拉框、当前渲染器和
-    “换上这个渲染器”的按钮就都不存在。一个没有几何的矢量表就是这样（实测 ``renderer()`` 是
-    ``None``）。所以没有渲染器的图层在这里也是 ``INVALID_LAYER``：同一个前置条件，同一句话。
+    矢量属性对话框只看一件事：图层有没有渲染器；没有的话整个符号页被禁用
+    （``qgsvectorlayerproperties.cpp:1534-1549``：`if ( mLayer->renderer() ) … else
+    mOptsPage_Style->setEnabled( false )`），里面那个渲染器下拉框、当前渲染器和“换上这个渲染器”的
+    按钮就都不存在。一个没有几何的矢量表就是这样（实测 ``renderer()`` 是 ``None``）。所以没有
+    渲染器的图层在这里也是 ``INVALID_LAYER``：同一个前置条件，同一句话。
+
+    栅格那一半没有对应的页面级守卫（``qgsrasterlayerproperties.cpp`` 只在 ``:1095`` 的槽里早返回），
+    但它对有效栅格不可达：有效栅格总有渲染器。
 
     A layer whose renderer can be read or replaced: the one desktop gives a symbology
-    page to.  Both layer properties dialogs look at one thing: whether the layer has a
+    page to.  The vector properties dialog looks at one thing: whether the layer has a
     renderer.  Without one the whole page is disabled
-    (``QgsVectorLayerProperties.updateSymbologyPage``), and its renderer combo box, its
-    current renderer and its install button do not exist.  A geometry-less vector table
-    is exactly that case (measured: ``renderer()`` is ``None``).  So a layer without a
+    (``qgsvectorlayerproperties.cpp:1534-1549``: `if ( mLayer->renderer() ) … else
+    mOptsPage_Style->setEnabled( false )`), and its renderer combo box, its current
+    renderer and its install button do not exist.  A geometry-less vector table is
+    exactly that case (measured: ``renderer()`` is ``None``).  So a layer without a
     renderer is ``INVALID_LAYER`` here too: one precondition, one sentence.
+
+    The raster half has no page-level guard of that kind
+    (``qgsrasterlayerproperties.cpp`` only returns early inside the slot at ``:1095``), but
+    it is unreachable for a valid raster: a valid raster always has a renderer.
     """
 
     layer = layer_for_style(project, layer_id)

@@ -1010,8 +1010,9 @@ def test_a_layer_name_of_any_length_is_accepted(length: int) -> None:
     "sub_layer", ["roads", "roads_1-A", "路段 2024", "roads/1", "roads 1", "x" * 200]
 )
 def test_any_sub_layer_name_the_provider_can_report_is_accepted(sub_layer: str) -> None:
-    # 子图层的名字是 provider 的自由文本，转义由它的 encodeUri 负责。
-    # A sub-layer name is the provider's free text, and its encodeUri owns the escaping.
+    # 子图层的名字是 provider 的自由文本；URI 取自它自己那条清单的 uri()（A5）。
+    # A sub-layer name is the provider's free text; the URI comes from that provider's own
+    # detail (A5).
     assert ops.LayerAddParams.model_validate(add_params(sub_layer=sub_layer)).sub_layer == sub_layer
 
 
