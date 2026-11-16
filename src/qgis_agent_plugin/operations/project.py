@@ -5,8 +5,10 @@
 
 每一条判据都取自 QGIS 3.44 桌面版里"同一个用户动作"的源码：``New Project`` 与 ``Open Project``
 先问"要保存当前工程吗"，然后才动当前工程；``Save`` 直接写关联文件、不问覆盖，``Save As`` 的
-覆盖确认是文件对话框问的。所以这里只有一个"未保存内容"判据（``is_dirty``），加两个代表问句答案的
-参数（``discard_current`` 与 ``overwrite``），没有"图层数""关联文件名"这类 GUI 不看的条件。
+覆盖确认是文件对话框问的。换工程之前的“未保存内容”是 GUI 的四道问句——图层里没提交的编辑、带
+要素的 memory 图层或临时图层、工程自己脏了、栅格波段的属性表脏了——所以这里查这四条，两个参数
+（``discard_current`` 与 ``overwrite``）代表它们共同的答案；没有“图层数”“关联文件名”这类 GUI
+不看的条件。
 
 唯一比 GUI 严的是两处会让进程直接消失的输入（P3 防死）：``read()`` 在 6000 层嵌套上以栈溢出
 结束进程，加密的 ``.qgz`` 成员让它以访问越界结束进程。两条都有本机实测，见 ``_refuse_if_too_deep``。
@@ -20,9 +22,11 @@ without reading the code.
 Every criterion comes from the QGIS 3.44 desktop source for the same user action: ``New Project``
 and ``Open Project`` ask whether to save the current project before touching it; ``Save`` writes
 the associated file without asking about overwriting, and ``Save As`` lets the file dialog ask.
-So one criterion survives -- ``is_dirty`` -- plus two parameters that carry the answers to those
-questions (``discard_current`` and ``overwrite``).  Nothing else: the layer count and the
-associated file name are not conditions the GUI looks at.
+Unsaved content, before a project is replaced, is the GUI's four questions -- a layer with
+uncommitted edits, a memory layer holding features or a temporary layer, the project's own
+dirty flag, and a raster band's attribute table -- so all four are asked here, and two
+parameters (``discard_current`` and ``overwrite``) carry their answers.  Nothing else: the
+layer count and the associated file name are not conditions the GUI looks at.
 
 The only place stricter than the GUI is the two inputs that end the process outright (P3, an
 anti-death guard): ``read()`` overflows the stack at 6000 levels of nesting, and an encrypted

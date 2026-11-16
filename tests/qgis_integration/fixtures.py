@@ -180,7 +180,7 @@ def build(root: Path) -> Fixtures:
     data = _fresh(root / "data")
     # 工程目录的兄弟目录：这里的路径真的在工程目录之外，但它仍在本运行拥有的目录里。
     # A sibling of the project data, so a path here is genuinely outside it while still inside
-    # while still inside a directory this run owns.
+    # a directory this run owns.
     outside = _fresh(root / "outside")
 
     cities = data / "cities.gpkg"
@@ -246,7 +246,7 @@ def build(root: Path) -> Fixtures:
 
     # 工程在测试目录里，唯一图层却指向外面：路径只要求绝对，所以这个工程照样打开。
     # A project inside the fixture tree whose only layer names a source outside it: paths only
-    # file passes the path policy, its data source does not.
+    # have to be absolute, so the project opens and that layer loads.
     secret = outside / "secret.gpkg"
     secret.write_bytes(cities.read_bytes())
     leak = data / "leak.qgz"
@@ -259,8 +259,8 @@ def build(root: Path) -> Fixtures:
     _write_remote_project(remote_vsicurl, raster, REMOTE_VSICURL)
 
     # 唯一数据源在已经被搬走的目录里：路径是绝对的，只是那儿已经没有文件了。
-    # A project whose only source lives in a directory that was moved away: the path is inside the
-    # have to be absolute, only nothing is there any more.
+    # A project whose only source lives in a directory that was moved away: the path is absolute,
+    # only nothing is there any more.
     moved_directory = data / "moved directory.qgs"
     _write_project(moved_directory, [(cities, CITIES_LAYER, "moved")], [])
     _rewrite_datasource(moved_directory, str(data / "moved-away" / "cities.gpkg"))

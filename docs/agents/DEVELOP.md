@@ -993,7 +993,7 @@ absolute_path(raw: str) -> Path
 | `UNSUPPORTED_EXECUTION_MODE` | 对后台操作调 `run_sync` | 引擎 |
 | `EXECUTION_NOT_FOUND` | 未知或已淘汰的执行 id | 记录仓库 |
 | `INVALID_INPUT` | 入参不合法（未知键、类型、形状、未知算法 id） | 引擎校验、操作内 validator |
-| `PROJECT_REPLACE_REQUIRED` | 当前工程有未保存内容（`is_dirty()`）且没有 `discard_current=true` | `project.create/open` |
+| `PROJECT_REPLACE_REQUIRED` | GUI 的四道问句任一命中（图层编辑、memory 或临时图层、工程脏、栅格 RAT，见 §7.6）且没有 `discard_current=true` | `project.create/open` |
 | `PROJECT_OPEN_FAILED` | 工程读不出来（含嵌套超上限、加密的 `.qgz` 成员） | `project.open` |
 | `PROJECT_SAVE_FAILED` | `write()` 返回假；文件可能已部分写入 | `project.save` |
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |

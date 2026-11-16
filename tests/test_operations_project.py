@@ -1,12 +1,14 @@
 """用假 ctx 和假 PyQGIS 驱动 ``project.*`` 操作。
 
-每个用例对着一条来自 QGIS 3.44 桌面版的判据：新建与打开只问"有未保存内容吗"（``is_dirty``），
+每个用例对着一条来自 QGIS 3.44 桌面版的判据：新建与打开前问的是 GUI 那四句话（图层编辑、
+memory/临时图层、工程脏了、栅格 RAT），
 ``Save`` 直接写关联文件、``Save As`` 才问覆盖，``get_info`` 报 GUI 显示的那些事实。真实 PyQGIS
 的行为（``read()`` 到底填不填图层树、深度多少会打掉进程）留给 QGIS 侧的验收跑。
 
 The ``project.*`` operations, driven by a fake ctx and a fake PyQGIS.  Every case matches one
-criterion taken from the QGIS 3.44 desktop source: creating and opening ask only whether there is
-unsaved content (``is_dirty``), ``Save`` writes the associated file while ``Save As`` is the one
+criterion taken from the QGIS 3.44 desktop source: creating and opening ask the four questions
+the desktop asks (layer edits, scratch or temporary layers, the dirty flag, a raster attribute
+table), ``Save`` writes the associated file while ``Save As`` is the one
 that asks about overwriting, and ``get_info`` reports the facts the GUI shows.  Real PyQGIS
 behaviour (whether ``read()`` fills the layer tree, how much nesting ends the process) belongs to
 the QGIS acceptance run, not here.
@@ -534,8 +536,9 @@ def test_create_refuses_a_project_with_unsaved_changes(qgis: types.ModuleType) -
 def test_create_replaces_a_clean_project_whatever_it_holds(
     qgis: types.ModuleType, state: dict[str, Any]
 ) -> None:
-    # GUI 的条件只有一个：``is_dirty()``。图层数与关联文件名都不是条件。
-    # The GUI has one condition only: ``is_dirty()``.  Layer count and file name are not it.
+    # 这个工程四道问句一条都不成立，所以换它不用问；图层数与关联文件名本来就都不是条件。
+    # None of the four questions fires for this project, so replacing it asks nothing; the layer
+    # count and the file name were never conditions.
     loaded = FakeProject(**state)
     iface = FakeIface(loaded)
     result = project.ProjectCreate().execute_main(
