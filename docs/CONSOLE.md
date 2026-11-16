@@ -130,8 +130,10 @@ layer.get_info     -> {"layer_id": "Cities_5945552f_...", ..., "provider": "ogr"
                        "visible": true, "effective_visible": true}
 ```
 
-`provider` 由 `kind` 决定（vector→`ogr`，raster→`gdal`），调用方不能指定。图层的 `layer_id`
-由 QGIS 生成，带随机后缀，所以上面只保证前缀一致。
+`provider` 由 `kind` 决定（vector→`ogr`，raster→`gdal`），调用方不能指定。源里有好几个子图层
+（多表 GeoPackage、多变量 NetCDF）时必须用 `sub_layer` 点名一个；清单里只有一条时用它自己的 URI。
+`layer.list` 的顺序是图例从上到下，工程里有而树里没有的图层接在后面。图层的 `layer_id` 由 QGIS
+生成，带随机后缀，所以上面只保证前缀一致。
 
 ## 5. 可见性
 
@@ -144,16 +146,16 @@ engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
 已实测（headless）：
 
 ```text
-{"visible": true,  "effective_visible": true,  "changed": false}   # 已经是 true：没动
-{"visible": false, "effective_visible": false, "changed": true }   # 隐藏
-{"visible": true,  "effective_visible": true,  "changed": true }   # 再显示
+{"visible": true,  "effective_visible": true }   # 已经是 true：没动，也没置脏
+{"visible": false, "effective_visible": false}   # 隐藏，工程变脏
+{"visible": true,  "effective_visible": true }   # 再显示，工程变脏
 ```
 
 `visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性。打勾还会把祖先
 分组一起勾上（图例的勾选框就是这么做的：对一个叶子节点打勾会连父组一起勾，否则勾了也看不见），
-所以 `set_visibility(true)` 之后两者都是 `true`；取消只写这一个节点，父组保持原样。`changed` 说的
-是“本次有没有真的改变可见结果”，所以节点已经勾着、但父组被手动取消时，`set_visibility(true)` 仍然
-是 `changed=true`（验收用例 at_21b 实测）。
+所以 `set_visibility(true)` 之后两者都是 `true`；取消只写这一个节点，父组保持原样。真正的写入会
+把工程置脏（图例的勾选就是这么做的），同值重写不会。属性表这类非空间图层在图例里没有勾选框，
+它的 `visible` 是 `null`，`set_visibility` 报 `INVALID_LAYER`。
 
 ## 6. 后台求和（唯一的 background Operation）
 
@@ -174,10 +176,10 @@ result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
 progress: 100.0
 ```
 
-选择集跟随章程 A6 定的规则：有选择集时只算选中的要素，没有时算全部；结果里的 `selected_only` 如实
-说这次用了哪一种（面板上有那个“仅选中要素”开关，没有新参数）。实测（选中 2 个城市、`pop > 50`）：
-`count=2`、`total=160.0`、`selected_only=true`；`removeSelection()` 之后同一调用回到 `count=3`、
-`total=200.0`、`selected_only=false`。
+选择集只在 `selected_only=true` 时用：那是 Processing 面板上要用户勾的开关，默认不勾，有选择集
+而没勾时算法照样算整层。结果里的 `selected_only` 如实回报这次用了哪一种。实测（选中 2 个城市、
+`pop > 50`）：`selected_only=true` → `count=2`、`total=160.0`；不传这个开关的同一调用是整层
+`count=3`、`total=200.0`。
 
 几条实测到的事实：
 
@@ -194,8 +196,8 @@ progress: 100.0
   丢掉，记录就是 `PREPARING 0 → SCHEDULED 0 → RUNNING 0 → FINALIZING 0 → SUCCEEDED 100`（实测）：
   这里的 `RUNNING` 来自完成路径补写，不是进度报告。
 - 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
-- 要素数没有上限（桌面版的统计面板也不设，`qgsvectorlayerutils.cpp:73-80`）：拷列成本实测
-  10 万要素 0.11 s / 800 KB、100 万要素 3.14 s / 8 MB。
+- 要素数没有上限（Processing 的算法也不设）：拷列成本实测 10 万要素 0.11 s / 800 KB、
+  100 万要素 3.14 s / 8 MB。
 - 在 Console 里不要忙等：打完下一行代码就是一次事件循环，`get` 即可；等任务真正跑完再 `get`
   才会看到终态。
 
@@ -319,7 +321,38 @@ get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": fa
   与默认模板）。
 - `create` 之后 `is_dirty` 是 `false`：GUI 的 `fileNew` 最后一步就是 `setDirty(false)`。
 
-## 9. 常见错误速览
+## 9. 样式与渲染器
+
+分类、QML 与渲染器都是同一门课：读到的就是 QGIS 自己写出来的那一份，写回去的是同一个字符串。
+
+```python
+engine.run_sync("layer.list_style_categories", {"layer_id": layer_id}).result
+engine.run_sync("layer.get_qml", {"layer_id": layer_id, "categories": ["Symbology"]}).result
+read = engine.run_sync("layer.get_renderer", {"layer_id": layer_id}).result
+engine.run_sync(
+    "layer.set_renderer",
+    {"layer_id": layer_id, "renderer": read["renderer_xml"]},
+).result
+```
+
+已实测（headless，1 个点图层与 1 个三波段栅格）：
+
+```text
+layer.list_style_categories -> ["LayerConfiguration", "Symbology", "Symbology3D", "Labeling",
+                                ... 18 个，栅格是 9 个（没有 Labeling）]
+layer.get_qml(Symbology)    -> <!DOCTYPE qgis ...> 开头的一段 XML，根元素 styleCategories="Symbology"
+layer.get_renderer (矢量)   -> {"renderer_type": "singleSymbol", "renderer_xml": 2685 字节}
+layer.get_renderer (栅格)   -> {"renderer_type": "multibandcolor", "renderer_xml": 898 字节}
+layer.set_renderer(把上面那份喂回去) -> {"renderer_type": "singleSymbol"} / {"renderer_type": "multibandcolor"}
+```
+
+`renderer_xml` 是那个渲染器自己的文档：矢量是 `renderer-v2` 元素，栅格是 `rasterrenderer` 元素；
+把它喂回 `layer.set_renderer` 就是同一个渲染器。能装什么由 QGIS 的注册表决定（`heatmapRenderer`、
+第三方注册的矢量渲染器都装得上），但**只装这门图层类型下拉框里列出的类型**：不列的那些 QGIS 会
+默不作声保留旧渲染器，所以这里直接拒。分类是一个位标记，重复的名字就是一个位，不拒；默认不点名
+就是全部位，空列表是一个都不导出。`layer.get_qml` 不写文件，返回的就是字符串。
+
+## 10. 常见错误速览
 
 已实测（headless），一条一行：
 
@@ -330,9 +363,14 @@ get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": fa
 | 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
 | `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
 | `layer.add` 的 `sub_layer` 不在 provider 的清单里（矢量或栅格） | `FAILED` `INVALID_LAYER` |
+| `layer.add` 一个多表 GeoPackage 而没点名 `sub_layer` | `FAILED` `INVALID_LAYER`，消息里列出可选的名字 |
+| `layer.add` 一个不像栅格的文件（`kind="raster"`） | `FAILED` `INVALID_LAYER`，消息是 `"<path> is not a supported raster data source"` |
 | `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |
 | `layer.set_visibility` 对一个不在图层树里的图层（加载来的工程可以这样） | `FAILED` `LAYER_NOT_IN_TREE` |
+| `layer.set_visibility` 对一张属性表 | `FAILED` `INVALID_LAYER`（图例里没有勾选框） |
 | `layer.sum_numeric_field` 对文本字段 | `FAILED` `INVALID_FIELD_TYPE` |
+| `layer.set_renderer` 的文档不是合法 XML | `FAILED` `INVALID_INPUT`，消息是解析器那句带行列号的话 |
+| `layer.set_renderer` 的文档里类型不在这门图层的候选清单里 | `FAILED` `INVALID_INPUT`，旧渲染器不动 |
 | `project.save` 不给路径且工程无关联文件 | `FAILED` `PROJECT_PATH_REQUIRED` |
 | `project.create` 传 `crs_authid="NOT:A_CRS"` | `SUCCEEDED`，`crs_authid` 是 `""`（GUI 的新建动作也不拒） |
 | `project.create` / `project.open` 在有未保存内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
@@ -340,7 +378,7 @@ get_info      -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": fa
 | 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
 | `layer.add` / `project.save` 传相对路径 | `FAILED` `PATH_NOT_ALLOWED`（绝对路径不再被任何白名单拒） |
 
-## 10. 未实测清单
+## 11. 未实测清单
 
 | 样例 | 为什么没跑 |
 | --- | --- |

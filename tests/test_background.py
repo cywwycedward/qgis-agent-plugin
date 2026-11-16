@@ -243,25 +243,34 @@ def test_a_field_sum_is_computed_from_a_copied_snapshot() -> None:
     assert record.progress == 100
 
 
-def test_a_selection_narrows_the_sum_and_says_so() -> None:
-    """有选择集时只算选中的：桌面版统计面板的“仅选中要素”开关就是这件事。
+def test_a_selection_narrows_the_sum_only_when_it_is_asked_for() -> None:
+    """选择集只在调用方点名时才用：面板上那是要用户勾的开关，默认不勾。
 
-    With a selection, only the selected features are summed: that is what the statistics
-    panel's "selected features only" switch does (qgsstatisticalsummarydockwidget.cpp:210,
-    :218 -> qgsvectorlayerutils.cpp:73-80).
+    A selection is used only when the caller names it: on the panel that is a switch the user
+    ticks, and it starts unchecked.
     """
 
-    harness = harness_with(make_layer([(1.0,), (2.0,), (3.0,)], selected_rows=[(2.0,), (3.0,)]))
+    layer = make_layer([(1.0,), (2.0,), (3.0,)], selected_rows=[(2.0,), (3.0,)])
+    harness = harness_with(layer)
 
-    record = settled(harness, submit_sum(harness))
+    whole = settled(harness, submit_sum(harness))
+    assert whole.status is SUCCEEDED
+    assert whole.result is not None
+    assert whole.result["count"] == 3
+    assert whole.result["total"] == 6.0
+    assert whole.result["selected_only"] is False
 
-    assert record.status is SUCCEEDED
-    assert record.result is not None
-    assert record.result["count"] == 2
-    assert record.result["total"] == 5.0
-    assert record.result["selected_only"] is True
+    selected = settled(
+        harness,
+        harness.submit(SUM, {"layer_id": "layer-1", "field_name": FIELD, "selected_only": True}),
+    )
+    assert selected.status is SUCCEEDED
+    assert selected.result is not None
+    assert selected.result["count"] == 2
+    assert selected.result["total"] == 5.0
+    assert selected.result["selected_only"] is True
     # 选择集也走同一个裁剪请求 / the selection read takes the same trimmed request.
-    assert harness.project.layers["layer-1"].last_request.attribute_indexes == [0]
+    assert layer.last_request.attribute_indexes == [0]
 
 
 def test_a_null_that_arrives_as_the_qgis_null_value_is_skipped() -> None:
