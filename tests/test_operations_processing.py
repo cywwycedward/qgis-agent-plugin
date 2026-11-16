@@ -1097,6 +1097,34 @@ def test_a_hidden_destination_is_never_filled(fake_qgis: FakeQgis) -> None:
     assert fake_qgis.processing.calls[0].parameters == {}
 
 
+def test_the_first_refusal_follows_the_definition_order(fake_qgis: FakeQgis) -> None:
+    # 先声明的先说话：面板是一个循环，不是“先查完输入再查输出”。
+    # The first declared parameter speaks first: the panel is one loop, not "all inputs, then all
+    # outputs".
+    output = destination(supported=False, output_error="the output is refused")
+    source = FakeDefinition("INPUT", "source", description="Input layer", acceptable=False)
+    install(fake_qgis, output, source)
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {"OUTPUT": "C:/out.gpkg"})
+
+    assert caught.value.message == "the output is refused"
+
+
+def test_a_later_refusal_waits_for_the_earlier_one(fake_qgis: FakeQgis) -> None:
+    output = destination(supported=False, output_error="the output is refused")
+    source = FakeDefinition("INPUT", "source", description="Input layer", acceptable=False)
+    install(fake_qgis, source, output)
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {"OUTPUT": "C:/out.gpkg"})
+
+    assert caught.value.message == "Wrong or missing parameter value: Input layer"
+    # 第一句之后就停：后面的输出没有被问。
+    # The loop stops at the first refusal: the output is never asked.
+    assert output.supported_checks == []
+
+
 def test_a_parameter_default_wins_over_the_temporary_output(fake_qgis: FakeQgis) -> None:
     install(fake_qgis, destination(gui_default="fixed.gpkg"))
 
