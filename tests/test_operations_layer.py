@@ -523,7 +523,8 @@ class FakeGroup:
         return self.checked and (self.parent is None or self.parent.isVisible())
 
     def setItemVisibilityChecked(self, visible: bool) -> None:
-        # 原生对同值早返回（qgslayertreenode.cpp:98-99），所以不记录一次空写。
+        # 原生对同值早返回，所以不记录一次空写。
+        # Native returns early on the same value, so a no-op write is not recorded.
         # Native returns early on the same value, so a no-op write is not recorded.
         if self.checked == visible:
             return
@@ -1002,9 +1003,9 @@ def test_an_empty_name_is_refused() -> None:
 
 @pytest.mark.parametrize("length", [128, 200, 4096])
 def test_a_layer_name_of_any_length_is_accepted(length: int) -> None:
-    # 桌面版对图层名没有长度上限（实测：200 字的名字原样保住），所以插件也不设。
-    # Desktop puts no length limit on a layer name (measured: a 200-character name is kept
-    # as is), so neither does the plugin.
+    # 图层名没有长度上限（实测：200 字的名字原样保住），所以插件也不设。
+    # A layer name has no length limit (measured: a 200-character name is kept as is), so the
+    # plugin sets none either.
     params = ops.LayerAddParams.model_validate(add_params(name="x" * length))
     assert len(params.name) == length
 
@@ -1047,9 +1048,9 @@ def test_a_visibility_flag_must_be_a_real_boolean() -> None:
 def test_a_source_the_provider_does_not_recognise_is_invalid_layer(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """provider 的清单为空才是拒的理由（桌面版那句 "Invalid Data Source"）。
+    """provider 的清单为空才是拒的理由，消息是加图层对话框那句。
 
-    An empty provider list is the refusal (desktop's "Invalid Data Source").
+    An empty provider list is the refusal, with the add-layer dialog's own sentence.
     """
 
     fake_qgis.sublayer_names = []
@@ -1068,10 +1069,10 @@ def test_a_source_the_provider_does_not_recognise_is_invalid_layer(
 def test_a_recognised_source_qgis_cannot_read_is_still_added(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """provider 认得、图层读不出：桌面版照样加进图例，靠坏图层图标提示。
+    """provider 认得、图层读不出：照样加进图例，靠坏图层图标提示。
 
-    Recognised by the provider but unreadable: desktop still adds it and leaves the
-    bad-layer icon to say so.
+    Recognised by the provider but unreadable: it still enters the legend, and the bad-layer
+    icon is left to say so.
     """
 
     fake_qgis.valid = False
@@ -1091,9 +1092,9 @@ def test_a_recognised_source_qgis_cannot_read_is_still_added(
 def test_a_sub_layer_the_provider_did_not_report_is_invalid_layer(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """桌面版的选择框只列得出来的东西，所以点不出一个不存在的名字。
+    """选择框只列得出来的东西，所以点不出一个不存在的名字。
 
-    Desktop's dialog only lists what exists, so a name it never offered is not an answer.
+    The picker only lists what exists, so a name it never offered is not an answer.
     """
 
     fake_qgis.sublayer_names = ["roads"]
@@ -1212,10 +1213,9 @@ def test_a_sub_layer_uri_comes_from_the_providers_own_detail(
     )
 
     resolved = str(source.resolve())
-    # URI 就是那条 detail 的 uri()——桌面版 toLayer() 交给 QgsMapLayerFactory 的同一个字符串
-    # （qgsprovidersublayerdetails.cpp:22-28），不再自己调 encodeUri 拼。
-    # The URI is that detail's own uri() -- the same string desktop's toLayer() hands to
-    # QgsMapLayerFactory (qgsprovidersublayerdetails.cpp:22-28); nothing re-encodes it here.
+    # URI 就是那条 detail 的 uri()——图层工厂拿到的同一个字符串，不再自己调 encodeUri 拼。
+    # The URI is that detail's own uri() -- the same string the layer factory is handed; nothing
+    # re-encodes it here.
     assert fake_qgis.provider_names == ["ogr"]
     assert fake_qgis.encoded == []
     assert fake_qgis.constructed[0].source_uri == f"{resolved}|layername=roads"
@@ -1223,10 +1223,9 @@ def test_a_sub_layer_uri_comes_from_the_providers_own_detail(
 
 
 def test_a_raster_can_carry_a_sub_layer(fake_qgis: FakeQgis, data_root: Path) -> None:
-    """栅格也有子数据集清单：桌面版那个页签同样提供它（`qgsapplayerhandling.cpp:1363-1381`）。
+    """栅格也有子数据集清单：那个页签同样提供它。
 
-    A raster has a subdataset list too: desktop's raster tab offers one as well
-    (`qgsapplayerhandling.cpp:1363-1381`).
+    A raster has a subdataset list too: that tab offers one as well.
     """
 
     fake_qgis.sublayer_names = ["dem"]
@@ -1287,12 +1286,12 @@ def test_a_file_that_is_not_a_raster_is_refused_before_any_provider(
 
 
 def test_a_legend_entry_is_always_created(fake_qgis: FakeQgis, data_root: Path) -> None:
-    """没有 `add_to_legend` 参数：每次加图层都进图例（桌面版的 addToLegend=false 是“先进工程、
-    随后进分组”，图层仍在图例里，`qgsapplayerhandling.cpp:802-808`）。
+    """没有 `add_to_legend` 参数：每次加图层都进图例。
 
-    No `add_to_legend` parameter: every add goes into the legend (desktop's
-    addToLegend=false is "into the project, then into a group", and the layer is still in
-    the legend, `qgsapplayerhandling.cpp:802-808`).
+    另一个入口的 addToLegend=false 是“先进工程、随后进分组”，图层仍在图例里。
+    There is no `add_to_legend` parameter: every add enters the legend.  The other entry point's
+    addToLegend=false means "into the project, then into a group", and the layer stays in the
+    legend all the same.
     """
 
     project = FakeProject()

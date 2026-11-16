@@ -1532,9 +1532,8 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
         "ogr",
         "the provider layer.get_info reports",
     )
-    # 一个 provider 从未报过的子图层名不是答案（桌面版的选择框点不出它）。
-    # A sub-layer name the provider never reported is not an answer (desktop's dialog cannot
-    # offer it).
+    # 一个 provider 从未报过的子图层名不是答案（选择框点不出它）。
+    # A sub-layer name the provider never reported is not an answer (the picker cannot offer it).
     missing = ctx.run(
         "layer.add",
         {
@@ -3276,7 +3275,7 @@ def s02_raster_categories(ctx: Context) -> str:
         require("Labeling" not in categories, f"{name}: Labeling is not a raster checkbox")
     return (
         "a one-band and a three-band raster both report the same nine categories, including "
-        "AttributeTable and Notes and without Labeling, in the order desktop's category model "
+        "AttributeTable and Notes and without Labeling, in the order the category model "
         "lists them"
     )
 
@@ -3426,9 +3425,8 @@ def a02_raster_candidates(ctx: Context) -> str:
     }
     for label, layer_id in layers.items():
         layer = project_layer(layer_id)
-        # 桌面版的下拉框 = 注册表清单再按 rasterType() 过滤一层
-        # (qgsrasterlayerproperties.cpp:443-455)。
-        # Desktop's combo is the registry list filtered by rasterType().
+        # 下拉框 = 注册表清单再按 rasterType() 过滤一层。
+        # The combo is the registry list filtered once more by rasterType().
         single_band_color_data = layer.rasterType() == Qgis.RasterLayerType.SingleBandColorData
         expected = [
             name for name in native if (name == "singlebandcolordata") == single_band_color_data
@@ -3448,7 +3446,7 @@ def a02_raster_candidates(ctx: Context) -> str:
     require(len(native) == 8, f"the registry count changed: {len(native)}")
     return (
         "the registry holds eight raster renderers, while a raster layer's list is the registry "
-        "filtered by its own rasterType() as desktop's combo does: seven names each for a "
+        "filtered by its own rasterType() as the symbology combo does: seven names each for a "
         "one-band and a three-band raster, with singlebandcolordata left out"
     )
 
