@@ -129,7 +129,7 @@ def cities_layer(ctx: Context, name: str = "cities") -> str:
     A real vector layer added through the plugin's own ``layer.add``.
     """
 
-    return ctx.add_layer(ctx.fixtures.cities, name)
+    return ctx.add_layer(ctx.fixtures.cities, name, sub_layer=fixtures.CITIES_LAYER)
 
 
 def error_code(record: ExecutionRecord) -> str:
@@ -261,8 +261,8 @@ def installed_renderer(ctx: Context, layer_id: str) -> str:
     return str(result_of(record)["renderer_type"])
 
 
-def set_renderer(ctx: Context, layer_id: str, config: dict[str, Any]) -> ExecutionRecord:
-    return ctx.run("layer.set_renderer", {"layer_id": layer_id, "renderer": config})
+def set_renderer(ctx: Context, layer_id: str, document: str) -> ExecutionRecord:
+    return ctx.run("layer.set_renderer", {"layer_id": layer_id, "renderer": document})
 
 
 def qml_of(ctx: Context, layer_id: str, categories: list[str] | None = None) -> str:
@@ -384,6 +384,7 @@ def at_04_submit_layer_add(ctx: Context) -> str:
             "kind": "vector",
             "source_path": str(ctx.fixtures.spaced),
             "name": "at04 spaced cities",
+            "sub_layer": fixtures.CITIES_LAYER,
         },
     )
     equal(submitted.status, ExecutionStatus.QUEUED, "status right after submit")
@@ -442,12 +443,11 @@ def at_06_submit_field_sum(ctx: Context) -> str:
     )
 
 
-def at_06b_sum_follows_the_selection(ctx: Context) -> str:
-    """有选择集时只算选中的：桌面版统计面板的“仅选中要素”开关就是这件事。
+def at_06b_sum_uses_the_selection_only_when_asked(ctx: Context) -> str:
+    """选择集只在 ``selected_only`` 为真时才算：面板上那个开关默认不勾。
 
-    With a selection, only the selected features are summed: the statistics panel's
-    "selected features only" switch (qgsstatisticalsummarydockwidget.cpp:210, :218 ->
-    qgsvectorlayerutils.cpp:73-80).
+    A selection counts only when ``selected_only`` is set: that panel switch starts
+    unchecked.
     """
 
     layer_id = cities_layer(ctx, "at06b cities")
@@ -455,9 +455,20 @@ def at_06b_sum_follows_the_selection(ctx: Context) -> str:
     layer.selectByExpression("pop > 50")
     equal(layer.selectedFeatureCount(), 2, "the features the expression selected")
 
-    submitted = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
-    record = ctx.wait_terminal(submitted.execution_id)
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"the field sum: {record.error}")
+    whole = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+    first = ctx.wait_terminal(whole.execution_id)
+    equal(first.status, ExecutionStatus.SUCCEEDED, f"the field sum: {first.error}")
+    equal(result_of(first)["selected_only"], False, "the default is the whole layer")
+    equal(result_of(first)["total"], fixtures.POP_TOTAL, "the whole layer's sum")
+
+    selected = ctx.submit(
+        "layer.sum_numeric_field",
+        {"layer_id": layer_id, "field_name": "pop", "selected_only": True},
+    )
+    record = ctx.wait_terminal(selected.execution_id)
+    equal(
+        record.status, ExecutionStatus.SUCCEEDED, f"the field sum over a selection: {record.error}"
+    )
     values = result_of(record)
     equal(values["selected_only"], True, "the record says the selection was used")
     equal(values["count"], 2, "the summed values are the selected ones")
@@ -465,14 +476,17 @@ def at_06b_sum_follows_the_selection(ctx: Context) -> str:
     equal(values["skipped_null"], 0, "the selection holds no null")
 
     layer.removeSelection()
-    again = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+    again = ctx.submit(
+        "layer.sum_numeric_field",
+        {"layer_id": layer_id, "field_name": "pop", "selected_only": True},
+    )
     second = ctx.wait_terminal(again.execution_id)
     equal(second.status, ExecutionStatus.SUCCEEDED, "the sum after clearing the selection")
-    equal(result_of(second)["selected_only"], False, "no selection, so the whole layer")
-    equal(result_of(second)["total"], fixtures.POP_TOTAL, "back to the whole layer")
+    equal(result_of(second)["total"], 0.0, "an empty selection sums nothing")
     return (
-        "with 2 of 5 cities selected the sum is count=2, total=160.0 and selected_only=true; "
-        "after removeSelection() the same call is selected_only=false with the layer's 200.0"
+        "2 of 5 cities selected: the default call is the whole layer (200.0, selected_only=false); "
+        "selected_only=true gives count=2, total=160.0; after removeSelection() the same call "
+        "sums the empty selection (0.0)"
     )
 
 
@@ -674,9 +688,23 @@ def at_08c_concurrency_limit(ctx: Context) -> str:
 def at_09_cancel_queued(ctx: Context) -> str:
     layers_before = len(project_layers())
     source = str(ctx.fixtures.spaced)
-    first = ctx.submit("layer.add", {"kind": "vector", "source_path": source, "name": "at09 first"})
+    first = ctx.submit(
+        "layer.add",
+        {
+            "kind": "vector",
+            "source_path": source,
+            "name": "at09 first",
+            "sub_layer": fixtures.CITIES_LAYER,
+        },
+    )
     second = ctx.submit(
-        "layer.add", {"kind": "vector", "source_path": source, "name": "at09 second"}
+        "layer.add",
+        {
+            "kind": "vector",
+            "source_path": source,
+            "name": "at09 second",
+            "sub_layer": fixtures.CITIES_LAYER,
+        },
     )
     equal(second.status, ExecutionStatus.QUEUED, "the second call right after submit")
 
@@ -1271,34 +1299,35 @@ def at_21b_group_hides_layer(ctx: Context) -> str:
 
     record = ctx.run("layer.set_visibility", {"layer_id": layer_id, "visible": True})
     equal(record.status, ExecutionStatus.SUCCEEDED, "set_visibility on a hidden layer")
-    equal(
-        result_of(record)["changed"],
-        True,
-        "checking a layer under a hidden group also checks the group",
-    )
     equal(result_of(record)["effective_visible"], True, "the layer after the check")
     equal(group.itemVisibilityChecked(), True, "the parent group's check state")
+    equal(QgsProject.instance().isDirty(), True, "the project after a legend write")
     return (
         "visible=true while effective_visible=false under an unchecked group; the legend's "
-        "check acts on the ancestors too, so set_visibility(true) reported changed=true and "
-        "left the layer and its group checked"
+        "check acts on the ancestors too, so set_visibility(true) left the layer and its group "
+        "checked and marked the project dirty"
     )
 
 
 def at_22_visibility_idempotent(ctx: Context) -> str:
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+
     reset_project(ctx)
     layer_id = cities_layer(ctx, "at22 cities")
+    QgsProject.instance().setDirty(False)
     first = ctx.run("layer.set_visibility", {"layer_id": layer_id, "visible": False})
     equal(first.status, ExecutionStatus.SUCCEEDED, "the first set_visibility")
-    equal(result_of(first)["changed"], True, "the first call changed the state")
+    equal(result_of(first)["visible"], False, "the layer after the first call")
+    equal(QgsProject.instance().isDirty(), True, "the project after a real change")
 
+    QgsProject.instance().setDirty(False)
     second = ctx.run("layer.set_visibility", {"layer_id": layer_id, "visible": False})
     equal(second.status, ExecutionStatus.SUCCEEDED, "the repeated set_visibility")
-    equal(result_of(second)["changed"], False, "the repeated call")
     equal(result_of(second)["visible"], False, "the layer after the repeated call")
+    equal(QgsProject.instance().isDirty(), False, "the project after an unchanged rewrite")
     return (
-        "the same set_visibility twice: SUCCEEDED with changed=true, then SUCCEEDED with "
-        "changed=false"
+        "the same set_visibility twice: SUCCEEDED and the project marked dirty, then SUCCEEDED "
+        "with the unchanged rewrite left undirty"
     )
 
 
@@ -1541,9 +1570,8 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
         "ogr",
         "the provider layer.get_info reports",
     )
-    # 一个 provider 从未报过的子图层名不是答案（桌面版的选择框点不出它）。
-    # A sub-layer name the provider never reported is not an answer (desktop's dialog cannot
-    # offer it).
+    # 一个 provider 从未报过的子图层名不是答案（选择框点不出它）。
+    # A sub-layer name the provider never reported is not an answer (the picker cannot offer it).
     missing = ctx.run(
         "layer.add",
         {
@@ -1656,7 +1684,7 @@ def at_32_open_keeps_a_source_whose_directory_is_gone(ctx: Context) -> str:
     """
 
     reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at32 old")
+    ctx.add_layer(ctx.fixtures.cities, "at32 old", sub_layer=fixtures.CITIES_LAYER)
 
     record = ctx.run(
         "project.open",
@@ -1737,7 +1765,7 @@ def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -
     from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at35 kept")
+    ctx.add_layer(ctx.fixtures.cities, "at35 kept", sub_layer=fixtures.CITIES_LAYER)
     before = project_layer_ids()
     file_before = QgsProject.instance().fileName()
 
@@ -1833,7 +1861,7 @@ def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
     from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at41 kept")
+    ctx.add_layer(ctx.fixtures.cities, "at41 kept", sub_layer=fixtures.CITIES_LAYER)
     before = project_layer_ids()
     file_before = QgsProject.instance().fileName()
     # 前缀没声明时 ``QDomDocument`` 把它当普通元素名，所以它也是一层；这个文件由用例自己写，
@@ -1885,7 +1913,7 @@ def at_42_open_refuses_an_archive_whose_sibling_member_is_encrypted(ctx: Context
     from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
     reset_project(ctx)
-    ctx.add_layer(ctx.fixtures.cities, "at42 kept")
+    ctx.add_layer(ctx.fixtures.cities, "at42 kept", sub_layer=fixtures.CITIES_LAYER)
     before = project_layer_ids()
     file_before = QgsProject.instance().fileName()
     on_disk = ctx.fixtures.encrypted_sibling.stat().st_size
@@ -3284,7 +3312,7 @@ def s02_raster_categories(ctx: Context) -> str:
         require("Labeling" not in categories, f"{name}: Labeling is not a raster checkbox")
     return (
         "a one-band and a three-band raster both report the same nine categories, including "
-        "AttributeTable and Notes and without Labeling, in the order desktop's category model "
+        "AttributeTable and Notes and without Labeling, in the order the category model "
         "lists them"
     )
 
@@ -3292,36 +3320,41 @@ def s02_raster_categories(ctx: Context) -> str:
 def s03_invalid_categories(ctx: Context) -> str:
     vector_id = sub_layer(ctx, "s03 polygon", fixtures.PARCELS_LAYER)
     raster_id = raster_layer(ctx, "s03 raster")
-    requests = {
+    # 分类是一个位标记：重复的名字就是一个位，不适用的分类只是一个没人写的位，两者都不是错。
+    # The categories are one bit flag: a repeated name is one bit, and a category this layer type
+    # never writes is just an unused bit.  Neither is an error.
+    accepted = {
         "a repeated category": (vector_id, ["Symbology", "Symbology"]),
-        "an unknown name": (vector_id, ["p5NotAStyleCategory"]),
         "a vector-only category on a raster": (raster_id, ["Symbology3D"]),
         "a vector-only category on a raster, doubled": (raster_id, ["Fields", "Fields"]),
+        "nothing at all": (vector_id, []),
+        "nothing at all on a raster": (raster_id, []),
     }
-    for label, (layer_id, categories) in requests.items():
+    for label, (layer_id, categories) in accepted.items():
         record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": categories})
-        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
-        equal(error_code(record), INVALID_INPUT, f"{label}: code")
-        require(record.result is None, f"{label}: a half-finished export was returned")
-    # 一个都不选是桌面版的 Deselect All + OK：合法，导出的是零分类文档。
-    # "None of them" is desktop's Deselect All plus OK: legal, and it exports the
-    # zero-category document.
-    for label, layer_id in (("vector", vector_id), ("raster", raster_id)):
-        record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": []})
-        equal(record.status, ExecutionStatus.SUCCEEDED, f"{label}: an empty list")
-        qml = result_of(record)["qml"]
-        # 零分类导出的是 ``styleCategories=""``（实测），所以断言原始属性而不是集合。
-        # A zero-category export writes ``styleCategories=""`` (measured), so the raw
-        # attribute is what this asserts.
-        equal(
-            xml_root(qml).get("styleCategories") or "",
-            "",
-            f"{label}: the categories an empty list declares",
-        )
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{label}: {record.error}")
+        require(xml_root(result_of(record)["qml"]) is not None, f"{label}: no document came back")
+
+    unknown = ctx.run(
+        "layer.get_qml", {"layer_id": vector_id, "categories": ["p5NotAStyleCategory"]}
+    )
+    equal(unknown.status, ExecutionStatus.FAILED, "an unknown category name: status")
+    equal(error_code(unknown), INVALID_INPUT, "an unknown category name: code")
+    require(unknown.result is None, "an unknown category name: a partial export was returned")
+
+    # 零分类导出的是 ``styleCategories=""``（实测），所以断言原始属性而不是集合。
+    # A zero-category export writes ``styleCategories=""`` (measured), so the raw attribute is what
+    # this asserts.
+    empty = ctx.run("layer.get_qml", {"layer_id": vector_id, "categories": []})
+    equal(
+        xml_root(result_of(empty)["qml"]).get("styleCategories") or "",
+        "",
+        "the categories an empty list declares",
+    )
     return (
-        "a repeated category, an unknown name and a vector-only category on a raster are all "
-        "FAILED(INVALID_INPUT) with no partial XML, while an empty list on a vector and on a "
-        "raster both SUCCEED with a document that declares no style categories"
+        "a repeated category, a vector-only category on a raster and an empty list all SUCCEED and "
+        "export a document (the empty list one declares no style categories), while a name outside "
+        "the model is FAILED(INVALID_INPUT) with no partial XML"
     )
 
 
@@ -3402,7 +3435,7 @@ def a01_vector_candidates(ctx: Context) -> str:
         record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
         equal(record.status, ExecutionStatus.SUCCEEDED, f"{geometry}: status")
         lists[geometry] = result_of(record)["renderer_types"]
-        equal(lists[geometry], sorted(set(native)), f"{geometry}: the live per-layer registry list")
+        equal(lists[geometry], native, f"{geometry}: the live per-layer registry list")
     require("heatmapRenderer" in lists["Point"], f"the Point list: {lists['Point']}")
     require(
         "heatmapRenderer" not in lists["Line"],
@@ -3429,15 +3462,12 @@ def a02_raster_candidates(ctx: Context) -> str:
     }
     for label, layer_id in layers.items():
         layer = project_layer(layer_id)
-        # 桌面版的下拉框 = 注册表清单再按 rasterType() 过滤一层
-        # (qgsrasterlayerproperties.cpp:443-455)。
-        # Desktop's combo is the registry list filtered by rasterType().
+        # 下拉框 = 注册表清单再按 rasterType() 过滤一层。
+        # The combo is the registry list filtered once more by rasterType().
         single_band_color_data = layer.rasterType() == Qgis.RasterLayerType.SingleBandColorData
-        expected = sorted(
-            name
-            for name in set(native)
-            if (name == "singlebandcolordata") == single_band_color_data
-        )
+        expected = [
+            name for name in native if (name == "singlebandcolordata") == single_band_color_data
+        ]
         record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
         equal(
             record.status,
@@ -3453,7 +3483,7 @@ def a02_raster_candidates(ctx: Context) -> str:
     require(len(native) == 8, f"the registry count changed: {len(native)}")
     return (
         "the registry holds eight raster renderers, while a raster layer's list is the registry "
-        "filtered by its own rasterType() as desktop's combo does: seven names each for a "
+        "filtered by its own rasterType() as the symbology combo does: seven names each for a "
         "one-band and a three-band raster, with singlebandcolordata left out"
     )
 
@@ -3468,18 +3498,15 @@ _REGISTERED_RENDERER_METADATA: list[Any] = []
 def a03_third_party_candidate(ctx: Context) -> str:
     from qgis.core import (  # pyright: ignore[reportMissingImports]
         QgsApplication,
-        QgsMarkerSymbol,
         QgsRendererAbstractMetadata,
-        QgsSingleSymbolRenderer,
     )
 
     layer_id = cities_layer(ctx, "a03 point")
     before = result_of(ctx.run("layer.list_available_renderers", {"layer_id": layer_id}))[
         "renderer_types"
     ]
-    # 设置器只实现五种矢量渲染器，它设不了的那几个照样是候选——这就是“不按设置器过滤”。
-    # The setter implements five vector types; the registered ones it cannot set are candidates all
-    # the same, which is what "not filtered by the setter" means.
+    # 候选清单来自注册表，不按任何本地清单过滤。
+    # The candidate list comes from the registry, unfiltered by any table kept here.
     for name in ("heatmapRenderer", "pointCluster", "pointDisplacement"):
         require(name in before, f"{name} is missing from the candidates: {before}")
 
@@ -3488,7 +3515,11 @@ def a03_third_party_candidate(ctx: Context) -> str:
             super().__init__("p5AcceptanceRenderer", "P5 acceptance renderer")
 
         def createRenderer(self, element):  # noqa: N802 - the native spelling
-            return QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({"color": "#8866cc"}))
+            # 不会被调到：让 PyQt 的 C++ 调用进一个 Python 建的元数据会当场结束进程
+            # （0xC0000409，sip 所有权，实测）。这里只证明清单是活的。
+            # Never called: C++ calling into a Python-built metadata ends the process outright
+            # (0xC0000409, sip ownership, measured).  This only proves the list is live.
+            raise AssertionError("createRenderer must not be called")
 
     metadata = AcceptanceMetadata()
     require(
@@ -3504,14 +3535,26 @@ def a03_third_party_candidate(ctx: Context) -> str:
         "p5AcceptanceRenderer" in after,
         f"a renderer registered in this session is not a candidate: {after}",
     )
-    require(sorted(after) == after, f"the list is no longer sorted: {after}")
-    record = set_renderer(ctx, layer_id, {"type": "p5AcceptanceRenderer"})
-    equal(record.status, ExecutionStatus.FAILED, "the setter accepted a type it does not implement")
-    equal(error_code(record), INVALID_INPUT, "the code for a type the setter does not implement")
+    # 装得上的东西由注册表决定：heatmapRenderer 是注册表里的 C++ 渲染器。
+    # What installs is decided by the registry: heatmapRenderer is a C++ one it holds.
+    heatmap = ctx.run("layer.get_renderer", {"layer_id": cities_layer(ctx, "a03 heatmap")})
+    equal(heatmap.status, ExecutionStatus.SUCCEEDED, "a second point layer")
+    installed = set_renderer(ctx, layer_id, '<renderer-v2 type="heatmapRenderer"/>')
+    equal(installed.status, ExecutionStatus.SUCCEEDED, f"a registry type: {installed.error}")
+    equal(
+        result_of(installed)["renderer_type"],
+        "heatmapRenderer",
+        "the type the registry's own create function built",
+    )
+    equal(
+        project_layer(layer_id).renderer().type(),
+        "heatmapRenderer",
+        "the renderer on the layer",
+    )
     return (
-        "the candidates include the three registered Point types the setter does not implement, "
-        "and a renderer registered into the application registry during this run appears in the "
-        "next call even though layer.set_renderer refuses it with INVALID_INPUT"
+        "the candidates include the three registered Point types, a renderer registered into the "
+        "application registry during this run appears in the next call, and a registry type the "
+        "old setter could not build (heatmapRenderer) now installs from its document"
     )
 
 
@@ -3555,11 +3598,14 @@ def a04_bad_layers(ctx: Context) -> str:
         record = ctx.run(operation, {"layer_id": "a04-no-such-layer"})
         equal(record.status, ExecutionStatus.FAILED, f"{operation}: an unknown id")
         equal(error_code(record), LAYER_NOT_FOUND, f"{operation}: the code for an unknown id")
-    # 一张没有几何的矢量表：两个样式对话框对任何矢量图层都给出整张分类清单，QML 也导得出来；
-    # 但没有渲染器的图层在桌面版里连符号页都没有，所以三个渲染器操作拒。
-    # A geometry-less table: both style dialogs hand any vector layer the whole category list
-    # and the QML exports; a layer without a renderer has no symbology page, so the three
+    # 矢量表：样式读写对它都有定义（属性表也有字段、表单、属性表设置），但它在图例里没有勾选框，
+    # 也没有渲染器，所以渲染器操作拒。
+    # A vector table: the style reads and writes are all defined for it (a table still has fields,
+    # forms and attribute-table settings), while it has no legend checkbox and no renderer, so the
     # renderer operations refuse it.
+    table_visibility = ctx.run("layer.set_visibility", {"layer_id": table.id(), "visible": False})
+    equal(table_visibility.status, ExecutionStatus.FAILED, "set_visibility on a vector table")
+    equal(error_code(table_visibility), INVALID_LAYER, "the code for a table's visibility")
     for operation in ("layer.list_style_categories", "layer.get_qml"):
         record = ctx.run(operation, {"layer_id": table.id()})
         equal(record.status, ExecutionStatus.SUCCEEDED, f"{operation} on a vector table")
@@ -3568,20 +3614,27 @@ def a04_bad_layers(ctx: Context) -> str:
         equal(record.status, ExecutionStatus.FAILED, f"{operation} on a vector table")
         equal(error_code(record), INVALID_LAYER, f"{operation}: the code for a vector table")
     rendered = ctx.run(
-        "layer.set_renderer", {"layer_id": table.id(), "renderer": {"type": "nullSymbol"}}
+        "layer.set_renderer",
+        {"layer_id": table.id(), "renderer": '<renderer-v2 type="nullSymbol"/>'},
     )
     equal(rendered.status, ExecutionStatus.FAILED, "layer.set_renderer on a vector table")
     equal(error_code(rendered), INVALID_LAYER, "layer.set_renderer: the code for a vector table")
-    for operation in (*operations, "layer.get_qml"):
+    # 无效图层：样式读写没有有效性这道门（属性表都对它有），但它自己的渲染器已经没了，
+    # 所以渲染器读和设置照样拒。
+    # An invalid layer: the style reads and writes have no validity gate (a table passes them too),
+    # while its own renderer is gone, so the renderer reads and the setter still refuse.
+    for operation in ("layer.list_style_categories", "layer.get_qml"):
+        record = ctx.run(operation, {"layer_id": invalid.id()})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{operation} on an invalid layer")
+    for operation in ("layer.list_available_renderers", "layer.get_renderer"):
         record = ctx.run(operation, {"layer_id": invalid.id()})
         equal(record.status, ExecutionStatus.FAILED, f"{operation} on an invalid layer")
         equal(error_code(record), INVALID_LAYER, f"{operation}: the code for an invalid layer")
     return (
-        "an unknown id is LAYER_NOT_FOUND on all three renderer/style reads; a registered but "
-        "invalid layer is INVALID_LAYER on all four; a geometry-less vector table still answers "
-        "list_style_categories and get_qml (desktop gives any vector layer the whole list) while "
-        "the three renderer operations are INVALID_LAYER, the precondition desktop's symbology "
-        "page itself has"
+        "an unknown id is LAYER_NOT_FOUND on all three reads; a vector table answers "
+        "list_style_categories and get_qml while its visibility and all three renderer "
+        "operations are INVALID_LAYER (no checkbox, no renderer); an invalid layer keeps the style "
+        "reads and refuses the renderer ones, because its renderer is gone with its source"
     )
 
 
@@ -3596,14 +3649,13 @@ def a05_stable_result(ctx: Context) -> str:
         result = result_of(first)
         equal(sorted(result), ["renderer_types"], f"{label}: the result fields")
         types = result["renderer_types"]
-        equal(types, sorted(types), f"{label}: ascending order")
         equal(len(types), len(set(types)), f"{label}: duplicates in {types}")
         second = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
         equal(result_of(second), result, f"{label}: a repeated call differs")
         counts[label] = len(types)
     return (
-        f"deduplicated, ascending and identical on a repeated call, with only renderer_types in "
-        f"the result (vector {counts['vector']} types, raster {counts['raster']} types)"
+        f"no duplicates and identical on a repeated call, with only renderer_types in the result "
+        f"(vector {counts['vector']} types, raster {counts['raster']} types)"
     )
 
 
@@ -3617,36 +3669,79 @@ def a06_get_renderer(ctx: Context) -> str:
         record = ctx.run("layer.get_renderer", {"layer_id": layer_id})
         equal(record.status, ExecutionStatus.SUCCEEDED, f"{layer_id}: status")
         result = result_of(record)
-        equal(sorted(result), ["layer_id", "renderer_type"], "the result fields")
-        equal(result["renderer_type"], project_layer(layer_id).renderer().type(), "the live type")
+        equal(sorted(result), ["layer_id", "renderer_type", "renderer_xml"], "the result fields")
+        renderer = project_layer(layer_id).renderer()
+        equal(result["renderer_type"], renderer.type(), "the live type")
+        # 交回来的文档就是渲染器自己那份：把它解析回来必须与原生的 save()/writeXml() 一致。
+        # The document handed back is the renderer's own: parsed back it must match the native
+        # save()/writeXml() output.
+        element = xml_root(result["renderer_xml"])
+        if isinstance(renderer, QgsHeatmapRenderer) or result["renderer_type"] == "heatmapRenderer":
+            equal(element.tag, "renderer-v2", "the vector document's root")
+        if result["renderer_type"] == "multibandcolor":
+            equal(element.tag, "rasterrenderer", "the raster document's root")
+        equal(element.get("type"), result["renderer_type"], "the type inside the document")
 
-    # 设置器造不出来的渲染器照样能读，它的配置从 QML 导出里取。
-    # A renderer the setter cannot build is still read, and its configuration comes from the QML
-    # export.
     project_layer(vector_id).setRenderer(QgsHeatmapRenderer())
-    equal(installed_renderer(ctx, vector_id), "heatmapRenderer", "a type the setter cannot build")
+    equal(installed_renderer(ctx, vector_id), "heatmapRenderer", "a renderer QGIS built elsewhere")
+    document = ctx.run("layer.get_renderer", {"layer_id": vector_id})
+    equal(
+        result_of(document)["renderer_xml"],
+        _document_of(project_layer(vector_id).renderer()),
+        "the document of a renderer this plugin never built",
+    )
     qml = qml_of(ctx, vector_id, ["Symbology"])
     require("heatmapRenderer" in qml, "the heatmap configuration is not in the QML export")
     return (
-        "both layer kinds report exactly the live renderer().type() with layer_id and "
-        "renderer_type only; a heatmapRenderer the setter cannot build reads back as "
-        "'heatmapRenderer' and its full configuration is in the Symbology QML"
+        "both layer kinds report the live renderer().type() plus the renderer's own document "
+        "(rooted at renderer-v2 for a vector and rasterrenderer for a raster); a heatmapRenderer "
+        "QGIS built elsewhere reads back byte-identical to its native save()"
     )
+
+
+def _document_of(renderer: Any) -> str:
+    """一个原生渲染器自己的那份文档，用来和 operation 交回来的那份对比。
+
+    A native renderer's own document, to compare with the one the operation hands back.
+    """
+
+    from qgis.core import QgsRasterRenderer, QgsReadWriteContext  # pyright: ignore[reportMissingImports]
+    from qgis.PyQt.QtXml import QDomDocument
+
+    document = QDomDocument()
+    if isinstance(renderer, QgsRasterRenderer):
+        container = document.createElement("qgis")
+        document.appendChild(container)
+        renderer.writeXml(document, container)
+        element = container.firstChildElement("rasterrenderer")
+        container.removeChild(element)
+        document.removeChild(container)
+        document.appendChild(element)
+    else:
+        element = renderer.save(document, QgsReadWriteContext())
+        if element.parentNode().isNull():
+            document.appendChild(element)
+    return document.toString(2)
 
 
 # ------------------------------------------- 矢量渲染器设置 / vector setters
 
 
+def _install(ctx: Context, layer_id: str, renderer: Any) -> dict[str, Any]:
+    record = set_renderer(ctx, layer_id, _document_of(renderer))
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+    return result_of(record)
+
+
 def v01_null_symbol(ctx: Context) -> str:
-    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+    from qgis.core import QgsNullSymbolRenderer, QgsProject  # pyright: ignore[reportMissingImports]
 
     layer_id = sub_layer(ctx, "v01 polygon", fixtures.PARCELS_LAYER)
     before = result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))
     QgsProject.instance().setDirty(False)
 
-    record = set_renderer(ctx, layer_id, {"type": "nullSymbol"})
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "nullSymbol", "the reported type")
+    result = _install(ctx, layer_id, QgsNullSymbolRenderer())
+    equal(result["renderer_type"], "nullSymbol", "the reported type")
     equal(project_layer(layer_id).renderer().type(), "nullSymbol", "the installed native type")
     equal(installed_renderer(ctx, layer_id), "nullSymbol", "layer.get_renderer")
 
@@ -3660,545 +3755,373 @@ def v01_null_symbol(ctx: Context) -> str:
     )
     require(QgsProject.instance().isDirty(), "layer.set_renderer left the project clean")
     return (
-        "nullSymbol installed as the layer's own renderer, visibility and layer-tree presence "
-        "unchanged, and the project is dirty afterwards although QgsVectorLayer.setRenderer alone "
-        "does not mark it (measured)"
+        "a nullSymbol document installed the layer's own renderer, visibility and layer-tree "
+        "presence unchanged, and the project is dirty afterwards although the native setter "
+        "alone does not mark it (measured)"
     )
 
 
 def v02_single_symbol(ctx: Context) -> str:
-    from qgis.core import QgsSymbol  # pyright: ignore[reportMissingImports]
-
-    cases = (
-        (
-            "point",
-            cities_layer(ctx, "v02 point"),
-            {"type": "marker", "color": "#6CAC83", "size_mm": 3.5},
-        ),
-        (
-            "line",
-            sub_layer(ctx, "v02 line", fixtures.ROADS_LAYER),
-            {"type": "line", "color": "#D95843", "width_mm": 0.8},
-        ),
-        (
-            "polygon",
-            sub_layer(ctx, "v02 polygon", fixtures.PARCELS_LAYER),
-            {
-                "type": "fill",
-                "color": "#275E40",
-                "outline_color": "#111111",
-                "outline_width_mm": 0.5,
-            },
-        ),
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsMarkerSymbol,
+        QgsSingleSymbolRenderer,
     )
-    for label, layer_id, symbol in cases:
-        record = set_renderer(ctx, layer_id, {"type": "singleSymbol", "symbol": symbol})
-        equal(record.status, ExecutionStatus.SUCCEEDED, f"{label}: {record.error}")
-        equal(result_of(record)["renderer_type"], "singleSymbol", f"{label}: the reported type")
-        renderer = project_layer(layer_id).renderer()
-        equal(renderer.type(), "singleSymbol", f"{label}: the native renderer")
-        installed = renderer.symbol()
-        families = {"marker": QgsSymbol.Marker, "line": QgsSymbol.Line, "fill": QgsSymbol.Fill}
-        equal(installed.type(), families[symbol["type"]], f"{label}: the symbol family")
-        equal(installed.color().name(), symbol["color"].lower(), f"{label}: the colour")
-        if symbol["type"] == "marker":
-            equal(installed.size(), symbol["size_mm"], f"{label}: the marker size in mm")
-        elif symbol["type"] == "line":
-            equal(installed.width(), symbol["width_mm"], f"{label}: the line width in mm")
-        else:
-            layer_zero = installed.symbolLayer(0)
-            equal(layer_zero.strokeColor().name(), symbol["outline_color"].lower(), "outline")
-            equal(layer_zero.strokeWidth(), symbol["outline_width_mm"], "outline width")
-        equal(installed_renderer(ctx, layer_id), "singleSymbol", f"{label}: layer.get_renderer")
+
+    layer_id = cities_layer(ctx, "v02 point")
+    symbol = QgsMarkerSymbol.createSimple({"color": "#1188cc", "size": "3.5"})
+    _install(ctx, layer_id, QgsSingleSymbolRenderer(symbol))
+
+    renderer = project_layer(layer_id).renderer()
+    equal(renderer.type(), "singleSymbol", "the installed type")
+    equal(renderer.symbol().color().name(), "#1188cc", "the symbol colour the document carried")
+    equal(round(renderer.symbol().size(), 2), 3.5, "the symbol size the document carried")
     return (
-        "singleSymbol installed on Point, Line and Polygon with the declared colour, marker size, "
-        "line width and fill outline read back from the native symbol, each agreeing with "
-        "layer.get_renderer"
+        "a singleSymbol document round-tripped through the operation: the layer's own renderer is "
+        "a singleSymbol whose marker kept the colour #1188cc and size 3.5 the document carried"
     )
 
 
 def v03_categorized(ctx: Context) -> str:
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsCategorizedSymbolRenderer,
+        QgsFillSymbol,
+        QgsRendererCategory,
+    )
+
     layer_id = sub_layer(ctx, "v03 polygon", fixtures.PARCELS_LAYER)
-    config = {
-        "type": "categorizedSymbol",
-        "field": "landuse",
-        "categories": [
-            {"value": "forest", "label": "Forest", "symbol": {"type": "fill", "color": "#398F59"}},
-            {"value": "water", "label": "Water", "symbol": {"type": "fill", "color": "#419ACB"}},
-        ],
-    }
-    record = set_renderer(ctx, layer_id, config)
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "categorizedSymbol", "the reported type")
+    categories = [
+        QgsRendererCategory(1, QgsFillSymbol.createSimple({"color": "#aa3311"}), "one"),
+        QgsRendererCategory(2, QgsFillSymbol.createSimple({"color": "#1188aa"}), "two"),
+    ]
+    _install(ctx, layer_id, QgsCategorizedSymbolRenderer("pop", categories))
 
     renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "categorizedSymbol", "the native renderer")
-    equal(renderer.classAttribute(), "landuse", "the classification field")
-    categories = renderer.categories()
-    equal([entry.value() for entry in categories], ["forest", "water"], "the category order")
-    equal([entry.label() for entry in categories], ["Forest", "Water"], "the labels")
-    equal(
-        [entry.symbol().color().name() for entry in categories],
-        ["#398f59", "#419acb"],
-        "the category colours",
-    )
-    field = project_layer(layer_id).fields().indexFromName("landuse")
-    require(field >= 0, "the field the renderer classifies by is gone")
-    values = {feature.attribute(field) for feature in project_layer(layer_id).getFeatures()}
-    require(
-        values <= {entry.value() for entry in categories},
-        f"the layer holds values the renderer has no category for: {values}",
-    )
-
-    qml = qml_of(ctx, layer_id, ["Symbology"])
-    for label in ("Forest", "Water"):
-        require(f'label="{label}"' in qml, f"{label} is missing from the QML export")
-
-    again = set_renderer(ctx, layer_id, config)
-    equal(again.status, ExecutionStatus.SUCCEEDED, f"the second identical call: {again.error}")
-    equal(
-        [entry.value() for entry in project_layer(layer_id).renderer().categories()],
-        ["forest", "water"],
-        "the category order after setting the same configuration twice",
-    )
+    equal(renderer.type(), "categorizedSymbol", "the installed type")
+    equal(renderer.classAttribute(), "pop", "the key field")
+    equal(len(renderer.categories()), 2, "the categories the document carried")
+    equal([category.label() for category in renderer.categories()], ["one", "two"], "the labels")
     return (
-        "categorizedSymbol keeps the given order, values, labels and colours on the native "
-        "QgsCategorizedSymbolRenderer, classifies by the declared field, covers every value the "
-        "layer holds, and appears with both labels in the QML; a second identical call is stable"
+        "a categorizedSymbol document installed two categories on the pop field, in their own "
+        "order, with the labels the document carried"
     )
 
 
 def v04_graduated(ctx: Context) -> str:
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsFillSymbol,
+        QgsGraduatedSymbolRenderer,
+        QgsRendererRange,
+    )
+
     layer_id = sub_layer(ctx, "v04 polygon", fixtures.PARCELS_LAYER)
     ranges = [
-        {
-            "lower": 0,
-            "upper": 100,
-            "label": "Small",
-            "symbol": {"type": "fill", "color": "#CFE5B5"},
-        },
-        {
-            "lower": 100,
-            "upper": 200,
-            "label": "Large",
-            "symbol": {"type": "fill", "color": "#468B46"},
-        },
+        QgsRendererRange(0, 10, QgsFillSymbol.createSimple({"color": "#eeeecc"}), "low"),
+        QgsRendererRange(10, 100, QgsFillSymbol.createSimple({"color": "#996633"}), "high"),
     ]
-    record = set_renderer(
-        ctx, layer_id, {"type": "graduatedSymbol", "field": "area", "ranges": ranges}
-    )
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "graduatedSymbol", "the reported type")
+    _install(ctx, layer_id, QgsGraduatedSymbolRenderer("pop", ranges))
 
     renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "graduatedSymbol", "the native renderer")
-    equal(renderer.classAttribute(), "area", "the classification field")
-    installed = renderer.ranges()
-    equal([entry.lowerValue() for entry in installed], [0.0, 100.0], "the lower bounds")
-    equal([entry.upperValue() for entry in installed], [100.0, 200.0], "the upper bounds")
-    equal([entry.label() for entry in installed], ["Small", "Large"], "the labels")
+    equal(renderer.type(), "graduatedSymbol", "the installed type")
+    equal(renderer.classAttribute(), "pop", "the key field")
     equal(
-        [entry.symbol().color().name() for entry in installed],
-        ["#cfe5b5", "#468b46"],
-        "the range colours",
-    )
-
-    overlapping = [
-        ranges[0],
-        {
-            "lower": 50,
-            "upper": 200,
-            "label": "Overlap",
-            "symbol": {"type": "fill", "color": "#111111"},
-        },
-    ]
-    refused = set_renderer(
-        ctx, layer_id, {"type": "graduatedSymbol", "field": "area", "ranges": overlapping}
-    )
-    equal(refused.status, ExecutionStatus.FAILED, "overlapping ranges")
-    equal(error_code(refused), INVALID_INPUT, "the code for overlapping ranges")
-    equal(installed_renderer(ctx, layer_id), "graduatedSymbol", "the renderer after the refusal")
-    equal(
-        [entry.label() for entry in project_layer(layer_id).renderer().ranges()],
-        ["Small", "Large"],
-        "the ranges after the refusal",
+        [(item.lowerValue(), item.upperValue()) for item in renderer.ranges()],
+        [(0.0, 10.0), (10.0, 100.0)],
+        "the breaks the document carried",
     )
     return (
-        "graduatedSymbol installed both ranges with their bounds, labels and colours on the native "
-        "QgsGraduatedSymbolRenderer; ranges that overlap are FAILED(INVALID_INPUT) and the "
-        "installed ranges are unchanged"
+        "a graduatedSymbol document installed the two breaks (0-10, 10-100) on the pop field, "
+        "lower and upper bounds included"
     )
 
 
 def v05_rules(ctx: Context) -> str:
-    layer_id = sub_layer(ctx, "v05 line", fixtures.ROADS_LAYER)
-    rules = [
-        {
-            "label": "First",
-            "filter": '"road_id" = 7',
-            "symbol": {"type": "line", "color": "#D95843", "width_mm": 0.8},
-        },
-        {
-            "label": "Second",
-            "filter": '"road_id" > 100',
-            "symbol": {"type": "line", "color": "#888888", "width_mm": 0.25},
-        },
-        {
-            "label": "Third",
-            "filter": '"road_id" < 0',
-            "symbol": {"type": "line", "color": "#00A0FF", "width_mm": 0.5},
-        },
-    ]
-    record = set_renderer(ctx, layer_id, {"type": "RuleRenderer", "rules": rules})
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "RuleRenderer", "the reported type")
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsFillSymbol,
+        QgsRuleBasedRenderer,
+    )
+
+    layer_id = sub_layer(ctx, "v05 polygon", fixtures.PARCELS_LAYER)
+    root = QgsRuleBasedRenderer.Rule(None)
+    for label, expression in (("big", '"pop" > 50'), ("rest", "ELSE")):
+        child = QgsRuleBasedRenderer.Rule(
+            QgsFillSymbol.createSimple({"color": "#4477aa"}), filterExp=expression, label=label
+        )
+        root.appendChild(child)
+    _install(ctx, layer_id, QgsRuleBasedRenderer(root))
 
     renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "RuleRenderer", "the native renderer")
+    equal(renderer.type(), "RuleRenderer", "the installed type")
     children = renderer.rootRule().children()
-    equal(len(children), 3, "the number of flat rules")
-    equal([rule.label() for rule in children], ["First", "Second", "Third"], "the rule order")
-    equal(
-        [rule.filterExpression() for rule in children],
-        ['"road_id" = 7', '"road_id" > 100', '"road_id" < 0'],
-        "the expressions as given",
-    )
-    equal([rule.isElse() for rule in children], [False, False, False], "the ELSE flags")
-    require(all(rule.active() for rule in children), "a rule was installed inactive")
-    equal(
-        [rule.symbol().color().name() for rule in children],
-        ["#d95843", "#888888", "#00a0ff"],
-        "the rule colours",
-    )
-    qml = qml_of(ctx, layer_id, ["Symbology"])
-    for label in ("First", "Second", "Third"):
-        require(f'label="{label}"' in qml, f"{label} is missing from the QML export")
+    equal([rule.label() for rule in children], ["big", "rest"], "the rule labels")
+    equal(children[0].filterExpression(), '"pop" > 50', "the first rule's filter")
+    require(children[1].isElse(), "the ELSE rule did not survive the document")
     return (
-        "three flat rules installed on the native QgsRuleBasedRenderer in the given order, with "
-        "their filter expressions, symbols and active flags read back from rootRule(), and all "
-        "three labels in the Symbology QML"
+        "a RuleRenderer document installed two rules in order, kept the filter expression "
+        "'\"pop\" > 50' and turned the final ELSE into an else rule"
     )
 
 
-def v06_else_rule(ctx: Context) -> str:
-    layer_id = sub_layer(ctx, "v06 line", fixtures.ROADS_LAYER)
-    rules = [
-        {
-            "label": "Matched",
-            "filter": '"road_id" = 7',
-            "symbol": {"type": "line", "color": "#D95843", "width_mm": 0.8},
-        },
-        {
-            "label": "Everything else",
-            "else_rule": True,
-            "symbol": {"type": "line", "color": "#888888", "width_mm": 0.25},
-        },
-    ]
-    record = set_renderer(ctx, layer_id, {"type": "RuleRenderer", "rules": rules})
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
+def v06_document_moves_between_layers(ctx: Context) -> str:
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsCategorizedSymbolRenderer,
+        QgsFillSymbol,
+        QgsRendererCategory,
+    )
 
-    renderer = project_layer(layer_id).renderer()
-    children = renderer.rootRule().children()
-    equal(len(children), 2, "the rules including the implicit catch-all the PRD forbids")
-    equal([rule.label() for rule in children], ["Matched", "Everything else"], "the rule order")
-    equal([rule.isElse() for rule in children], [False, True], "the ELSE flags")
-    equal(children[-1].filterExpression(), "ELSE", "the native spelling of an else rule")
-    require(all(rule.active() for rule in children), "a rule was installed inactive")
+    source_id = sub_layer(ctx, "v06 source", fixtures.PARCELS_LAYER)
+    target_id = sub_layer(ctx, "v06 target", fixtures.PARCELS_LAYER)
+    categories = [QgsRendererCategory(1, QgsFillSymbol.createSimple({"color": "#336699"}), "one")]
+    project_layer(source_id).setRenderer(QgsCategorizedSymbolRenderer("pop", categories))
+    document = result_of(ctx.run("layer.get_renderer", {"layer_id": source_id}))["renderer_xml"]
 
-    qml = qml_of(ctx, layer_id, ["Symbology"])
-    require('label="Everything else"' in qml, "the else rule is missing from the QML export")
-    require(qml.count("<rule ") == 2, f"the QML export holds {qml.count('<rule ')} rule elements")
+    installed = set_renderer(ctx, target_id, document)
+    equal(installed.status, ExecutionStatus.SUCCEEDED, f"the moved document: {installed.error}")
+    target = project_layer(target_id).renderer()
+    equal(target.type(), "categorizedSymbol", "the type on the target layer")
+    equal(target.classAttribute(), "pop", "the key field on the target layer")
+    reread = result_of(ctx.run("layer.get_renderer", {"layer_id": target_id}))["renderer_xml"]
+    equal(reread, document, "the document changed on its way through the operation")
     return (
-        "one ordinary rule and one ELSE rule are the only two children of rootRule(); the ELSE is "
-        "last and is the last child in the QML as well, so no implicit all-matching default rule "
-        "was appended"
+        "the document read from one polygon layer installed on another unchanged: same type, "
+        "same key field, and reading it back gives the same bytes"
     )
 
 
 def v07_refusals(ctx: Context) -> str:
-    layer_id = sub_layer(ctx, "v07 line", fixtures.ROADS_LAYER)
-    kept = {
-        "type": "RuleRenderer",
-        "rules": [
-            {
-                "label": "Keep",
-                "filter": '"road_id" = 7',
-                "symbol": {"type": "line", "color": "#D95843", "width_mm": 0.8},
-            }
-        ],
-    }
-    equal(set_renderer(ctx, layer_id, kept).status, ExecutionStatus.SUCCEEDED, "the kept renderer")
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsFillSymbol,
+        QgsSingleSymbolRenderer,
+    )
 
-    symbol = {"type": "line", "color": "#111111", "width_mm": 0.3}
-    refused = {
-        "an invalid expression": {
-            "type": "RuleRenderer",
-            "rules": [{"label": "Bad", "filter": '"road_id" = = 1', "symbol": symbol}],
-        },
-        "two ELSE rules": {
-            "type": "RuleRenderer",
-            "rules": [
-                {"label": "One", "filter": "1 = 1", "symbol": symbol},
-                {"label": "A", "else_rule": True, "symbol": symbol},
-                {"label": "B", "else_rule": True, "symbol": symbol},
-            ],
-        },
-        "an ELSE that is not last": {
-            "type": "RuleRenderer",
-            "rules": [
-                {"label": "A", "else_rule": True, "symbol": symbol},
-                {"label": "B", "filter": "1 = 1", "symbol": symbol},
-            ],
-        },
-        "an ELSE with a filter": {
-            "type": "RuleRenderer",
-            "rules": [
-                {"label": "A", "filter": "1 = 1", "symbol": symbol},
-                {"label": "B", "else_rule": True, "filter": "1 = 1", "symbol": symbol},
-            ],
-        },
+    layer_id = sub_layer(ctx, "v07 polygon", fixtures.PARCELS_LAYER)
+    baseline = QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "#777777"}))
+    _install(ctx, layer_id, baseline)
+
+    refusals = {
+        "not xml at all": (layer_id, "p5 not a document"),
+        "an unknown type": (layer_id, '<renderer-v2 type="p5NotARenderer"/>'),
+        "a raster document": (layer_id, '<rasterrenderer type="singlebandgray"/>'),
+        "no type at all": (layer_id, "<renderer-v2/>"),
     }
-    for label, config in refused.items():
-        record = set_renderer(ctx, layer_id, config)
+    for label, (target, document) in refusals.items():
+        record = set_renderer(ctx, target, document)
         equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
         equal(error_code(record), INVALID_INPUT, f"{label}: code")
-        equal(installed_renderer(ctx, layer_id), "RuleRenderer", f"{label}: the renderer type")
-        equal(
-            [rule.label() for rule in project_layer(layer_id).renderer().rootRule().children()],
-            ["Keep"],
-            f"{label}: the rules the old renderer still has",
-        )
+        require(record.result is None, f"{label}: a half-installed renderer was reported")
+    equal(project_layer(layer_id).renderer().type(), "singleSymbol", "the renderer after refusals")
+
+    parsed = set_renderer(ctx, layer_id, "<renderer-v2><broken>")
+    equal(parsed.status, ExecutionStatus.FAILED, "an unparsable document: status")
+    require(
+        "line" in message_of(parsed) and "column" in message_of(parsed),
+        f"the parser's position is missing from {message_of(parsed)!r}",
+    )
+
+    # 能装的东西由 QGIS 的注册表决定，不由这里的一份清单决定。
+    # What installs is decided by QGIS's registry, not by a list kept here.
+    native = QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "#123456"}))
+    _install(ctx, layer_id, native)
+    equal(
+        project_layer(layer_id).renderer().symbol().color().name(),
+        "#123456",
+        "the colour of the renderer installed after the refusals",
+    )
     return (
-        "an unparseable expression, two ELSE rules, an ELSE that is not last and an ELSE that "
-        "carries a filter are all FAILED(INVALID_INPUT), and the previously installed "
-        "RuleRenderer keeps its single rule every time"
+        "unparsable text, an unknown type, a raster document and a missing type are all "
+        "FAILED(INVALID_INPUT) and leave the singleSymbol renderer in place; the unparsable one's "
+        "message carries the parser's line and column, and a well-formed document installs "
+        "afterwards"
     )
 
 
-def v08_unsupported(ctx: Context) -> str:
-    layer_id = cities_layer(ctx, "v08 point")
-    kept = {"type": "singleSymbol", "symbol": {"type": "marker", "color": "#6CAC83"}}
-    equal(set_renderer(ctx, layer_id, kept).status, ExecutionStatus.SUCCEEDED, "the kept renderer")
-
-    unsupported = (
-        "heatmapRenderer",
-        "pointCluster",
-        "pointDisplacement",
-        "mergedFeatureRenderer",
-        "invertedPolygonRenderer",
-        "25dRenderer",
-        "embeddedSymbol",
-        "paletted",
-        "hillshade",
+def v08_renderer_and_layer_state(ctx: Context) -> str:
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsFillSymbol,
+        QgsSingleSymbolRenderer,
     )
-    for name in unsupported:
-        record = set_renderer(ctx, layer_id, {"type": name})
-        equal(record.status, ExecutionStatus.FAILED, f"{name}: status")
-        equal(error_code(record), INVALID_INPUT, f"{name}: code")
 
-    mismatch = set_renderer(
-        ctx, layer_id, {"type": "singleSymbol", "symbol": {"type": "fill", "color": "#FFFFFF"}}
+    layer_id = sub_layer(ctx, "v08 polygon", fixtures.PARCELS_LAYER)
+    before = result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))
+    _install(
+        ctx,
+        layer_id,
+        QgsSingleSymbolRenderer(QgsFillSymbol.createSimple({"color": "#abcdef"})),
     )
-    equal(mismatch.status, ExecutionStatus.FAILED, "a fill symbol on a point layer")
-    equal(error_code(mismatch), INVALID_INPUT, "the code for a symbol that does not match")
-    equal(installed_renderer(ctx, layer_id), "singleSymbol", "the renderer after the refusals")
-
-    candidates = result_of(ctx.run("layer.list_available_renderers", {"layer_id": layer_id}))[
-        "renderer_types"
-    ]
-    for name in ("heatmapRenderer", "pointCluster", "pointDisplacement"):
-        require(name in candidates, f"{name} is no longer a candidate: {candidates}")
+    after = result_of(ctx.run("layer.get_info", {"layer_id": layer_id}))
+    for field in ("layer_id", "name", "kind", "provider", "crs_authid", "valid"):
+        equal(after[field], before[field], f"the layer's {field}")
+    for field in ("in_layer_tree", "visible", "effective_visible"):
+        equal(after[field], before[field], f"the layer's {field}")
+    listed = {
+        summary["layer_id"]: summary for summary in result_of(ctx.run("layer.list", {}))["layers"]
+    }
+    equal(listed[layer_id]["name"], before["name"], "the layer's name in the list")
+    equal(
+        project_layer(layer_id).renderer().symbol().color().name(),
+        "#abcdef",
+        "the colour the installed document carried",
+    )
     return (
-        f"{len(unsupported)} renderer types the setter does not implement and a fill symbol on a "
-        "point layer are all FAILED(INVALID_INPUT) with the previous renderer untouched, while "
-        "layer.list_available_renderers still lists the unsupported types as candidates"
+        "changing the renderer changes nothing about the layer's identity, visibility or "
+        "layer-tree place, while the installed renderer carries the new colour #abcdef"
     )
 
 
-# ------------------------------------------- 栅格渲染器设置 / raster setters
+# ------------------------------------------ 栅格渲染器设置 / raster setters
 
 
 def r01_single_band_gray(ctx: Context) -> str:
-    from qgis.core import QgsContrastEnhancement, QgsSingleBandGrayRenderer  # pyright: ignore[reportMissingImports]
-
-    layer_id = raster_layer(ctx, "r01 raster", ctx.fixtures.raster3)
-    record = set_renderer(
-        ctx, layer_id, {"type": "singlebandgray", "band": 2, "min": 1.0, "max": 200.0}
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsContrastEnhancement,
+        QgsSingleBandGrayRenderer,
     )
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "singlebandgray", "the reported type")
 
-    renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "singlebandgray", "the native renderer")
-    require(isinstance(renderer, QgsSingleBandGrayRenderer), f"the native class: {type(renderer)}")
-    equal(renderer.inputBand(), 2, "the band the renderer reads")
-    enhancement = renderer.contrastEnhancement()
-    require(enhancement is not None, "the renderer carries no contrast enhancement")
-    equal(enhancement.minimumValue(), 1.0, "the minimum of the stretch")
-    equal(enhancement.maximumValue(), 200.0, "the maximum of the stretch")
-    equal(
-        enhancement.contrastEnhancementAlgorithm(),
-        QgsContrastEnhancement.StretchToMinimumMaximum,
-        "the contrast algorithm",
-    )
-    equal(installed_renderer(ctx, layer_id), "singlebandgray", "layer.get_renderer")
+    layer_id = raster_layer(ctx, "r01 raster", ctx.fixtures.raster)
+    provider = project_layer(layer_id).dataProvider()
+    renderer = QgsSingleBandGrayRenderer(provider, 1)
+    enhancement = QgsContrastEnhancement(provider.dataType(1))
+    enhancement.setMinimumValue(1.0, False)
+    enhancement.setMaximumValue(9.0, False)
+    enhancement.setContrastEnhancementAlgorithm(QgsContrastEnhancement.StretchToMinimumMaximum)
+    renderer.setContrastEnhancement(enhancement)
+
+    result = _install(ctx, layer_id, renderer)
+    equal(result["renderer_type"], "singlebandgray", "the reported type")
+    installed = project_layer(layer_id).renderer()
+    equal(installed.type(), "singlebandgray", "the installed native type")
+    equal(installed.grayBand(), 1, "the band")
+    equal(installed.contrastEnhancement().minimumValue(), 1.0, "the stretch minimum")
+    equal(installed.contrastEnhancement().maximumValue(), 9.0, "the stretch maximum")
     return (
-        "singlebandgray installed band 2 with a StretchToMinimumMaximum enhancement of 1.0..200.0 "
-        "on the native QgsSingleBandGrayRenderer (a Byte band, so the stretch is stored as given)"
+        "a singlebandgray document installed band 1 with the stretch 1.0-9.0 the document "
+        "carried, and layer.get_renderer reports the same type"
     )
 
 
 def r02_multiband_color(ctx: Context) -> str:
-    layer_id = raster_layer(ctx, "r02 raster", ctx.fixtures.raster3)
-    record = set_renderer(
-        ctx, layer_id, {"type": "multibandcolor", "red_band": 3, "green_band": 2, "blue_band": 2}
-    )
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "multibandcolor", "the reported type")
+    from qgis.core import QgsMultiBandColorRenderer  # pyright: ignore[reportMissingImports]
 
-    renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "multibandcolor", "the native renderer")
-    equal(renderer.redBand(), 3, "the red band")
-    equal(renderer.greenBand(), 2, "the green band")
-    equal(renderer.blueBand(), 2, "the blue band, which repeats the green one")
+    layer_id = raster_layer(ctx, "r02 raster", ctx.fixtures.raster3)
+    provider = project_layer(layer_id).dataProvider()
+
+    result = _install(ctx, layer_id, QgsMultiBandColorRenderer(provider, 3, 2, 1))
+    equal(result["renderer_type"], "multibandcolor", "the reported type")
+    installed = project_layer(layer_id).renderer()
+    equal(
+        (installed.redBand(), installed.greenBand(), installed.blueBand()),
+        (3, 2, 1),
+        "the band assignment the document carried",
+    )
     return (
-        "multibandcolor installed red=3, green=2, blue=2 on the native renderer: distinct bands "
-        "map to the channels and naming the same band twice is accepted"
+        "a multibandcolor document installed the deliberately reversed assignment 3/2/1 on a "
+        "three-band raster"
     )
 
 
 def r03_pseudo_color(ctx: Context) -> str:
-    from qgis.core import QgsColorRampShader  # pyright: ignore[reportMissingImports]
-
-    layer_id = raster_layer(ctx, "r03 raster", ctx.fixtures.raster3)
-    stops = [{"value": 0, "color": "#2665B8"}, {"value": 10, "color": "#F2E9A4"}]
-    record = set_renderer(
-        ctx,
-        layer_id,
-        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "discrete", "stops": stops},
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsColorRampShader,
+        QgsRasterShader,
+        QgsSingleBandPseudoColorRenderer,
     )
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "singlebandpseudocolor", "the reported type")
+    from qgis.PyQt.QtGui import QColor
 
-    renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "singlebandpseudocolor", "the native renderer")
-    equal(renderer.inputBand(), 2, "the band the renderer reads")
-    function = renderer.shader().rasterShaderFunction()
-    equal(function.colorRampType(), QgsColorRampShader.Discrete, "the ramp type for 'discrete'")
-    items = function.colorRampItemList()
-    equal([item.value for item in items], [0.0, 10.0], "the stop values")
-    equal([item.color.name() for item in items], ["#2665b8", "#f2e9a4"], "the stop colours")
-
-    linear = set_renderer(
-        ctx,
-        layer_id,
-        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "linear", "stops": stops},
+    layer_id = raster_layer(ctx, "r03 raster", ctx.fixtures.raster)
+    provider = project_layer(layer_id).dataProvider()
+    ramp = QgsColorRampShader()
+    ramp.setColorRampType(QgsColorRampShader.Discrete)
+    ramp.setColorRampItemList(
+        [
+            QgsColorRampShader.ColorRampItem(0.0, QColor("#000000")),
+            QgsColorRampShader.ColorRampItem(5.0, QColor("#888888")),
+            QgsColorRampShader.ColorRampItem(9.0, QColor("#ffffff")),
+        ]
     )
-    equal(linear.status, ExecutionStatus.SUCCEEDED, f"the linear ramp: {linear.error}")
+    shader = QgsRasterShader()
+    shader.setRasterShaderFunction(ramp)
+
+    result = _install(ctx, layer_id, QgsSingleBandPseudoColorRenderer(provider, 1, shader))
+    equal(result["renderer_type"], "singlebandpseudocolor", "the reported type")
+    installed = project_layer(layer_id).renderer()
+    carried = installed.shader().rasterShaderFunction()
+    equal(len(carried.colorRampItemList()), 3, "the stops the document carried")
     equal(
-        project_layer(layer_id).renderer().shader().rasterShaderFunction().colorRampType(),
-        QgsColorRampShader.Interpolated,
-        "the ramp type for 'linear'",
+        carried.colorRampType(),
+        QgsColorRampShader.Discrete,
+        "the interpolation the document carried",
     )
-
-    exact = set_renderer(
-        ctx,
-        layer_id,
-        {"type": "singlebandpseudocolor", "band": 2, "interpolation": "exact", "stops": stops},
-    )
-    equal(exact.status, ExecutionStatus.SUCCEEDED, f"the exact ramp: {exact.error}")
-    equal(
-        project_layer(layer_id).renderer().shader().rasterShaderFunction().colorRampType(),
-        QgsColorRampShader.Exact,
-        "the ramp type for 'exact'",
-    )
-
-    inverted = set_renderer(
-        ctx,
-        layer_id,
-        {
-            "type": "singlebandpseudocolor",
-            "band": 2,
-            "stops": [{"value": 10, "color": "#2665B8"}, {"value": 0, "color": "#F2E9A4"}],
-        },
-    )
-    equal(inverted.status, ExecutionStatus.FAILED, "stops in decreasing order")
-    equal(error_code(inverted), INVALID_INPUT, "the code for stops in decreasing order")
-    equal(installed_renderer(ctx, layer_id), "singlebandpseudocolor", "the renderer after that")
     return (
-        "singlebandpseudocolor installed band 2 with the two stops and colors in the native "
-        "shader, "
-        "'discrete' maps to Discrete, 'linear' to Interpolated and 'exact' to Exact, and stops in "
-        "decreasing order "
-        "are FAILED(INVALID_INPUT) with the installed renderer unchanged"
+        "a singlebandpseudocolor document installed three stops and the discrete interpolation "
+        "on band 1"
     )
 
 
 def r04_single_color(ctx: Context) -> str:
-    layer_id = raster_layer(ctx, "r04 raster", ctx.fixtures.raster3)
-    record = set_renderer(ctx, layer_id, {"type": "singlecolor", "band": 3, "color": "#CC6633"})
-    equal(record.status, ExecutionStatus.SUCCEEDED, f"layer.set_renderer failed: {record.error}")
-    equal(result_of(record)["renderer_type"], "singlecolor", "the reported type")
+    from qgis.core import QgsRasterSingleColorRenderer  # pyright: ignore[reportMissingImports]
+    from qgis.PyQt.QtGui import QColor
 
-    renderer = project_layer(layer_id).renderer()
-    equal(renderer.type(), "singlecolor", "the native renderer type")
-    equal(renderer.inputBand(), 3, "the band the renderer reads")
-    equal(renderer.color().name(), "#cc6633", "the installed colour")
-    equal(installed_renderer(ctx, layer_id), "singlecolor", "layer.get_renderer")
-    return (
-        "singlecolor installed band 3 and #CC6633 on the native 3.38+ raster renderer type "
-        "(distinct from singlebandcolordata), read back from the object itself"
+    layer_id = raster_layer(ctx, "r04 raster", ctx.fixtures.raster)
+    provider = project_layer(layer_id).dataProvider()
+
+    result = _install(ctx, layer_id, QgsRasterSingleColorRenderer(provider, 1, QColor("#cc6633")))
+    equal(result["renderer_type"], "singlecolor", "the reported type")
+    installed = project_layer(layer_id).renderer()
+    equal(installed.color().name(), "#cc6633", "the colour the document carried")
+    return "a singlecolor document installed #cc6633 on band 1"
+
+
+def r05_every_registry_type(ctx: Context) -> str:
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsHillshadeRenderer,
+        QgsPalettedRasterRenderer,
+        QgsRasterContourRenderer,
+    )
+    from qgis.PyQt.QtGui import QColor
+
+    layer_id = raster_layer(ctx, "r05 raster", ctx.fixtures.raster)
+    provider = project_layer(layer_id).dataProvider()
+    renderers = {
+        "paletted": QgsPalettedRasterRenderer(
+            provider,
+            1,
+            [QgsPalettedRasterRenderer.Class(1, QColor("#112233"), "one")],
+        ),
+        "hillshade": QgsHillshadeRenderer(provider, 1, 300, 40),
+        "contour": QgsRasterContourRenderer(provider),
+    }
+    installed = {}
+    for expected, renderer in renderers.items():
+        result = _install(ctx, layer_id, renderer)
+        equal(result["renderer_type"], expected, f"{expected}: the reported type")
+        installed[expected] = project_layer(layer_id).renderer().type()
+    equal(installed, {name: name for name in renderers}, "the installed types")
+
+    # 普通栅格的下拉框里没有 singlebandcolordata，QGIS 自己也把那份渲染器默不作声地丢掉；
+    # 报告成功就成了假话，所以这里拒。
+    # An ordinary raster's combo has no singlebandcolordata, and QGIS itself drops that renderer
+    # without a word; reporting success would be a lie, so it is refused here.
+    color_data = '<rasterrenderer type="singlebandcolordata" band="1"/>'
+    refused = set_renderer(ctx, layer_id, color_data)
+    equal(refused.status, ExecutionStatus.FAILED, "a type the layer does not offer: status")
+    equal(error_code(refused), INVALID_INPUT, "a type the layer does not offer: code")
+    require(
+        "singlebandcolordata" in message_of(refused),
+        f"the refused type is not named: {message_of(refused)!r}",
+    )
+    equal(
+        project_layer(layer_id).renderer().type(),
+        "contour",
+        "the renderer after the refusal",
     )
 
-
-def r05_raster_refusals(ctx: Context) -> str:
-    layer_id = raster_layer(ctx, "r05 raster", ctx.fixtures.raster3)
-    kept = {"type": "singlebandgray", "band": 1, "min": 0.0, "max": 10.0}
-    equal(set_renderer(ctx, layer_id, kept).status, ExecutionStatus.SUCCEEDED, "the kept renderer")
-
-    stops = [{"value": 0, "color": "#2665B8"}, {"value": 10, "color": "#F2E9A4"}]
-    refused = {
-        "band 0": {"type": "singlebandgray", "band": 0, "min": 0.0, "max": 1.0},
-        "band 4 of a three-band raster": {
-            "type": "singlebandgray",
-            "band": 4,
-            "min": 0.0,
-            "max": 1.0,
-        },
-        "min equal to max": {"type": "singlebandgray", "band": 1, "min": 5.0, "max": 5.0},
-        "a NaN bound": {"type": "singlebandgray", "band": 1, "min": float("nan"), "max": 1.0},
-        "an infinite bound": {"type": "singlebandgray", "band": 1, "min": 0.0, "max": float("inf")},
-        "a band 9 in multibandcolor": {
-            "type": "multibandcolor",
-            "red_band": 1,
-            "green_band": 2,
-            "blue_band": 9,
-        },
-        "a short colour": {"type": "singlecolor", "band": 1, "color": "#12345"},
-        "a non-hex colour": {"type": "singlecolor", "band": 1, "color": "#GGGGGG"},
-        "stops in decreasing order": {
-            "type": "singlebandpseudocolor",
-            "band": 1,
-            "stops": [stops[1], stops[0]],
-        },
-        "an infinite stop": {
-            "type": "singlebandpseudocolor",
-            "band": 1,
-            "stops": [{"value": float("inf"), "color": "#2665B8"}, stops[1]],
-        },
-        "a single stop": {"type": "singlebandpseudocolor", "band": 1, "stops": [stops[0]]},
-    }
-    for label, config in refused.items():
-        record = set_renderer(ctx, layer_id, config)
-        equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
-        equal(error_code(record), INVALID_INPUT, f"{label}: code")
-        equal(installed_renderer(ctx, layer_id), "singlebandgray", f"{label}: the renderer type")
-        renderer = project_layer(layer_id).renderer()
-        equal(renderer.inputBand(), 1, f"{label}: the band of the old renderer")
+    unknown = set_renderer(ctx, layer_id, '<rasterrenderer type="p5NotARenderer"/>')
+    equal(unknown.status, ExecutionStatus.FAILED, "an unknown raster type: status")
+    equal(error_code(unknown), INVALID_INPUT, "an unknown raster type: code")
     return (
-        f"{len(refused)} invalid raster configurations (band bounds, min>=max, non-finite "
-        "numbers, illegal colours, stop order, a single stop) are all FAILED(INVALID_INPUT), and "
-        "the previously installed singlebandgray renderer keeps its band and settings each time"
+        "paletted, hillshade and contour documents all installed and each reported its own type; "
+        "a singlebandcolordata document (absent from an ordinary raster's combo, and dropped "
+        "silently by QGIS itself) and an unknown type are both FAILED(INVALID_INPUT) with the "
+        "previous renderer left in place"
     )
 
 
@@ -4212,7 +4135,7 @@ CASES = (
         "AT-06",
         at_06_submit_field_sum,
     ),
-    ("AT-06B", at_06b_sum_follows_the_selection),
+    ("AT-06B", at_06b_sum_uses_the_selection_only_when_asked),
     ("AT-07", at_07_worker_exception),
     ("AT-08", at_08_cancel_running),
     ("AT-08B", at_08b_cancel_scheduled),
@@ -4291,12 +4214,12 @@ CASES = (
     ("V03", v03_categorized),
     ("V04", v04_graduated),
     ("V05", v05_rules),
-    ("V06", v06_else_rule),
+    ("V06", v06_document_moves_between_layers),
     ("V07", v07_refusals),
-    ("V08", v08_unsupported),
+    ("V08", v08_renderer_and_layer_state),
     ("R01", r01_single_band_gray),
     ("R02", r02_multiband_color),
     ("R03", r03_pseudo_color),
     ("R04", r04_single_color),
-    ("R05", r05_raster_refusals),
+    ("R05", r05_every_registry_type),
 )

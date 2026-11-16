@@ -422,10 +422,9 @@ def test_every_registered_operation_gets_a_form_from_its_own_schema(qapp: Any) -
         # no parameters means no parameter block, not a one-line apology row
         assert dock.form.rowCount() == len(properties)
         assert dock.params.isHidden() is not bool(properties)
-        # 夹具只能手抄的那几种形状，内联枚举、自由对象、``$ref`` 后面的联合
-        # the shapes the fixtures only hand-copy: an inline enum, a free object, and a union
-        # behind a ``$ref``
-        for name, expected in {"kind": "enum", "parameters": "json", "renderer": "json"}.items():
+        # 夹具只能手抄的那几种形状，内联枚举与自由对象
+        # the shapes the fixtures only hand-copy: an inline enum and a free object
+        for name, expected in {"kind": "enum", "parameters": "json"}.items():
             if name in dock.editors:
                 assert dock.editors[name][0] == expected, f"{spec.name}.{name}"
 

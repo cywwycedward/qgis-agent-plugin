@@ -990,6 +990,9 @@ absolute_path(raw: str) -> Path
 一句话，不含原始路径、provider URI 或异常文本（例外：QGIS 自己拼的 `read()`/`write()` 错误，见
 下面的使用规则；`processing.run_algorithm` 的失败是算法自己报的原文，见 §7.6），堆栈只进本机日志。
 
+§7.6 里还有一处同类例外：GUI 自己把那句话拼给用户的地方（加图层时点名源、统计时点名字段、样式
+导出失败），消息就是 GUI 那一句，包括它嵌进去的路径与字段名。
+
 | 码 | 何时用 | 谁用 |
 | --- | --- | --- |
 | `OPERATION_NOT_FOUND` | 名字不在注册表 | 注册表 `get` / `get_spec` |
@@ -1006,10 +1009,10 @@ absolute_path(raw: str) -> Path
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |
 | `TARGET_EXISTS` | Save As 的目标已存在且没有 `overwrite=true`（Save 自己的关联文件不查） | `project.save` |
 | `PATH_NOT_ALLOWED` | 路径不是绝对路径 | `absolute_path` |
-| `INVALID_LAYER` | provider 的清单为空（没有认得出的子图层），或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
+| `INVALID_LAYER` | provider 的清单为空（没有认得出的子图层）、源里有好几个子图层而没点名、不是矢量/栅格图层、没有渲染器、非空间图层的可见性 | `layer.add`、`layer.*` 的样式与渲染器操作、`layer.set_visibility` |
 | `LAYER_NOT_FOUND` | 工程里没有这个 id | `layer.get_info/set_visibility/sum_numeric_field` 与样式读 |
 | `LAYER_NOT_IN_TREE` | 图层已注册但不在图层树里（加载来的工程可以这样；`layer.add` 已经造不出这种图层） | `layer.set_visibility` |
-| `INVALID_FIELD_TYPE` | 没有该字段、字段非数值、值或和不是有限数 | `layer.sum_numeric_field`、`layer.set_renderer` |
+| `INVALID_FIELD_TYPE` | 没有该字段、字段非数值、值或和不是有限数 | `layer.sum_numeric_field` |
 | `TOO_MANY_EXECUTIONS` | `QUEUED` 数超过 `max_pending` | 引擎 `submit` |
 | `TASK_SUBMISSION_FAILED` | 没装后台适配器，或 `addTask` 返回 0 | 引擎 / 适配器 |
 | `STALE_PROJECT` | 结果落地时工程代数已变 | 后台 `finalize_main` / 适配器 |
@@ -1022,7 +1025,8 @@ absolute_path(raw: str) -> Path
 - 不要新增码来区分同一种失败的不同位置；调用方只该按语义分支。
 - 消息是英文短句、面向调用方：不复述路径、不贴异常文本、不带调用方传的值。例外是 QGIS 自己的
   ``read()``/``write()`` 错误：它原样进 `message`，因为那就是 GUI 弹框的正文，它可能点到打不开
-  的那个文件。
+  的那个文件；§7.6 里 GUI 自己拼给用户的那几句（加图层时点名源、统计时点名字段、样式导出失败）
+  同样照抄，包括路径与字段名。
 
 ### 7.5 常见错误
 
@@ -1091,17 +1095,17 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对路径）、`name`（≥1，无长度上限）、`sub_layer`（≥1，名字是 provider 的自由文本；矢量与栅格都行） |
 | 返回 | `layer_id`、`name`、`kind`、`provider`（`ogr` 或 `gdal`）、`crs_authid`（图层无效时为 `""`） |
-| 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（provider 的 `querySublayers` 清单为空，或 `sub_layer` 不在那份清单里） |
-| 行为 | provider 由 `kind` 决定，调用方不能指定；门槛是“provider 认不认得这个源”，不是 `isValid()`：认出的子图层照样加进图例，读不出来的靠坏图层图标提示（桌面版 `qgsapplayerhandling.cpp:796-815` 与 `:1383-1390` 的分工）；子图层的 URI 就是 provider 那条清单里的 `uri()`（`qgsprovidersublayerdetails.cpp:22-28`），不自己拼；每次调用都进图例（桌面版的 `addToLegend=false` 是“先进工程、随后进分组”，图层仍在图例里） |
+| 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（栅格文件不是 raster、provider 的清单为空、`sub_layer` 不在清单里、源里有好几个子图层而调用方没点名） |
+| 行为 | provider 由 `kind` 决定，调用方不能指定。栅格先过 `QgsRasterLayer.isValidRasterFileName`，不像栅格就一句 `"<path> is not a supported raster data source"`（这个绑定吞掉原生的 `retError`，所以没有后半句）。然后问 provider 的 `querySublayers`（带 `IncludeSystemTables`，与加图层的对话框同一个调用）并只留声明类型那几条：清单为空是 `"<path> is not a valid or recognized data source."`；正好一条且细节完整时用那条自己的 `uri()` 建图层（不自己拼，GDAL 的子数据集是别的形状）；点名 `sub_layer` 时用那条的 `uri()`，不在清单里就报出这个名字；清单里好几条（或细节需要更深扫描）而没点名时把名字列出来交回去，不静默挑一个——那是加图层对话框会问用户的地方。认出来的图层不查 `isValid()`：读不出来的照样进图例，靠坏图层图标提示；每次调用都进图例 |
 
 #### layer.list
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无 |
-| 返回 | `layers`: 按 `layer_id` 字典序升序的 `LayerSummary`（`layer_id`、`name`、`kind`(vector/raster/other)、`crs_authid`、`in_layer_tree`、`visible`、`effective_visible`） |
+| 返回 | `layers`: `LayerSummary`（`layer_id`、`name`、`kind`(vector/raster/other)、`crs_authid`、`in_layer_tree`、`visible`、`effective_visible`）的列表，顺序 = 图例从上到下 |
 | 业务错误码 | 无 |
-| 行为 | `visible` 是节点自己的勾选状态，`effective_visible` 是连祖先组一起算的结果；没有树节点时两者都是 `null`，不是 `false` |
+| 行为 | 顺序是图层树的深度优先顺序（面板看到的就是它），工程里有而树里没有的图层接在后面、保持 `mapLayers()` 的顺序；`visible` 是节点自己的勾选状态，`effective_visible` 是连祖先组一起算的结果；没有树节点时两者都是 `null`；非空间图层（属性表）在图例里没有勾选框，两者也是 `null` |
 
 #### layer.get_info
 
@@ -1117,80 +1121,66 @@ absolute_path(raw: str) -> Path
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1）、`visible`（StrictBool） |
-| 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible`、`changed`（本次是否真的改了） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE` |
-| 行为 | 勾上时连祖先分组一起勾（图例的勾选框对叶子节点就是这么做的：`QgsLayerTreeModel.setData` → `setItemVisibilityCheckedParentRecursive`），取消只写这一个节点；`changed` 说“本次有没有真的改变可见结果”，所以节点已勾而父组未勾时仍算改变；按住 Ctrl 时桌面版取消也会连祖先一起取消（`qgslayertreemodel.cpp:406-412`），那一半没有参数表达 |
+| 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible` |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE`、`INVALID_LAYER`（非空间图层没有勾选框） |
+| 行为 | 勾上时连祖先分组一起勾，取消只写这一个节点；写入口对同值本来就是空操作，所以实现不需要先判断。真的改了东西才 `setDirty(True)`（图例的勾选会置脏工程，同值重写不会） |
 
 #### layer.sum_numeric_field
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`field_name`（≥1，必须是整型或浮点字段） |
+| 参数 | `layer_id`（≥1）、`field_name`（≥1，必须是整型或浮点字段）、`selected_only`（StrictBool，默认 `false`） |
 | 返回 | `layer_id`、`field_name`、`count`（参与求和的非 null 要素数）、`skipped_null`、`total`、`selected_only`（本次是否只算了选择集）、`snapshot_project_epoch` |
-| 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没字段、非数值、值或和不是有限数）、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
-| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch；跟随选择集：有选择集时只算选中的要素，没有时算全部——这是章程 A6 定的规则，面板上有这个开关（`qgsstatisticalsummarydockwidget.cpp:210` 读它、`:218` 交给 `getValuesIterator`，后者在 `qgsvectorlayerutils.cpp:73-80` 选 `getSelectedFeatures` 还是 `getFeatures`），但面板默认是否勾选不在本检出里，所以插件不声称“面板默认如此”；结果里的 `selected_only` 如实反映这次用了哪一种；不加参数（那是图层的状态，不是调用方的问句）；非有限值与溢出都拒（NaN/Infinity 不是合法 JSON）；要素数没有上限（桌面版统计面板也不限，`qgsvectorlayerutils.cpp:73-80`）；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
-| 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`、`selected_only=false`；选中 2 个（`pop > 50`）后同一调用 → `count=2`、`total=160.0`、`selected_only=true`，`removeSelection()` 后又回到整层 `total=200.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程（`Dummy-1`）、`finished` 回调在 `MainThread`；记录里的进度序列（4 要素）`PREPARING 0 → SCHEDULED 0 → RUNNING 0 → RUNNING 33.333 → RUNNING 66.667 → FINALIZING 66.667 → SUCCEEDED 100`，9000 要素 `RUNNING 0 → 1.0 → 99.0 → FINALIZING 99.0 → SUCCEEDED 100`；要素数不再有上限（实测 100 万要素的拷列成本 3.14 s / 8 MB 元组） |
+| 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没有该字段用统计算法那句 `Invalid field for statistics: “<name>” does not exist`；非数值字段、值或和不是有限数）、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
+| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch。选择集只在 `selected_only=true` 时用（那是 Processing 面板上要用户勾的开关，默认不勾：有选择集而没勾时算法照样算整层）。NaN / Infinity 与溢出都拒：记录必须是 RFC 8259 解析器读得懂的 JSON，所以这是传输约束，不是统计口径。要素数没有上限；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
+| 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`、`selected_only=false`；同一图层选中 2 个后 `selected_only=true` → `count=2`、`total=160.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程、`finished` 回调在 `MainThread` |
 
 #### layer.list_style_categories
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`categories`（桌面版那两个样式对话框的勾选框名单；矢量 18 个按枚举声明顺序，栅格 9 个按 `QgsMapLayerStyleCategoriesModel` 的顺序，不含 `Labeling`） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，含别人的图层类型） |
-| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推；没有几何的矢量表也算数（桌面版照样给它整张 18 项）；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
+| 返回 | `layer_id`、`categories`（样式对话框的勾选框名单；矢量 18 个按枚举声明顺序，栅格 9 个按分类模型的顺序，不含 `Labeling`） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，含别人的图层类型） |
+| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推（`QgsMapLayer.StyleCategory` 是位标记枚举，Python 侧不能按声明顺序迭代，实测）；没有几何的矢量表也算数；无效图层照样答（样式读写没有有效性这道门）；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
 
 #### layer.get_qml
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部适用项；给了就不重复、必须适用，空列表=一个都不导出） |
-| 返回 | `layer_id`、`qml`（XML 字符串，只在内存里） |
-| 业务错误码 | `INVALID_INPUT`（重复或不适用的 category）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格）、`INTERNAL_ERROR`（导出失败） |
-| 行为 | QML 来自图层自己的 `exportNamedStyle`；不写文件、不回显导出器的原始错误文本（可能带路径） |
+| 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部位标记；重复的名字就是一个位，不适用的分类只是一个没人写的位，都不拒；空列表=一个都不导出） |
+| 返回 | `layer_id`、`qml`（XML 字符串，只在内存里，2 空格缩进） |
+| 业务错误码 | `INVALID_INPUT`（不是 `StyleCategoryName`）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（原生的导出消息；那是保存样式对话框弹给用户的那句话） |
+| 行为 | QML 来自图层自己的 `exportNamedStyle`；不写文件；分类是按位或出来的一个标志，默认是 `AllStyleCategories`，导出只写这门图层类型有的那几类 |
 
 #### layer.list_available_renderers
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `renderer_types`（去重、排序；来自活动的 QGIS 注册表，不是本地表） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器） |
-| 行为 | 矢量走 `QgsApplication.rendererRegistry()`，栅格走 `QgsRasterRendererRegistry().renderersList()` 再按图层的 `rasterType()` 过滤（桌面版下拉框就是这两步：`qgsrasterlayerproperties.cpp:443-455`），所以普通栅格里没有 `singlebandcolordata`，而 `SingleBandColorData` 栅格里只有它；前置条件是桌面版那个符号页存在，即图层有渲染器 |
+| 返回 | `renderer_types`（下拉框里的名字，按下拉框顺序，不去重不排序） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器） |
+| 行为 | 矢量走 `QgsApplication.rendererRegistry().renderersList(layer)`（按几何过滤），栅格走注册表清单再按图层的 `rasterType()` 过滤（普通栅格里没有 `singlebandcolordata`，`SingleBandColorData` 栅格里只有它）；前置条件是符号页存在，即图层有渲染器。栅格那份清单来自新建的 `QgsRasterRendererRegistry()`（3.44 没把应用级那个访问器绑给 Python，见 `available_renderer_types` 上的 `shortcut:`），所以第三方注册在 C++ 单例里的栅格渲染器既列不出来、也会被 `layer.set_renderer` 的同一份清单拒——这张表同时是写入的前置条件 |
 
 #### layer.get_renderer
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`renderer_type`（图层当前渲染器的类型名） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器） |
-| 行为 | 只读一个类型名，不返回 renderer 对象或它的配置；没有渲染器的图层（例如一张属性表）在桌面版里连符号页都没有，所以也是 `INVALID_LAYER` |
+| 返回 | `layer_id`、`renderer_type`（图层当前渲染器的类型名）、`renderer_xml`（那个渲染器自己的文档，见下） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器） |
+| 行为 | 文档是渲染器自己写出来的那一份：矢量是 `QgsFeatureRenderer.save()` 的元素（根名 `renderer-v2`），栅格是 `writeXml()` 写进管道的 `rasterrenderer` 元素；`renderer_xml` 可以直接喂回 `layer.set_renderer`，读与写是同一件事的两个方向 |
 
 #### layer.set_renderer
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`renderer`（判别联合，`type` 字段选型） |
+| 参数 | `layer_id`（≥1）、`renderer`（≥1 的 XML 字符串，形状与 `layer.get_renderer` 的 `renderer_xml` 相同） |
 | 返回 | `layer_id`、`renderer_type`（安装后的类型名） |
-| 业务错误码 | `INVALID_INPUT`（符号与几何不符、category 重复、category 值与字段类型不符、band 越界、规则过滤器语法错、min≥max、ranges 重叠或未排序、stops 未严格递增）、`INVALID_FIELD_TYPE`（没有该字段/不是数值）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（原生设置失败，原生文本只进日志） |
-| 行为 | 整张 renderer 先在本地搭好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式；成功后 `triggerRepaint()` + `setDirty(True)`（与桌面版 `apply()` 的两步相同）；只有这一个样式 op 是 destructive；前置条件也是桌面版的：图层有渲染器才有符号页；`nullSymbol` 不需要几何，所以几何未知的图层也能装它 |
+| 业务错误码 | `INVALID_INPUT`（XML 解析失败——消息是解析器那句带行列号的话；解析出来了但没有这门图层类型认得的渲染器；类型不在这门图层的候选清单里）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（未预期异常，由引擎兜底） |
+| 行为 | 整份渲染器先建好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式，旧渲染器还在；矢量用 `QgsFeatureRenderer.load()`（QGIS 读样式文件时同一次调用），栅格用各类型自己的 `create(element, provider)`（注册表里那个建渲染器的函数，Python 拿不到函数指针所以按类型名写明）。只装候选清单里的类型，理由分两半：栅格那边实测有类型会被 QGIS 默不作声地保留（普通栅格上的 `singlebandcolordata`，报告成功就是谎报），矢量那边是下拉框已经按几何筛过、GUI 表达不出那个组合。类型名解析完就在文档根元素上，所以这道检查在建渲染器之前（建那一步会进注册表调对应元数据；清单里的类型照旧建）。成功后 `triggerRepaint()` + `setDirty(True)`，与属性对话框的 Apply 两步相同；只有这一个样式 op 是 destructive |
 
-配置矩阵（`renderer.type`，共 9 种）：
-
-| 类型 | 归属 | 必填字段 |
-| --- | --- | --- |
-| `nullSymbol` | 矢量 | 无 |
-| `singleSymbol` | 矢量 | `symbol` |
-| `categorizedSymbol` | 矢量 | `field`、`categories[]`（`value`、`label`、`symbol`） |
-| `graduatedSymbol` | 矢量 | `field`、`ranges[]`（`lower`、`upper`、`label`、`symbol`） |
-| `RuleRenderer` | 矢量 | `rules[]`（`label`、`filter` 或 `else_rule`、`symbol`） |
-| `singlebandgray` | 栅格 | `band`、`min`、`max` |
-| `multibandcolor` | 栅格 | `red_band`、`green_band`、`blue_band` |
-| `singlebandpseudocolor` | 栅格 | `band`、`stops[]`（≥2，`value` 严格递增）、`interpolation`（默认 `linear`） |
-| `singlecolor` | 栅格 | `band`、`color` |
-
-符号只有三种（`marker`：`color`、`size_mm`=2.0；`line`：`color`、`width_mm`=0.3；`fill`：`color`、`outline_color`=`#333333`、`outline_width_mm`=0.3）；颜色是 `^#[0-9A-Fa-f]{6}$`，长度是毫米；符号类型必须与图层几何一致（点/线/面，Multi* 取基础类型）。
+文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读。能装什么由注册表按图层类型给的清单决定，这里不维护另一张表：`heatmapRenderer` 只在列它的图层类型上装得上（多边形图层上同一份文档会被拒），而清单里、元数据是 Python 实现的那一类会在重建时结束进程（见 §12“`layer.set_renderer` 的文档”那一行）。
 
 #### processing.list_algorithms
 
@@ -1537,5 +1527,6 @@ Git flow：
 | 记录保留 | 按条数与 TTL，在访问与写入终态时 prune | 超时记录在被访问前仍占内存；被访问时已经不存在 |
 | 取消的语义 | 协作式；`CANCEL_REQUESTED` 只有任务自己的报告才变 `CANCELLED` | 主线程已开始的操作不可中断 |
 | 后台名额的计数口径 | 适配器数的是自己活动表里的任务（`SCHEDULED`/`RUNNING`/`CANCEL_REQUESTED`），引擎里名为 `_ACTIVE_BACKGROUND` 的集合只有前两个 | 两者不同义：限流看适配器，发取消请求看引擎；`FINALIZING` 不占名额 |
+| `layer.set_renderer` 的文档 | 只装注册表按图层类型给的清单里的类型；矢量用 `QgsFeatureRenderer.load`，栅格用各类型自己的 `create(element, provider)` | 清单里、元数据由 Python 实现的渲染器（`QgsRendererAbstractMetadata` 子类）会让 `load` 走进 Python 并当场结束进程（`0xC0000409`，sip 所有权），所以这类类型只能出现在候选清单里、不能被装；栅格清单来自新建的 `QgsRasterRendererRegistry()`，第三方注册在 C++ 单例里的栅格渲染器既列不出来也装不上 |
 | 依赖版本 | pydantic 只支持 2.x（导入时拒绝其他 major），QGIS 3.44（`metadata.txt`） | 换 pydantic major 或 QGIS 大版本前要重新验证；非 2.x 是加载期 `RuntimeError`，不是运行期错误 |
 | 测得的数字 | 本文档里的耗时、崩溃码都是在 QGIS 3.44.13 / Windows x64 上测的 | 它们支撑判据（尤其是 §7.2 那两条），不是承诺；换环境要重测再改阈值 |
