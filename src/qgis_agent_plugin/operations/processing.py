@@ -3,16 +3,20 @@
 三者都跑在主线程：QGIS 的 processing 框架直接操作工程和它持有的图层，一次运行会把结果图层
 交给那个工程，所以它挪不到后台线程。
 
-这里没有算法白名单，也没有 ``runnable`` 字段：``list_algorithms`` 报告注册表里的每个算法，
+这里没有算法白名单，也没有 ``runnable`` 字段：``list_algorithms`` 报告桌面版工具箱里能看到的
+每个算法（``HideFromToolbox`` 与 ``KnownIssues`` 两个标志把算法挡在工具箱外，也就挡在列表外），
 ``get_algorithm_info`` 读算法自己的原生定义（``algorithmHelp()`` 打印的那些字段，转成 JSON），
 ``run_algorithm`` 是所有算法共同的唯一入口。
 
-``run_algorithm`` 不重新实现 QGIS。它只把调用交给 ``qgis.processing.run()``，外加一个会留住
-运行消息的 feedback，于是算法是否存在、参数值是否可接受、processing 上下文怎么建、算法怎么
-执行，全部由 QGIS 决定。没声明的参数键由 QGIS 忽略，路径或远程 URI 由 QGIS 解析，本模块没
-归类的参数原样到达算法。失败就是 ``qgis.processing.run()`` 抛出的异常：feedback 记录和异常
-进本地日志，异常原样抛出，于是引擎按它报告意外失败的唯一方式报告它；这里不把异常文本翻成
-插件的错误码。
+``run_algorithm`` 不重新实现 QGIS，但是它点“运行”之前问的问题与桌面版窗口完全一样，而且每个
+问题都问 QGIS 自己的函数：按 id 取出算法实例，补上桌面版参数面板会交出的输出默认值，逐个参数问
+``checkValueIsAcceptable``，对每个有值的输出问 ``isSupportedOutputValue``，问那个 CRS 不一致的
+确认，最后问 ``checkParameterValues``。任一条不通过就是 ``INVALID_INPUT``，消息就是桌面版对同一个
+问题说的那一句。通过之后才把参数、一个会留住消息的 feedback 与同一个 processing 上下文交给
+``qgis.processing.run()``，算法怎么执行仍由 QGIS 决定。没声明的参数键由 QGIS 忽略，路径或远程
+URI 也由 QGIS 解析。运行失败仍是 ``qgis.processing.run()`` 抛出的异常：feedback 记录和异常进
+本地日志，异常原样抛出，于是引擎按它报告意外失败的唯一方式报告它；这里不把异常文本翻成插件的
+错误码。
 
 本模块仍然守着的边界是 JSON。``parameters`` 是一棵有限的 JSON 树，键为原生参数名：非字符串键、
 NaN、无穷、bytes 或 QGIS/Qt 对象在 QGIS 看到之前就被拒；没有无损 JSON 形式的运行结果同样被拒，
@@ -27,17 +31,23 @@ the project and the layers it holds, and a run hands result layers to that proje
 so it cannot move to a worker.
 
 There is no algorithm allow-list and no ``runnable`` field: ``list_algorithms``
-reports every registered algorithm, ``get_algorithm_info`` reads the native
-definitions -- the fields ``algorithmHelp()`` prints, as JSON -- and
-``run_algorithm`` is the one entry point for all of them.
+reports every algorithm the desktop toolbox shows -- the ``HideFromToolbox`` and
+``KnownIssues`` flags keep an algorithm out of the toolbox, and out of the list --
+``get_algorithm_info`` reads the native definitions -- the fields
+``algorithmHelp()`` prints, as JSON -- and ``run_algorithm`` is the one entry point
+for all of them.
 
-``run_algorithm`` does not re-implement QGIS.  It hands the call to
-``qgis.processing.run()`` with nothing but a feedback that keeps the run's messages,
-so whether the algorithm exists, whether its parameter values are acceptable, how
-the processing context is built and how the algorithm executes are all decided by
-QGIS.  An undeclared parameter key is QGIS's to ignore, a path or a remote URI is
-QGIS's to resolve, and a parameter this module never classifies reaches the
-algorithm exactly as it arrived.  A failure is an exception from
+``run_algorithm`` does not re-implement QGIS, but it asks exactly the questions the
+desktop window asks before Run, and every question goes through QGIS's own
+function: resolve the algorithm by id, fill in the output defaults the desktop
+panel would carry, ask every parameter's ``checkValueIsAcceptable``, ask
+``isSupportedOutputValue`` for every output that has a value, ask the CRS-mismatch
+confirmation, and finally ask ``checkParameterValues``.  Any refusal is
+``INVALID_INPUT`` carrying the sentence the desktop uses for that same question.
+Only then do the parameters, a feedback that keeps the run's messages and the same
+processing context reach ``qgis.processing.run()``, and how the algorithm executes
+stays QGIS's decision.  An undeclared parameter key is QGIS's to ignore, a path or
+a remote URI is QGIS's to resolve.  A failed run is still an exception from
 ``qgis.processing.run()``: the feedback records and the exception go to the local
 log and the exception is raised unchanged, so the engine reports it the one way it
 reports an unexpected failure.  Nothing here classifies an exception text into a
@@ -62,7 +72,14 @@ import logging
 import math
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator
+from pydantic import (  # pyright: ignore[reportMissingImports]
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    field_validator,
+)
 
 from ..core.contracts import (
     BaseCommand,
@@ -77,6 +94,18 @@ _LOGGER = logging.getLogger(__name__)
 # 没能产出的 JSON 映像，用来和合法的 ``None`` 区分开。
 # A JSON image that could not be produced, kept apart from a legitimate ``None``.
 _NO_JSON = object()
+
+# 桌面版参数面板对不合法值说的那句话，参数名换成它的描述。
+# The sentence the desktop parameter panel uses for a bad value, with its description filled in.
+_BAD_PARAMETER = "Wrong or missing parameter value: {0}"
+
+# 桌面版在参数 CRS 不一致、用户还没回答时问的那一句；默认按钮是“否”。
+# What the desktop asks when the parameters' CRSes differ and nobody has answered yet; the
+# default button is "No".
+_CRS_MISMATCH_QUESTION = (
+    "Parameters do not all use the same CRS. This can cause unexpected results.\n"
+    "Do you want to continue?"
+)
 
 
 def _json_image(value: Any) -> Any:
@@ -235,9 +264,9 @@ class ProcessingGetAlgorithmInfoResult(Result):
 
 
 class ProcessingRunAlgorithmParams(Params):
-    """一个原生算法 id 和它的原生参数表。
+    """一个原生算法 id、它的原生参数表，以及桌面版会问的那个 CRS 问题。
 
-    A native algorithm id and its native parameter map.
+    A native algorithm id, its native parameter map, and the CRS question the desktop asks.
     """
 
     algorithm_id: StrictStr = Field(min_length=1)
@@ -246,6 +275,10 @@ class ProcessingRunAlgorithmParams(Params):
     # Strict keys: the top level is pydantic's dict, so this is the only place the
     # no-non-string-key rule can reach; the walk checks the rest.
     parameters: dict[StrictStr, Any]
+    # 桌面版发现参数 CRS 不一致时会问“要继续吗”，默认按钮是“否”；这个字段就是那个回答。
+    # The desktop asks "do you want to continue?" when the parameters' CRSes differ, with "No"
+    # as the default button; this field is that answer.
+    continue_on_crs_mismatch: StrictBool = False
 
     @field_validator("parameters")
     @classmethod
@@ -288,7 +321,7 @@ def _parameter_info(definition: Any, registry: Any) -> AlgorithmParameter:
     One visible definition as the six fields, in its native wording.
     """
 
-    from qgis.core import QgsProcessingParameterEnum
+    from qgis.core import QgsProcessingParameterEnum  # pyright: ignore[reportMissingImports]
 
     parameter_type = registry.parameterType(definition.type())
     return AlgorithmParameter(
@@ -318,7 +351,7 @@ def _json_result(project: Any, value: Any, added: set[str]) -> Any:
     a value with no lossless image is refused, never described by ``str()``.
     """
 
-    from qgis.core import QgsMapLayer
+    from qgis.core import QgsMapLayer  # pyright: ignore[reportMissingImports]
 
     if isinstance(value, QgsMapLayer):
         layer_id = value.id()
@@ -342,30 +375,137 @@ def _json_result(project: Any, value: Any, added: set[str]) -> Any:
     return image
 
 
+def _unknown_algorithm(algorithm_id: str) -> FrameworkError:
+    """未知算法 id 的说法：与桌面版运行路径抛出的那一句相同。
+
+    How an unknown algorithm id is stated: the sentence the desktop's run path raises.
+    """
+
+    return FrameworkError(INVALID_INPUT, f"Error: Algorithm {algorithm_id} not found")
+
+
+def _gui_parameter_values(algorithm: Any, parameters: dict[str, Any]) -> dict[str, Any]:
+    """桌面版参数面板会交出的那张表：只补输出参数的默认值。
+
+    非输出参数的缺席与给默认值等价，因为 QGIS 自己把缺席解析成默认值；输出参数没有这个等价关系，
+    面板总会给一个值（默认“临时输出”），而没有值的必填输出会被 QGIS 直接拒绝。可选、且不默认
+    创建的输出在面板里是“跳过输出”，这里也保持缺席；隐藏参数面板从不发送，这里也不补。
+
+    The map the desktop panel would hand over: only destination defaults are filled.  A
+    missing non-destination parameter is equivalent to its default because QGIS resolves
+    it that way; a destination has no such equivalence -- the panel always carries a value
+    (a temporary output by default), while QGIS refuses a required destination that has
+    none.  An optional destination that is not created by default is the panel's "skip
+    output" and stays absent here; hidden parameters are never sent by the panel and are
+    not filled here either.
+    """
+
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsProcessing,
+        QgsProcessingParameterDefinition,
+    )
+
+    hidden = QgsProcessingParameterDefinition.FlagHidden
+    optional = QgsProcessingParameterDefinition.FlagOptional
+    values = dict(parameters)
+    for definition in algorithm.parameterDefinitions():
+        if definition.flags() & hidden or not definition.isDestination():
+            continue
+        name = definition.name()
+        if name in values:
+            continue
+        value = definition.defaultValueForGui()
+        if value is None or (isinstance(value, str) and not value):
+            if definition.flags() & optional and not definition.createByDefault():
+                continue
+            value = QgsProcessing.TEMPORARY_OUTPUT
+        values[name] = value
+    return values
+
+
+def _require_acceptable(
+    algorithm: Any, parameters: dict[str, Any], context: Any, continue_on_crs_mismatch: bool
+) -> None:
+    """桌面版点“运行”前问的每个问题，按同一顺序用 QGIS 自己的函数问一遍。
+
+    Every question the desktop asks before Run, in the same order and through QGIS's own
+    functions.
+    """
+
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
+        QgsProcessingParameterDefinition,
+        QgsSettings,
+    )
+
+    hidden = QgsProcessingParameterDefinition.FlagHidden
+    for definition in algorithm.parameterDefinitions():
+        if definition.flags() & hidden or definition.isDestination():
+            continue
+        if not definition.checkValueIsAcceptable(parameters.get(definition.name())):
+            raise FrameworkError(INVALID_INPUT, _BAD_PARAMETER.format(definition.description()))
+    for definition in algorithm.parameterDefinitions():
+        if definition.flags() & hidden or not definition.isDestination():
+            continue
+        value = parameters.get(definition.name())
+        if not value:
+            continue
+        supported, error = definition.isSupportedOutputValue(value, context)
+        if not supported:
+            raise FrameworkError(INVALID_INPUT, error)
+    # 桌面版只在“参数 CRS 不一致就先警告”这个开关打开时问；关掉时它直接继续。
+    # The desktop asks only while its "warn before executing if parameter CRSes do not match"
+    # switch is on; with the switch off it continues straight away.
+    warned = bool(QgsSettings().value("Processing/Configuration/WARN_UNMATCHING_CRS", True))
+    if (
+        warned
+        and not continue_on_crs_mismatch
+        and not algorithm.validateInputCrs(parameters, context)
+    ):
+        raise FrameworkError(INVALID_INPUT, _CRS_MISMATCH_QUESTION)
+    ok, message = algorithm.checkParameterValues(parameters, context)
+    if not ok:
+        raise FrameworkError(INVALID_INPUT, message)
+
+
 class ProcessingListAlgorithms(
     BaseQuery[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
     MainThreadOperationMixin[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
 ):
-    """每个已注册算法，不筛选，按 id 排序。
+    """桌面版工具箱能看到的每个算法，按工具箱的阅读顺序。
 
-    Every registered algorithm, unfiltered and in id order.
+    Every algorithm the desktop toolbox shows, in the order the toolbox reads.
     """
 
     name = "processing.list_algorithms"
-    description = "List every algorithm currently registered with QGIS Processing"
+    description = "List every algorithm the QGIS desktop toolbox shows"
     input_model = ProcessingListAlgorithmsParams
     output_model = ProcessingListAlgorithmsResult
 
     def execute_main(
         self, ctx: OperationContext, request: ProcessingListAlgorithmsParams
     ) -> ProcessingListAlgorithmsResult:
-        from qgis.core import QgsApplication
+        from qgis.core import (  # pyright: ignore[reportMissingImports]
+            Qgis,
+            QgsApplication,
+            QgsSettings,
+        )
 
+        # 工具箱总会挡掉 HideFromToolbox；KnownIssues 只在“显示有已知问题的算法”关着时挡掉。
+        # The toolbox always hides HideFromToolbox; it hides KnownIssues only while "show
+        # algorithms with known issues" is off.
+        excluded = int(Qgis.ProcessingAlgorithmFlag.HideFromToolbox)
+        shown = QgsSettings().value("Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES", False)
+        if not bool(shown):
+            excluded |= int(Qgis.ProcessingAlgorithmFlag.KnownIssues)
         algorithms = [
             algorithm_summary(algorithm)
             for algorithm in QgsApplication.processingRegistry().algorithms()
+            if not int(algorithm.flags()) & excluded
         ]
-        algorithms.sort(key=lambda summary: summary.id)
+        # 工具箱按分组名、再按算法名排序；列表把同一顺序摊平。
+        # The toolbox sorts by group name and then by algorithm name; the list flattens that
+        # order.
+        algorithms.sort(key=lambda summary: (summary.group, summary.name, summary.id))
         return ProcessingListAlgorithmsResult(algorithms=algorithms)
 
 
@@ -386,7 +526,10 @@ class ProcessingGetAlgorithmInfo(
     def execute_main(
         self, ctx: OperationContext, request: ProcessingGetAlgorithmInfoParams
     ) -> ProcessingGetAlgorithmInfoResult:
-        from qgis.core import QgsApplication, QgsProcessingParameterDefinition
+        from qgis.core import (  # pyright: ignore[reportMissingImports]
+            QgsApplication,
+            QgsProcessingParameterDefinition,
+        )
 
         registry = QgsApplication.processingRegistry()
         algorithm = registry.algorithmById(request.algorithm_id)
@@ -394,7 +537,7 @@ class ProcessingGetAlgorithmInfo(
             # 合法调用说出未知算法是调用方的输入错误，不是未知的插件操作。
             # A valid call naming an unknown algorithm is a caller input mistake; it is not
             # an unknown plugin operation.
-            raise FrameworkError(INVALID_INPUT, "the algorithm is not registered")
+            raise _unknown_algorithm(request.algorithm_id)
 
         # ``algorithmHelp()`` 会跳过隐藏参数，这里也一样。
         # ``algorithmHelp()`` skips a hidden parameter, and so does this.
@@ -443,8 +586,11 @@ class ProcessingRunAlgorithm(
     def execute_main(
         self, ctx: OperationContext, request: ProcessingRunAlgorithmParams
     ) -> ProcessingRunAlgorithmResult:
-        from qgis import processing
-        from qgis.core import QgsProcessingFeedback
+        from qgis import processing  # pyright: ignore[reportMissingImports]
+        from qgis.core import (  # pyright: ignore[reportMissingImports]
+            QgsApplication,
+            QgsProcessingFeedback,
+        )
 
         class ProcessingRunFeedback(QgsProcessingFeedback):
             """基类自己的日志，外加每条消息一条记录。
@@ -495,12 +641,20 @@ class ProcessingRunAlgorithm(
             def has_errors(self) -> bool:
                 return any(record.level == "error" for record in self.records)
 
+        algorithm = QgsApplication.processingRegistry().createAlgorithmById(request.algorithm_id)
+        if algorithm is None:
+            raise _unknown_algorithm(request.algorithm_id)
         feedback = ProcessingRunFeedback()
+        context = processing.createContext(feedback)
+        parameters = _gui_parameter_values(algorithm, request.parameters)
+        _require_acceptable(algorithm, parameters, context, request.continue_on_crs_mismatch)
         try:
-            # 只给 feedback：上下文由 QGIS 建、参数由 QGIS 校验、算法由 QGIS 自己跑。
-            # Only the feedback: QGIS creates the context, checks the parameters and runs the
-            # algorithm itself.
-            results = processing.run(request.algorithm_id, request.parameters, feedback=feedback)
+            # 参数、反馈与上下文都是桌面版会交出的那几样，算法由 QGIS 自己跑。
+            # The parameters, feedback and context are the ones the desktop would hand over;
+            # QGIS runs the algorithm itself.
+            results = processing.run(
+                request.algorithm_id, parameters, feedback=feedback, context=context
+            )
         except Exception:
             # 原生消息和异常可能带上路径或主机名，所以只进本地日志、不进记录；调用方拿到的是
             # 引擎对意外失败的判定。
