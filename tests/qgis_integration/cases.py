@@ -615,7 +615,7 @@ def at_08b_cancel_scheduled(ctx: Context) -> str:
 def at_08c_concurrency_limit(ctx: Context) -> str:
     ctx.register_probes()
     limit = ctx.engine._settings.max_active_background
-    equal(limit, 2, "max_active_background (PRD 10.1 default)")
+    equal(limit, 2, "max_active_background (2 by default)")
     PROBE_LOG.prepared.clear()
     PROBE_LOG.starts.clear()
     labels = ["at08c-a", "at08c-b", "at08c-c", "at08c-d"]
@@ -935,13 +935,13 @@ def at_14_submission_refused(ctx: Context) -> str:
     equal(engine._store.ids(LIVE_STATUSES), [], "records left dangling")
     equal(len(engine._store.ids(ALL_STATUSES)), 1, "records in the simulated session")
     return (
-        "a manager whose addTask() returns 0 (the simulated case of PRD 12.2): "
+        "a manager whose addTask() returns 0 (the shape of a refused submission): "
         "FAILED(TASK_SUBMISSION_FAILED), one record and none left dangling"
     )
 
 
 def at_15_stateful_replace_refused(ctx: Context) -> str:
-    """未保存内容有四道问句；有图层但不是这四件事时 GUI 不问、operation 也不拒。
+    """未保存内容有四道问句；有图层但不属于这四件事时替换照常进行。
 
     ``QgisApp::fileNew`` 与 ``openProject`` 调的是同一串检查：图层编辑、memory/临时图层、工程脏、
     栅格 RAT。这里把最容易漏的那一条—“图层有未提交编辑而工程 ``is_dirty()`` 仍是 false”—
@@ -969,9 +969,8 @@ def at_15_stateful_replace_refused(ctx: Context) -> str:
         "the project after the refused call",
     )
 
-    # 同一个工程，没被标脏：GUI 不问就换，所以 operation 也不拒。
-    # The same project, not marked dirty: the GUI replaces it without asking, so nothing is
-    # refused here either.
+    # 同一个工程，没被标脏：替换照常进行。
+    # The same project, not marked dirty: the replacement goes through.
     QgsProject.instance().setDirty(False)
     unarmed = ctx.run("project.open", {"path": str(ctx.fixtures.project)})
     equal(
@@ -1071,9 +1070,8 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
     equal(saved.status, ExecutionStatus.SUCCEEDED, "project.save onto a new file")
     require(fresh.exists(), "no file was written")
 
-    # Save（不给路径）写自己的关联文件，不问覆盖：GUI 那时不弹对话框。
-    # Save (no path) writes the project's own associated file and asks nothing about overwriting:
-    # the GUI shows no dialog then.
+    # Save（不给路径）写自己的关联文件，不看覆盖标记。
+    # Save (no path) writes the project's own associated file and reads no overwrite flag.
     again = ctx.run("project.save", {})
     equal(again.status, ExecutionStatus.SUCCEEDED, "project.save onto its own associated file")
     # QGIS 记的文件名用正斜杠，比的是同一个路径而不是同一串字符。
@@ -1248,10 +1246,8 @@ def at_21_layer_without_tree_node(ctx: Context) -> str:
     from qgis.core import QgsProject, QgsVectorLayer
 
     reset_project(ctx)
-    # layer.add 已经没有“不进图例”的参数了（A4），所以这里直接造工程文件能表达的那个形状：
-    # 图层进注册表、不进图层树。
-    # layer.add no longer has an "into the legend or not" parameter (A4), so build the shape a
-    # project file can express directly: in the registry, absent from the tree.
+    # 这个形状只有工程文件能表达：图层进注册表、不进图层树。
+    # The one shape only a project file expresses: in the registry, absent from the tree.
     layer = QgsVectorLayer(
         f"{ctx.fixtures.cities}|layername={fixtures.CITIES_LAYER}",
         "at21 not in the tree",
@@ -1349,10 +1345,8 @@ def at_23_finalize_or_output_fails(ctx: Context) -> str:
 
 def at_24_retention(ctx: Context) -> str:
     ctx.register_probes()
-    equal(ctx.engine._settings.max_terminal_records, 200, "max_terminal_records (PRD 10.1 default)")
-    equal(
-        ctx.engine._settings.terminal_ttl_seconds, 1800, "terminal_ttl_seconds (PRD 10.1 default)"
-    )
+    equal(ctx.engine._settings.max_terminal_records, 200, "max_terminal_records (200 by default)")
+    equal(ctx.engine._settings.terminal_ttl_seconds, 1800, "terminal_ttl_seconds (1800 by default)")
 
     gate = threading.Event()
     GATES["at24"] = gate
@@ -1538,9 +1532,9 @@ def at_27_pydantic_v2(ctx: Context) -> str:
 
 def at_27_v1_half(ctx: Context) -> str:
     raise Skip(
-        "pydantic 1.x is not installed here and this build does not support it (charter "
-        "decision 5: the DTOs are written against v2 and plugin.require_supported_pydantic "
-        "refuses any other major), so the v1 half of AT-27 cannot be run"
+        "pydantic 1.x is not installed here and this build does not support it: the DTOs are "
+        "written against v2 and plugin.require_supported_pydantic refuses any other major, so the "
+        "v1 half of AT-27 cannot be run"
     )
 
 
@@ -1625,9 +1619,9 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
 
 
 def at_29_open_accepts_a_source_outside_any_root(ctx: Context) -> str:
-    """工程自己点名的数据源不再由插件审：打开成功，图层留着。
+    """工程自己点名的数据源不由插件审：打开成功，图层留着。
 
-    The plugin no longer judges the sources a project names: the open succeeds and the layer stays.
+    The plugin does not judge the sources a project names: the open succeeds and the layer stays.
     """
 
     reset_project(ctx)
@@ -1644,19 +1638,18 @@ def at_29_open_accepts_a_source_outside_any_root(ctx: Context) -> str:
     reset_project(ctx)
     return (
         "a QGZ whose only layer names a GeoPackage in a sibling directory: SUCCEEDED with that "
-        "layer still registered, because the plugin no longer judges a project's data sources"
+        "layer still registered, because the plugin does not judge a project's data sources"
     )
 
 
 def at_30_open_does_not_judge_a_remote_source(ctx: Context) -> str:
-    """远程数据源不是操作的判据：GUI 会去取它，插件也交给 ``read()``。
+    """远程数据源不是操作的判据：``read()`` 会去取它。
 
-    以前这里是一条“读前扫描”的拒绝，现在没了：那只是慢，不是死。工程里的远程源让那一层加载
-    不出来，结果里就多一个 ``invalid_layer_count``。
+    那一层于是加载不出来，结果里就多一个 ``invalid_layer_count``：慢不是拒绝的理由，死才是。
 
-    A remote datasource is not an operation's criterion: the GUI goes and fetches it, and so does
-    ``read()`` here.  The old pre-read refusal is gone because it only guarded slowness, not death:
-    a remote source makes that layer fail to load and shows up in ``invalid_layer_count``.
+    A remote datasource is not an operation's criterion: ``read()`` goes and fetches it, so that
+    layer fails to load and shows up in ``invalid_layer_count``.  Slowness is not a reason to
+    refuse an input; death is.
     """
 
     reset_project(ctx)
@@ -1672,7 +1665,7 @@ def at_30_open_does_not_judge_a_remote_source(ctx: Context) -> str:
     reset_project(ctx)
     return (
         "a project whose only layer names /vsicurl/http://127.0.0.1:9/never.tif: SUCCEEDED "
-        "with layer_count 1 and invalid_layer_count 1, because the plugin no longer refuses a "
+        "with layer_count 1 and invalid_layer_count 1, because the plugin does not refuse a "
         "remote source (the GUI fetches it too; the closed port answers at once)"
     )
 
@@ -2037,19 +2030,19 @@ def at_46_open_reads_a_project_that_declares_xml_entities(ctx: Context) -> str:
     return (
         f"a {on_disk} byte project whose 1 MiB entity is referenced 50 times: SUCCEEDED with "
         f"{values['layer_count']} layer(s) in {elapsed * 1000:.0f} ms. QDomDocument does not "
-        "expand a custom entity (measured ok=True in 0.53 s), so refusing it was stricter than "
-        "the GUI; the scan streams the file now and accumulates no expansion"
+        "expand a custom entity (measured ok=True in 0.53 s), so nothing refuses it: the scan "
+        "streams the file and accumulates no expansion"
     )
 
 
-def at_47_open_reads_projects_the_old_scan_called_remote(ctx: Context) -> str:
+def at_47_open_reads_projects_with_values_that_look_remote(ctx: Context) -> str:
     """两个普通工程：CSV 图层的 ``file:`` 源，与元数据里带 URL 的图层。
 
-    两个都必须能打开：扫描不再看任何值的内容，远程与否是 ``read()`` 的事。
+    两个都必须能打开：扫描只看结构，不看值的内容，远程与否是 ``read()`` 的事。
 
     Two ordinary projects: a CSV layer's ``file:`` source, and a layer whose metadata carries a
-    URL.  Both have to open: the scan no longer reads any value, and whether a source is remote is
-    ``read()``'s business.
+    URL.  Both have to open: the scan reads structure only, never value contents, and whether a
+    source is remote is ``read()``'s business.
     """
 
     reset_project(ctx)
@@ -3291,7 +3284,7 @@ def s01_vector_categories(ctx: Context) -> str:
         equal(result["layer_id"], layer_id, f"{geometry}: the layer id")
         equal(result["categories"], VECTOR_CATEGORY_NAMES, f"{geometry}: the 18 categories")
     return (
-        "Point, Line and Polygon layers all report the same 18 base categories in the PRD's fixed "
+        "Point, Line and Polygon layers all report the same 18 base categories in a fixed "
         "order, with only layer_id and categories in the result"
     )
 
@@ -3413,7 +3406,7 @@ def s06_export_failure(ctx: Context) -> str:
         "refused earlier as INVALID_LAYER, and a renderer written in Python to make save() fail "
         "ends the process (0xC0000409, sip ownership) — that branch must not be a case. The "
         "unpacking half of S06 is proven by S04/S05 succeeding (the binding returns str, not "
-        "(message, ok): charter 7/E2); the failure branch stays covered by "
+        "(message, ok)); the failure branch stays covered by "
         "tests/test_operations_layer.py's fake"
     )
 
@@ -3573,7 +3566,7 @@ def a03b_raster_third_party(ctx: Context) -> str:
         "QgsApplication.rasterRendererRegistry() is SIP_SKIP in this build, "
         "QgsRasterRendererRegistry has no instance() and a freshly constructed one lists only the "
         "eight built-ins, so a third-party raster renderer registered in the C++ singleton cannot "
-        "be observed from Python (charter 7/E3): the raster half of A03 is unverifiable here and "
+        "be observed from Python: the raster half of A03 is unverifiable here and "
         "A02 measures the built-in eight instead"
     )
 
@@ -4174,7 +4167,7 @@ CASES = (
     ("AT-43", at_43_open_reads_a_project_with_a_deep_group_tree),
     ("AT-44", at_44_field_sum_refuses_a_non_finite_value),
     ("AT-46", at_46_open_reads_a_project_that_declares_xml_entities),
-    ("AT-47", at_47_open_reads_projects_the_old_scan_called_remote),
+    ("AT-47", at_47_open_reads_projects_with_values_that_look_remote),
     ("AT-49", at_49_open_reads_a_project_whose_source_is_inside_a_vsi_directory),
     ("AT-51", at_51_open_reads_a_project_whose_layer_is_a_local_subdataset),
     ("P01", p01_list_algorithms),

@@ -1,12 +1,11 @@
 """运行的汇总只数结论，绝不数打印出来的文本。
 
-旧实现去数打印行里 ``" {verdict} "`` 出现了几次，于是自由形式的证据可以改掉汇总。这些测试就是防止
-它回来：第二条是一个通过的行，它的证据里带着 ``FAIL`` 和 ``SKIP``。
+汇总不能从打印行里去找字样：那样自由形式的证据就能改掉汇总。这些测试守的就是这一点：第二条是
+一个通过的行，它的证据里带着 ``FAIL`` 和 ``SKIP``。
 
-The run's summary is counted from the verdicts, never from the printed text.  The old
-implementation counted ``" {verdict} "`` occurrences inside the printed line, so free-form
-evidence could change the tally.  These tests fail if that comes back: the second one is a
-pass whose evidence contains ``FAIL`` and ``SKIP``.
+The run's summary is counted from the verdicts, never from the printed text.  Counting a marker
+inside the printed line lets free-form evidence change the tally, so these tests guard against it:
+the second one is a pass whose evidence contains ``FAIL`` and ``SKIP``.
 """
 
 from __future__ import annotations

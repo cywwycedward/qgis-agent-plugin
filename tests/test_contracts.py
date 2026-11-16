@@ -168,7 +168,7 @@ def refusal(operation: object) -> FrameworkError:
     return caught.value
 
 
-def test_enum_values_follow_the_prd() -> None:
+def test_enum_values_are_the_expected_ones() -> None:
     assert OperationKind.COMMAND == "command"
     assert OperationKind.QUERY == "query"
     assert ExecutionStrategy.MAIN_THREAD == "main_thread"

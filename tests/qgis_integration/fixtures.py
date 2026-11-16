@@ -265,10 +265,9 @@ def build(root: Path) -> Fixtures:
     _write_project(moved_directory, [(cities, CITIES_LAYER, "moved")], [])
     _rewrite_datasource(moved_directory, str(data / "moved-away" / "cities.gpkg"))
 
-    # 一个磁盘上很小、解开要 300 MB 的工程已经不再需要：体积不再是一条判据；带加密标志的
-    # 工程仍要，因为那个形状会让进程直接结束（本机实测 0xC0000005）。
-    # The "tiny on disk, 300 MB unpacked" project is gone: size is no longer a criterion.  The
-    # encrypted one stays, because that shape ends the process outright (measured 0xC0000005).
+    # 体积不是判据；带加密标志的工程仍要拒，因为那个形状会让进程直接结束（本机实测 0xC0000005）。
+    # Size is not a criterion.  The encrypted one is still refused, because that shape ends the
+    # process outright (measured 0xC0000005).
     encrypted = data / "encrypted member.qgz"
     _write_encrypted_project(encrypted, raster)
 
@@ -315,13 +314,13 @@ def build(root: Path) -> Fixtures:
     grouped = data / "grouped.qgs"
     _write_grouped_project(grouped, cities, CITIES_LAYER, NESTED_GROUPS)
 
-    # 一个声明了 XML 实体的文件。旧扫描还拒过两个普通工程——一个 Delimited Text 图层被写成
-    # ``file:./points.csv``，一个图层的元数据里带 URL——那两个由各自的用例去写：QGIS 只在 provider
+    # 一个声明了 XML 实体的文件。另两个普通工程——一个 Delimited Text 图层被写成
+    # ``file:./points.csv``，一个图层的元数据里带 URL——由各自的用例去写：QGIS 只在 provider
     # 加载之后才把 CSV 写成相对路径，而 ``build`` 在应用启动之前跑。
-    # A file that declares an XML entity.  The two ordinary projects the old scan also refused -- a
-    # Delimited Text layer spelled ``file:./points.csv`` and a layer whose metadata carries a URL --
-    # are written by their case instead: QGIS only spells the CSV source relatively once its
-    # providers are loaded, and ``build`` runs before the application starts.
+    # A file that declares an XML entity.  Two other ordinary projects -- a Delimited Text layer
+    # spelled ``file:./points.csv`` and a layer whose metadata carries a URL -- are written by their
+    # case instead: QGIS only spells the CSV source relatively once its providers are loaded, and
+    # ``build`` runs before the application starts.
     entity_project = data / "entity expansion.qgs"
     _write_entity_project(entity_project)
 

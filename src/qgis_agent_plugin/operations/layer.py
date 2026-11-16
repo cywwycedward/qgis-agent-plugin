@@ -1017,11 +1017,11 @@ def renderer_from_document(layer: Any, text: str) -> Any:
     renderer_type = element.attribute("type")
     if not renderer_type:
         raise FrameworkError(INVALID_INPUT, "the document is not a renderer this layer can use")
-    # 拒绝的理由分两半：栅格那边实测有类型会被 QGIS 静默保留（普通栅格上的 singlebandcolordata），
-    # 矢量那边是下拉框按几何筛过、GUI 根本表达不出这个组合。
-    # The refusal has two reasons: on the raster side QGIS was measured to keep the old renderer
-    # silently for one type (singlebandcolordata on an ordinary raster), while the vector combo is
-    # filtered by geometry, so the GUI cannot express that combination at all.
+    # 候选清单之外的类型在建之前拒：栅格那边实测 QGIS 会静默保留旧渲染器（普通栅格上的
+    # singlebandcolordata），矢量那边的清单按几何筛过，装上去就是一个用不了的渲染器。
+    # A type outside the candidate list is refused before building: QGIS was measured to keep the
+    # old renderer silently on the raster side (singlebandcolordata on an ordinary raster), and the
+    # vector list is filtered by geometry, so installing one would give a renderer it cannot use.
     if renderer_type not in available_renderer_types(layer):
         raise FrameworkError(INVALID_INPUT, f"the layer does not offer a {renderer_type} renderer")
     if layer_kind(layer) == "raster":

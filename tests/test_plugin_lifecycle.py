@@ -35,7 +35,7 @@ from qgis_agent_plugin.core.runners import qgs_task  # pyright: ignore[reportMis
 from qgis_agent_plugin.operations import register_all  # pyright: ignore[reportMissingImports]
 
 # 构建必须恰好注册这个集合，否则就是错的 / the build registers exactly this set, or it is wrong
-PRD_NAMES = frozenset(
+OPERATION_NAMES = frozenset(
     {
         "project.create",
         "project.open",
@@ -276,12 +276,12 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
 # --- 构建交付什么 / what the build ships ---------------------------------------
 
 
-def test_the_build_registers_exactly_the_seventeen_operations_of_the_prd() -> None:
+def test_the_build_registers_exactly_seventeen_operations() -> None:
     registry = OperationRegistry()
 
     register_all(registry)
 
-    assert {spec.name for spec in registry.list_specs()} == PRD_NAMES
+    assert {spec.name for spec in registry.list_specs()} == OPERATION_NAMES
 
 
 def test_a_duplicate_is_still_the_registry_refusal() -> None:
@@ -398,7 +398,7 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
 
         assert iface.agent_engine is engine
         assert iface.agent_registry is registry
-        assert {spec.name for spec in registry.list_specs()} == PRD_NAMES
+        assert {spec.name for spec in registry.list_specs()} == OPERATION_NAMES
         # 工程代数只由这一个信号推进，只连一次 / one connection to the signal that bumps the epoch
         assert len(fake_qgis.project.aboutToBeCleared.slots) == 1
         assert supervisor.parent_object is fake_qgis.application

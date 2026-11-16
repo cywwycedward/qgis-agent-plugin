@@ -169,7 +169,7 @@ def test_an_unknown_id_is_not_found() -> None:
 
 
 @pytest.mark.parametrize(("start", "target"), LEGAL)
-def test_every_transition_the_prd_lists_is_accepted(
+def test_every_declared_transition_is_accepted(
     start: ExecutionStatus, target: ExecutionStatus
 ) -> None:
     store = ExecutionStore(Settings())
@@ -178,7 +178,7 @@ def test_every_transition_the_prd_lists_is_accepted(
 
 
 @pytest.mark.parametrize(("start", "target"), ILLEGAL)
-def test_a_transition_the_prd_does_not_list_is_a_defect(
+def test_an_undeclared_transition_is_a_defect(
     start: ExecutionStatus, target: ExecutionStatus
 ) -> None:
     store = ExecutionStore(Settings())
