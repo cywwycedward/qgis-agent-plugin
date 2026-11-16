@@ -1053,10 +1053,11 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
     equal(Path(QgsProject.instance().fileName()), fresh, "the associated file after Save")
     # Save 把当前的画布视图存进工程：重开时回到这里。
     # Save stores the current canvas view in the project, so reopening returns to it.
+    stored = QgsProject.instance().viewSettings().defaultViewExtent()
     equal(
-        QgsProject.instance().viewSettings().defaultRotation(),
-        0.0,
-        "the default rotation Save stored (this run has no canvas, so the stand-in reports 0)",
+        (stored.xMinimum(), stored.yMinimum(), stored.xMaximum(), stored.yMaximum()),
+        (0.0, 0.0, 1.0, 1.0),
+        "the default view Save stored (this run has no canvas, so the stand-in reports 0..1)",
     )
 
     # 关联文件不可写时，在写之前就拒，文件一个字节都不变。
@@ -1075,14 +1076,17 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
     error = unwritable.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require("not writable" in error.message, f"the message: {error.message!r}")
+    # 拒绝先于写入，用的是 QGIS 写之前那一句；``write()`` 自己的那句带整条路径，不是这一句。
+    # The refusal comes before any write and is the sentence QGIS uses there; ``write()``'s own
+    # sentence carries the whole path and is not this one.
+    equal(error.message, "The project file is not writable.", "the message for a read-only target")
     equal(fresh.read_bytes(), bytes_before, "the bytes of the read-only file")
     reset_project(ctx)
     return (
         f"Save As onto an existing file: FAILED(TARGET_EXISTS) and the target's "
         f"{len(bytes_before)} bytes are unchanged; Save As onto a new path: SUCCEEDED and the file "
         "was written; Save onto that associated file: SUCCEEDED without an overwrite flag, and the "
-        "default rotation it stored is in the file; Save onto the same file made read-only: "
+        "default view it stored is in the project; Save onto the same file made read-only: "
         "FAILED(PROJECT_SAVE_FAILED) saying it is not writable, with the bytes unchanged"
     )
 
