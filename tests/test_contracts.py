@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, fields
 
-import pytest
-from pydantic import BaseModel
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import (  # pyright: ignore[reportMissingImports]
     BackgroundOperationMixin,
     BaseCommand,
     BaseOperation,
@@ -24,7 +24,7 @@ from qgis_agent_plugin.core.contracts import (
     TaskControl,
     validate_operation,
 )
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     INVALID_OPERATION_DEFINITION,
     FrameworkError,
     Params,

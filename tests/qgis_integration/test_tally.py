@@ -10,7 +10,7 @@ the second one is a pass whose evidence contains ``FAIL`` and ``SKIP``.
 
 from __future__ import annotations
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 import tally
 
 

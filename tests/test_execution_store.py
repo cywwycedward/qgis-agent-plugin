@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import re
 
-import pytest
-from pydantic import ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import ExecutionStrategy
-from qgis_agent_plugin.core.execution_store import TERMINAL_STATUSES, ExecutionStore
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import ExecutionStrategy  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.execution_store import (  # pyright: ignore[reportMissingImports]
+    TERMINAL_STATUSES,
+    ExecutionStore,
+)
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     EXECUTION_NOT_FOUND,
     INTERNAL_ERROR,
     ErrorDetail,
