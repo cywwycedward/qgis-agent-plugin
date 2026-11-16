@@ -64,6 +64,7 @@ from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImpo
     PATH_NOT_ALLOWED,
     PROJECT_OPEN_FAILED,
     PROJECT_REPLACE_REQUIRED,
+    PROJECT_SAVE_FAILED,
     STALE_PROJECT,
     TARGET_EXISTS,
     TASK_SUBMISSION_FAILED,
@@ -914,15 +915,14 @@ def at_14_submission_refused(ctx: Context) -> str:
 def at_15_stateful_replace_refused(ctx: Context) -> str:
     """未保存内容有四道问句；有图层但不是这四件事时 GUI 不问、operation 也不拒。
 
-    ``QgisApp::fileNew``/``openProject`` 调的是同一串 check（``qgisapp.cpp:5820`` / ``:6943``）：
-    图层编辑、memory/临时图层、工程脏、栅格 RAT。这里把最容易漏的那一条—
-    “图层有未提交编辑而工程 ``is_dirty()`` 仍是 false”—
+    ``QgisApp::fileNew`` 与 ``openProject`` 调的是同一串检查：图层编辑、memory/临时图层、工程脏、
+    栅格 RAT。这里把最容易漏的那一条—“图层有未提交编辑而工程 ``is_dirty()`` 仍是 false”—
     在真 QGIS 上造出来，证明它是判据的一部分。
 
-    Unsaved content is four questions, and ``QgisApp::fileNew``/``openProject`` call the same chain
-    (``qgisapp.cpp:5820`` / ``:6943``): layer edits, memory/temporary layers, a dirty project, a
-    raster attribute table.  This builds the easiest one to miss -- a layer with uncommitted edits
-    while ``is_dirty()`` is still false -- in real QGIS, to show it is part of the criterion.
+    Unsaved content is four questions, and ``QgisApp::fileNew`` and ``openProject`` call the same
+    chain: layer edits, memory/temporary layers, a dirty project, a raster attribute table.  This
+    builds the easiest one to miss -- a layer with uncommitted edits while ``is_dirty()`` is still
+    false -- in real QGIS, to show it is part of the criterion.
     """
 
     from qgis.core import QgsProject, QgsVectorLayerUtils  # pyright: ignore[reportMissingImports]
@@ -953,10 +953,9 @@ def at_15_stateful_replace_refused(ctx: Context) -> str:
     )
     equal(len(project_layers()), 2, "the layers the opened project brought")
 
-    # 图层有未提交的编辑，而工程自己没脏：``saveDirty()`` 的 markDirty 分支就是为这个缺口存在的
-    # （qgisapp.cpp:13509）。
+    # 图层有未提交的编辑，而工程自己没脏：``saveDirty()`` 的 markDirty 分支就是为这个缺口存在的。
     # A layer holds uncommitted edits while the project itself is clean: that gap is exactly what
-    # ``saveDirty()``'s markDirty branch exists for (qgisapp.cpp:13509).
+    # ``saveDirty()``'s markDirty branch exists for.
     reset_project(ctx)
     edited_id = cities_layer(ctx, "at15 edited")
     layer = project_layer(edited_id)
@@ -1009,20 +1008,20 @@ def at_16_stateful_replace(ctx: Context) -> str:
     epoch_before = ctx.lifecycle.current_epoch
     equal(len(project_layers()), 1, "the stateful project before the replacement")
 
-    record = ctx.run("project.create", {"discard_current": True, "crs_authid": "EPSG:3857"})
+    record = ctx.run("project.create", {"discard_current": True})
     equal(record.status, ExecutionStatus.SUCCEEDED, "an armed project.create")
     equal(result_of(record)["layer_count"], 0, "the layer count in the result")
     equal(len(project_layers()), 0, "the registered layers after the replacement")
-    equal(result_of(record)["crs_authid"], "EPSG:3857", "the CRS of the new project")
     equal(ctx.lifecycle.current_epoch, epoch_before + 1, "the project epoch")
-    # 新建完的工程不是脏的：GUI 的 fileNew 最后一步是 setDirty(false)，而 setCrs 会把它标脏。
-    # A project that was just created is not dirty: the GUI's fileNew ends with setDirty(false),
-    # and setCrs dirties it.
+    # 新建完的工程不是脏的：换工程时置脏被挡住，脏标记不会从旧的那个漏过来。
+    # A project that was just created is not dirty: dirtying is blocked while the project is
+    # replaced, so the old one's flag does not leak into it.
     info = result_of(ctx.run("project.get_info", {}))
     equal(info["is_dirty"], False, "the dirty flag right after project.create")
+    equal(info["file_path"], None, "the file of a project that was just created")
     return (
-        f"SUCCEEDED: layer_count 1 -> 0, CRS EPSG:3857, is_dirty false, epoch {epoch_before} -> "
-        f"{epoch_before + 1}"
+        f"SUCCEEDED: layer_count 1 -> 0, is_dirty false, no associated file, epoch "
+        f"{epoch_before} -> {epoch_before + 1}"
     )
 
 
@@ -1052,11 +1051,39 @@ def at_17_save_refuses_existing(ctx: Context) -> str:
     # QGIS 记的文件名用正斜杠，比的是同一个路径而不是同一串字符。
     # QGIS remembers the file name with forward slashes, so compare paths, not spellings.
     equal(Path(QgsProject.instance().fileName()), fresh, "the associated file after Save")
+    # Save 把当前的画布视图存进工程：重开时回到这里。
+    # Save stores the current canvas view in the project, so reopening returns to it.
+    equal(
+        QgsProject.instance().viewSettings().defaultRotation(),
+        0.0,
+        "the default rotation Save stored (this run has no canvas, so the stand-in reports 0)",
+    )
+
+    # 关联文件不可写时，在写之前就拒，文件一个字节都不变。
+    # With an unwritable associated file the refusal comes before the write, and not one byte of the
+    # file changes.
+    import stat
+
+    bytes_before = fresh.read_bytes()
+    fresh.chmod(stat.S_IREAD)
+    try:
+        unwritable = ctx.run("project.save", {})
+    finally:
+        fresh.chmod(stat.S_IWRITE)
+    equal(unwritable.status, ExecutionStatus.FAILED, "project.save onto its own read-only file")
+    equal(error_code(unwritable), PROJECT_SAVE_FAILED, "the code for a read-only target")
+    error = unwritable.error
+    if error is None:
+        raise AssertionError("a failed record carries an error")
+    require("not writable" in error.message, f"the message: {error.message!r}")
+    equal(fresh.read_bytes(), bytes_before, "the bytes of the read-only file")
     reset_project(ctx)
     return (
         f"Save As onto an existing file: FAILED(TARGET_EXISTS) and the target's "
         f"{len(bytes_before)} bytes are unchanged; Save As onto a new path: SUCCEEDED and the file "
-        "was written; Save onto that associated file: SUCCEEDED without an overwrite flag"
+        "was written; Save onto that associated file: SUCCEEDED without an overwrite flag, and the "
+        "default rotation it stored is in the file; Save onto the same file made read-only: "
+        "FAILED(PROJECT_SAVE_FAILED) saying it is not writable, with the bytes unchanged"
     )
 
 
@@ -1080,12 +1107,11 @@ def at_18_corrupt_project(ctx: Context) -> str:
     error = record.error
     if error is None:
         raise AssertionError("a failed record carries an error")
-    require(
-        "cleared" in error.message,
-        f"the message does not say what happened to the project: {error.message!r}",
-    )
-    # GUI 的 addProject 先 closeProject() 再 read()：读失败时眼前这个工程是空的。
-    # The GUI's addProject calls closeProject() before read(): a failed read leaves it empty.
+    # 拒语是 QGIS 自己那句（"Unable to unzip file '<path>'"），操作不另写一句。
+    # The refusal is QGIS's own sentence ("Unable to unzip file '<path>'"), not one written here.
+    require("Unable to unzip file" in error.message, f"the message: {error.message!r}")
+    # QGIS 的 addProject 先关掉当前工程再 read()：读失败时眼前这个工程是空的。
+    # QGIS's addProject closes the current project before read(): a failed read leaves it empty.
     equal(len(project_layers()), 0, "the layers left after the failed open")
 
     valid = ctx.run("project.open", {"path": str(ctx.fixtures.project), "discard_current": True})
@@ -1100,13 +1126,15 @@ def at_18_corrupt_project(ctx: Context) -> str:
         "the layers the QGZ really loaded: the GeoPackage and the GeoTIFF",
     )
     return (
-        "corrupt QGZ -> FAILED(PROJECT_OPEN_FAILED), message says the project was cleared, and "
-        "the project holds 0 layers afterwards; the valid QGZ -> SUCCEEDED with 2 layers, "
-        "0 invalid; the session kept answering"
+        "corrupt QGZ -> FAILED(PROJECT_OPEN_FAILED) with QGIS's own 'Unable to unzip file' "
+        "sentence, and the project holds 0 layers afterwards; the valid QGZ -> SUCCEEDED with 2 "
+        "layers, 0 invalid; the session kept answering"
     )
 
 
 def at_18b_project_with_unavailable_layer(ctx: Context) -> str:
+    from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
+
     record = ctx.run("project.open", {"path": str(ctx.fixtures.missing), "discard_current": True})
     equal(
         record.status, ExecutionStatus.SUCCEEDED, "project.open on a project whose source is gone"
@@ -1115,9 +1143,15 @@ def at_18b_project_with_unavailable_layer(ctx: Context) -> str:
     equal(values["layer_count"], 1, "the layers the project registers")
     equal(values["invalid_layer_count"], 1, "the layers that do not load")
     require(values["invalid_layer_count"] > 0, "the result claims every data source is valid")
+    # 读取期间置脏被挡住，所以刚打开的工程是干净的；坏图层只做汇报，不替那个“不可用图层”对话框
+    # 做选择。
+    # Dirtying is blocked while the file is read, so a project that was just opened is clean; bad
+    # layers are reported and nothing is decided on that dialog's behalf.
+    equal(QgsProject.instance().isDirty(), False, "the dirty flag after opening the project")
     return (
         "read() succeeded with 1 registered layer and invalid_layer_count=1 (its data source was "
-        "deleted), so the result does not claim every source is usable"
+        "deleted), so the result does not claim every source is usable; the project is not dirty "
+        "afterwards"
     )
 
 
@@ -1687,12 +1721,11 @@ def at_35_open_refuses_a_deeply_nested_project_before_reading_it(ctx: Context) -
     """嵌套过深的工程会让 ``read()`` 的解析器崩溃，所以它绝不能走到 read()。
 
     但“深”只算 ``read()`` 会解析的那个文档：一个归档里的第二个 ``.qgs`` 永远进不了 DOM
-    （``QgsProjectArchive::projectFile()`` 只取第一个，``qgsarchive.cpp:147``–``157``）。
+    （``QgsProjectArchive::projectFile()`` 只取第一个）。
 
     A deeply nested project crashes ``read()``'s parser, so it never reaches it -- but "deep" only
     counts the one document ``read()`` parses: a second ``.qgs`` inside an archive never reaches the
-    DOM (``QgsProjectArchive::projectFile()`` takes the first one only, ``qgsarchive.cpp:147``-
-    ``157``).
+    DOM (``QgsProjectArchive::projectFile()`` takes the first one only).
     """
 
     import zipfile
@@ -1788,9 +1821,9 @@ def at_40_open_reads_a_project_with_labelled_layers(ctx: Context) -> str:
 def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
     ctx: Context,
 ) -> str:
-    """三种把深度计数压住的写法：CDATA、注释、属性值里藏着标签的结束。
+    """四种把深度计数压住的写法：CDATA、注释、属性值、以及没声明前缀的标签。
 
-    The three shapes that held the old depth counter down.
+    The four shapes that held a depth counter down.
     """
 
     from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
@@ -1799,11 +1832,23 @@ def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
     ctx.add_layer(ctx.fixtures.cities, "at41 kept")
     before = project_layer_ids()
     file_before = QgsProject.instance().fileName()
+    # 前缀没声明时 ``QDomDocument`` 把它当普通元素名，所以它也是一层；这个文件由用例自己写，
+    # 因为它只在这个用例里有意义。
+    # With an undeclared prefix ``QDomDocument`` takes it as an ordinary element name, so it is one
+    # level too; the case writes this file itself because it means nothing outside it.
+    prefix_project = ctx.fixtures.root / "hidden depth prefix.qgs"
+    prefix_project.write_bytes(
+        b"<qgis>"
+        + b"<q:a>" * fixtures.DEEP_PROJECT_LEVELS
+        + b"</q:a>" * fixtures.DEEP_PROJECT_LEVELS
+        + b"</qgis>"
+    )
     timings: list[str] = []
     for label, target in (
         ("CDATA", ctx.fixtures.hidden_depth_cdata),
         ("a comment", ctx.fixtures.hidden_depth_comment),
         ("an attribute", ctx.fixtures.hidden_depth_attribute),
+        ("an undeclared prefix", prefix_project),
     ):
         on_disk = target.stat().st_size
         started = time.monotonic()
@@ -1822,8 +1867,8 @@ def at_41_open_refuses_depth_written_inside_cdata_comments_or_attributes(
     reset_project(ctx)
     return (
         f"{'; '.join(timings)}: FAILED(PROJECT_OPEN_FAILED) with 'nests deeper' before read(). "
-        "The audit measured read() exit code -1073741571 (0xC00000FD) on all three; this "
-        "process is still answering and the old project kept its layer"
+        "The audit measured read() exit code -1073741571 (0xC00000FD) on each of these shapes; "
+        "this process is still answering and the old project kept its layer"
     )
 
 
