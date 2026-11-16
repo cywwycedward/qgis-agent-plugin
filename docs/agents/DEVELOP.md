@@ -125,7 +125,7 @@ npm run deploy:list   # 只列会拷贝什么，不落盘
 | 组 | 断的是什么 | 什么时候跑 | 命令 | 条数与耗时 |
 | --- | --- | --- | --- | --- |
 | **规范组**（`conformance`） | 整个仓库的成文规则：注释双语、导入位置、文档索引、注册面 | **每次改完代码都跑** | `npm run test:rules` | 12 条，约 2 s |
-| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 721 条，约 14 s |
+| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 725 条，约 12 s |
 
 一条测试属于规范组，当且仅当三件事都成立：它断言的是**对整个仓库都成立**的规则（不是某条行为）、
 它**读源码或文档**而不是驱动代码、它**不需要 QGIS**。文件顶部写 `pytestmark = pytest.mark.conformance`
@@ -138,18 +138,18 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 ```
 
 通过的判据（三行都要在输出里）：`All checks passed`、`N files already formatted`、
-`12 passed, 709 deselected`。
+`12 passed, 713 deselected`。
 
 **按需加跑**（碰了什么跑什么）：
 
 | 改动 | 加跑 | 通过长什么样 |
 | --- | --- | --- |
-| `src/` 里任何逻辑 | `npm run test`（全量） | `721 passed` |
+| `src/` 里任何逻辑 | `npm run test`（全量） | `725 passed` |
 | 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `668 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
 | 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
 | 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
 | 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
-| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `721 passed` |
+| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `725 passed` |
 | 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
 | 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
 
@@ -224,7 +224,7 @@ qgis-agent-plugin/
 │   │   └── processing.py         三个 processing.* 操作及其 JSON 边界
 │   └── ui/
 │       ├── __init__.py           只有 docstring（保持空壳，裸解释器不会顺着它碰到 Qt）
-│       ├── dock.py               OperationDock：按 input_schema 生成表单、运行、轮询、显示记录
+│       ├── dock.py               OperationDock：按 input_schema 生成表单、运行、轮询、三块记录
 │       └── theme.py              唯一配色来源：从 QPalette 派生颜色、对比度自检、生成 QSS
 └── tests/
     ├── test_contracts.py         协议：策略与阶段声明、校验拒绝
@@ -240,7 +240,7 @@ qgis-agent-plugin/
     ├── test_qgs_task.py          适配器记账：两槽、task id、100 ms 进度窗、提交被拒
     ├── test_background.py        后台端到端：快照、取消、换代、卸载（假任务）
     ├── test_plugin_lifecycle.py  会话装配、信号连接、epoch、Supervisor、重复加载
-    ├── test_ui_dock.py           坞窗：选择器、表单、状态、配色对比度、两条引擎路径
+    ├── test_ui_dock.py           坞窗：选择器、表单、状态、三块记录、配色对比度、入口、两条引擎路径
     ├── test_package.py           [规范组] 裸解释器导入守卫 + 十七个 Operation 注册 + dock 源码守则
     ├── test_comments.py          [规范组] 注释与 docstring：双语、不引用文档、shortcut 标记存活
     ├── test_source_rules.py      [规范组] 导入位置、__future__、日志器名、主题不写十六进制颜色
@@ -844,15 +844,19 @@ class OperationTask(QgsTask):
    随后调 `engine.on_project_replaced()`；slot 里异常只记日志，不向外抛。
 9. `_create_dock()`：优先 `iface.addDockWidget`，否则 `iface.mainWindow().addDockWidget`；没有
    可停靠的宿主就不建，这种情况下连 Qt 都不会被 import。
-10. `_publish()`：`iface.agent_engine = engine`、`iface.agent_registry = registry`。
+10. `_create_entry()`：插件菜单（`&QGIS Agent`）下挂一项、工具栏加一个 `mActionTerminal` 开关，
+   两者指向同一个坞窗（`checkable`，坞窗自己的关闭按钮会把开关弹回来）。界面没有
+   `addPluginToMenu`/`addToolBarIcon` 时坞窗照建，入口不建。
+11. `_publish()`：`iface.agent_engine = engine`、`iface.agent_registry = registry`。
 
 `unload()` 的顺序也是固定的：
 
 1. 断开 `aboutToBeCleared`（重复卸载或从未加载时用 `suppress` 吞掉）。
 2. 先卸坞窗（它的轮询会碰引擎），`dock.shutdown()` + `removeDockWidget` + `deleteLater()`。
-3. 从 `iface` 撤掉两个属性（`_withdraw`）。
-4. `engine.shutdown()`：拒绝新工作 → 取消所有排队项 → 对活动后台任务发停止请求（从不全局取消）。
-5. `supervisor.close()`：把还在跑的任务交给 Supervisor；最后一个任务真正终止后，它在主线程上
+3. `_remove_entry()`：`removePluginMenu` + `removeToolBarIcon` + `action.deleteLater()`。
+4. 从 `iface` 撤掉两个属性（`_withdraw`）。
+5. `engine.shutdown()`：拒绝新工作 → 取消所有排队项 → 对活动后台任务发停止请求（从不全局取消）。
+6. `supervisor.close()`：把还在跑的任务交给 Supervisor；最后一个任务真正终止后，它在主线程上
    `deleteLater()` 自删，并释放 engine/runner 引用。没有任何一步阻塞等待。
 
 `Supervisor` 的记账只有三个动作：`attach(task_id)`（任务进了本插件的 manager）、
@@ -1447,10 +1451,14 @@ class LayerSumNumericField(
 | 选择器 | 左边 `name`，右边等宽小字 `kind · strategy`；`destructive=true` 带警示色点，选中后摘要行标"可破坏" |
 | 摘要 | 类型/策略一行（等宽小字），下面是 `description`（次要色，自动换行） |
 | 参数 | 由 `input_schema` 生成，一字段一行：标签（次要色，有中文映射表）+ 编辑器；必填字段标签后有小号"必填" |
-| 动作条 | 主按钮"运行"（强调色，全坞窗唯一）、次按钮"取消"（仅后台调用运行中可点）、文字按钮"复制 JSON"、右侧状态胶囊 |
+| 动作条 | 主按钮"运行"（强调色，全坞窗唯一）、次按钮"取消"（仅后台调用运行中可点）、文字按钮"复制 JSON"（整条记录）、右侧状态胶囊 |
 | 状态胶囊 | `就绪 / 运行中 / 完成 / 失败 / 已取消 / 无操作`；运行中下方有进度条 |
 | 错误区 | 只在失败时出现：等宽的 `CODE` + 一句"发生了什么" + 一句"接下来怎么办"；引擎原文只放在鼠标悬停提示里 |
-| 结果 | 上方一行小字：运行中给 `进度 n%`，结束给 `耗时 n ms`（取消过就追加回执）；下面是只读、可选中、等宽的 `ExecutionRecord` JSON |
+| 结果区 | 没记录时是一句话（该跑一次 / 本次没有产生记录）。有记录时是三个标签页：`执行信息`（`result` 以外的每个字段，两列等宽值；没有值的字段整行不出现）/ `结果`（`result` 的 JSON；失败与取消时没有这一页）/ `原始 JSON`（整条记录）。上方一行小字：运行中给 `进度 n%`，结束给 `耗时 n ms`（取消过就追加回执） |
+
+入口属于界面的一半：`initGui` 把坞窗挂进右侧，同时在插件菜单下挂一项、工具栏加一个开关，两者
+都指向同一个坞窗。关掉的坞窗只是隐藏，入口把它要回来——不重建，记录还在。界面承载不了入口
+（无头验收的假 `iface`）时只建坞窗。
 
 两条属于坞窗的合同：
 

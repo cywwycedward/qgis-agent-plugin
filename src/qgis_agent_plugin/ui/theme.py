@@ -58,6 +58,9 @@ QLabel { color: $text; font-size: $bodypt; }
 QLabel#meta { color: $muted; font-family: "$mono"; font-size: $smallpt; }
 QLabel#summary { color: $muted; font-size: $bodypt; }
 QLabel#fieldLabel { color: $muted; font-size: $bodypt; }
+QLabel#metaLabel { color: $muted; font-size: $smallpt; }
+QLabel#metaValue { color: $text; font-family: "$mono"; font-size: $smallpt; }
+QLabel#recordHint { color: $muted; font-size: $bodypt; }
 QLabel#resultSummary { color: $muted; font-family: "$mono"; font-size: $smallpt; }
 QLabel#emptyTitle { color: $text; font-size: $titlept; font-weight: 600; }
 QLabel#emptyBody { color: $muted; font-size: $bodypt; }
@@ -119,7 +122,8 @@ QProgressBar#progress {
 }
 QProgressBar#progress::chunk { background: $accent; border-radius: 2px; }
 
-QScrollArea#params, QScrollArea#params > QWidget > QWidget {
+QScrollArea#params, QScrollArea#params > QWidget > QWidget,
+QScrollArea#metaArea, QScrollArea#metaArea > QWidget > QWidget {
     background: transparent; border: none;
 }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
@@ -133,12 +137,12 @@ QScrollBar::handle:horizontal:hover { background: $muted; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 
-QPlainTextEdit#result {
+QPlainTextEdit#result, QPlainTextEdit#raw {
     background: $field; color: $text; border: 1px solid $border; border-radius: 4px;
     font-family: "$mono"; font-size: $smallpt; padding: 8px 10px;
     selection-background-color: $accent; selection-color: $on_accent;
 }
-QPlainTextEdit#result:focus { border-color: $accent; }
+QPlainTextEdit#result:focus, QPlainTextEdit#raw:focus { border-color: $accent; }
 
 QToolTip { background: $field; color: $text; border: 1px solid $border; padding: 4px 6px; }
 """
@@ -181,7 +185,7 @@ def readable(color: Any, background: Any, floor: float = BODY) -> Any:
     the darker version of the same red, a dark theme the lighter one.
     """
 
-    from qgis.PyQt.QtGui import QColor
+    from qgis.PyQt.QtGui import QColor  # pyright: ignore[reportMissingImports]
 
     result = QColor(color)
     toward_dark = relative_luminance(background) > 0.18
@@ -198,7 +202,7 @@ def mix(base: Any, tint: Any, ratio: float) -> Any:
     ``base`` blended ``ratio`` of the way to ``tint`` -- how a surface gets a tone.
     """
 
-    from qgis.PyQt.QtGui import QColor
+    from qgis.PyQt.QtGui import QColor  # pyright: ignore[reportMissingImports]
 
     return QColor(
         round(base.red() * (1 - ratio) + tint.red() * ratio),
@@ -218,7 +222,7 @@ def accent_for(text: Any, accent: Any) -> Any:
     label instead would turn every primary button's text near-black.
     """
 
-    from qgis.PyQt.QtGui import QColor
+    from qgis.PyQt.QtGui import QColor  # pyright: ignore[reportMissingImports]
 
     result = QColor(accent)
     toward_dark = relative_luminance(text) > 0.5
@@ -359,8 +363,12 @@ def build(palette: Any) -> Theme:
     The dock's theme for ``palette`` -- normally ``QApplication.palette()``.
     """
 
-    from qgis.PyQt.QtGui import QColor, QFontDatabase, QPalette
-    from qgis.PyQt.QtWidgets import QApplication
+    from qgis.PyQt.QtGui import (  # pyright: ignore[reportMissingImports]
+        QColor,
+        QFontDatabase,
+        QPalette,
+    )
+    from qgis.PyQt.QtWidgets import QApplication  # pyright: ignore[reportMissingImports]
 
     surface = QColor(palette.color(QPalette.Window))
     field = QColor(palette.color(QPalette.Base))

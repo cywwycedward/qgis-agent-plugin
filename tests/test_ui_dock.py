@@ -48,7 +48,7 @@ for _fonts in (r"C:\Windows\Fonts", "/usr/share/fonts"):
 pytest.importorskip("qgis.PyQt.QtWidgets", reason="the operation dock needs Qt")
 
 from qgis.PyQt.QtCore import QPoint, Qt  # pyright: ignore[reportMissingImports]
-from qgis.PyQt.QtGui import QColor, QPalette  # pyright: ignore[reportMissingImports]
+from qgis.PyQt.QtGui import QColor, QIcon, QPalette  # pyright: ignore[reportMissingImports]
 from qgis.PyQt.QtTest import QTest  # pyright: ignore[reportMissingImports]
 from qgis.PyQt.QtWidgets import (  # pyright: ignore[reportMissingImports]
     QApplication,
@@ -297,6 +297,20 @@ def _fields(form: QFormLayout) -> list[Any]:
     """
 
     return [form.itemAt(row, QFormLayout.FieldRole).widget() for row in range(form.rowCount())]
+
+
+def _meta(dock: Any) -> dict[str, str]:
+    """执行信息那两列，按标签取值。
+
+    The execution-info grid, label to value.
+    """
+
+    rows: dict[str, str] = {}
+    for row in range(dock.meta_form.rowCount()):
+        label = dock.meta_form.itemAt(row, QFormLayout.LabelRole).widget()
+        value = dock.meta_form.itemAt(row, QFormLayout.FieldRole).widget()
+        rows[label.text()] = value.text()
+    return rows
 
 
 def _painted_contrast(widget: Any) -> float:
@@ -709,9 +723,13 @@ def test_a_successful_call_ends_ok_with_copyable_json(qapp: Any) -> None:
     # 摘要说胶囊说不出的东西：花了多久 / the summary carries what the capsule cannot: the time
     assert dock.result_summary.text() == "耗时 1.0 s"
     assert "完成" not in dock.result_summary.text()
-    shown = json.loads(dock.result.toPlainText())
+    assert dock.copy_button.isEnabled()
+    shown = json.loads(dock.raw.toPlainText())
     assert shown["status"] == "SUCCEEDED"
     assert shown["result"] == {"layer_count": 0}
+    # 结果那一块只装 result 自己 / the result block holds that field and nothing else
+    assert json.loads(dock.result.toPlainText()) == {"layer_count": 0}
+    # 复制按钮看到的是原始 JSON，所以有记录才可点 / it copies the raw record, so a record enables it
 
 
 def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> None:
@@ -736,7 +754,7 @@ def test_a_failed_record_shows_its_code_a_reason_and_what_to_do(qapp: Any) -> No
     assert dock.result_summary.text() == "耗时 1.0 s"
     assert "失败" not in dock.result_summary.text()
     # 记录本身还在，仍可以复制 / the record itself is still there to copy
-    assert json.loads(dock.result.toPlainText())["status"] == "FAILED"
+    assert json.loads(dock.raw.toPlainText())["status"] == "FAILED"
 
 
 def test_a_cancelled_call_ends_cancelled(qapp: Any) -> None:
@@ -763,11 +781,89 @@ def test_an_empty_registry_teaches_instead_of_showing_nothing(qapp: Any) -> None
     assert not dock.operations.isEnabled()
     assert not dock.empty_state.isHidden()
     assert dock.empty_state.findChild(type(dock.summary), "emptyTitle").text() == "还没有注册的操作"
-    assert dock.result.isHidden()
+    assert dock.tabs.isHidden()
     assert dock.result_summary.isHidden()
     assert not dock.run_button.isEnabled()
     assert not dock.cancel_button.isEnabled()
     assert not dock.copy_button.isEnabled()
+
+
+# --- 记录的三块 / the record's three blocks ------------------------------------
+
+
+def test_a_record_is_split_into_meta_result_and_raw(qapp: Any) -> None:
+    """一次成功调用的记录，在同一屏上分成三块：元信息、结果、原始 JSON。
+
+    One successful record, three blocks on one screen: meta, result, raw JSON.
+    """
+
+    dock = _dock(FakeEngine(run_sync=_record(result={"layer_count": 0})))
+    assert dock.tabs.isHidden()
+    assert not dock.record_hint.isHidden()
+
+    dock.run()
+
+    assert not dock.tabs.isHidden()
+    assert dock.record_hint.isHidden()
+    assert [dock.tabs.tabText(row) for row in range(dock.tabs.count())] == [
+        "执行信息",
+        "结果",
+        "原始 JSON",
+    ]
+    meta = _meta(dock)
+    assert meta["操作"] == "demo.op"
+    assert meta["状态"] == "SUCCEEDED"
+    assert meta["执行 ID"] == "e1"
+    assert meta["进度"] == "100%"
+    assert "耗时" in meta
+    # result 只出现在自己那一块，元信息里没有它的行
+    # result appears in its own block only; the meta has no row for it
+    assert "result" not in meta
+    assert json.loads(dock.result.toPlainText()) == {"layer_count": 0}
+    raw = json.loads(dock.raw.toPlainText())
+    assert raw["execution_id"] == "e1"
+    assert raw["result"] == {"layer_count": 0}
+    # 结果就绪时它自己翻开到前面 / the result turns to the front once it exists
+    assert dock.tabs.currentWidget() is dock.result
+
+
+def test_a_failed_record_has_no_result_block(qapp: Any) -> None:
+    """失败没有 ``result``，所以那个标签页不出现；错误是元信息里的一行。
+
+    A failure has no ``result``, so that tab is absent; the error is a row in the meta.
+    """
+
+    engine = FakeEngine(
+        run_sync=_record(
+            ExecutionStatus.FAILED,
+            error=ErrorDetail(code=PATH_NOT_ALLOWED, message="absolute paths only"),
+        )
+    )
+    dock = _dock(engine)
+
+    dock.run()
+
+    assert dock.tabs.isTabVisible(1) is False
+    assert dock.result.toPlainText() == ""
+    assert _meta(dock)["错误"] == f"{PATH_NOT_ALLOWED}：absolute paths only"
+    assert json.loads(dock.raw.toPlainText())["status"] == "FAILED"
+
+
+def test_a_field_without_a_value_gets_no_row(qapp: Any) -> None:
+    """没结束的调用没有结束时间与耗时，成功的那一条没有错误行。
+
+    A call that has not finished has no end time and no duration; a successful one has no
+    error row.
+    """
+
+    dock = _dock(FakeEngine(run_sync=_record(ExecutionStatus.RUNNING)))
+
+    dock.run()
+
+    meta = _meta(dock)
+    assert "创建时间" in meta
+    assert "开始时间" not in meta and "结束时间" not in meta and "耗时" not in meta
+    assert "错误" not in meta
 
 
 # --- 键盘 / the keyboard --------------------------------------------------------
@@ -825,10 +921,10 @@ def test_the_failed_state_survives_the_dock_minimum(qapp: Any) -> None:
 
     body = dock.widget()
     hint = dock.error_hint
-    bottom = dock.result.mapTo(body, QPoint(0, 0)).y() + dock.result.height()
+    bottom = dock.tabs.mapTo(body, QPoint(0, 0)).y() + dock.tabs.height()
     assert dock.feedback.height() >= dock.feedback.heightForWidth(dock.feedback.width())
     assert hint.height() >= hint.heightForWidth(hint.width()), "the hint lost its last line"
-    assert dock.result.height() >= dock.result.minimumHeight()
+    assert dock.tabs.height() >= dock.tabs.minimumHeight()
     assert bottom + 16 <= body.height(), "the record was pushed out of the body"
     assert dock.params.height() < dock.form_host.sizeHint().height()
     window.close()
@@ -843,17 +939,17 @@ def test_a_failure_without_a_record_does_not_show_the_idle_hint(qapp: Any) -> No
     engine = FakeEngine(run_sync=FrameworkError(ENGINE_CLOSING, "the engine is shutting down"))
     dock = OperationDock(FakeRegistry(_spec("a.op"), _spec("b.op")), engine)
 
-    assert dock.result.hint.text().startswith("运行一次后")
+    assert dock.tabs.isHidden()
+    assert dock.record_hint.text().startswith("运行一次后")
 
     dock.run()
 
-    assert dock.result.toPlainText() == ""
-    assert "没有产生执行记录" in dock.result.hint.text()
-    assert not dock.result.hint.isHidden()
+    assert dock.tabs.isHidden()
+    assert "没有产生执行记录" in dock.record_hint.text()
 
     dock.operations.setCurrentIndex(1)
 
-    assert dock.result.hint.text().startswith("运行一次后")
+    assert dock.record_hint.text().startswith("运行一次后")
 
 
 def test_a_run_hands_the_keyboard_back(qapp: Any) -> None:
@@ -944,11 +1040,13 @@ def test_the_painted_hint_clears_the_contrast_floor(qapp: Any) -> None:
     """空字段里的默认值是文字，所以它必须读起来像文字。
 
     在两种调色板下按控件实际画出的像素量：上一版守卫断言的调色板角色 Qt 根本没用，所以它
-    一直绿着，而提示实际只有 3.3:1。
+    一直绿着，而提示实际只有 3.3:1。记录区那句话现在是普通标签，它的对比度由 ``theme.pairs()``
+    量（次要色压在表面上）。
 
     The default value in an empty field is text, so it must read as text. Measured on the
     pixels the widget paints, in both palettes: an earlier guard asserted a palette role Qt
-    never used, so it stayed green while the hint rendered at 3.3:1.
+    never used, so it stayed green while the hint rendered at 3.3:1.  The record area's
+    sentence is a plain label now, and ``theme.pairs()`` measures it.
     """
 
     original = QApplication.palette()
@@ -959,7 +1057,6 @@ def test_the_painted_hint_clears_the_contrast_floor(qapp: Any) -> None:
             dock.show()
             QTest.qWait(60)
             assert _painted_contrast(dock.editors["count"][1]) >= theme.BODY
-            assert _painted_contrast(dock.result) >= theme.BODY
             dock.close()
     finally:
         QApplication.setPalette(original)
@@ -1029,7 +1126,8 @@ def test_a_background_operation_is_submitted_and_polled_until_it_ends(qapp: Any)
     assert dock.cancel_button.isEnabled()
     assert _wait_until(lambda: not dock.timer.isActive())
     assert [call[0] for call in engine.calls] == ["submit", "get", "get"]
-    assert json.loads(dock.result.toPlainText())["status"] == "SUCCEEDED"
+    assert json.loads(dock.raw.toPlainText())["status"] == "SUCCEEDED"
+    assert json.loads(dock.result.toPlainText()) == {"total": 3}
     assert not dock.cancel_button.isEnabled()
 
 
@@ -1093,7 +1191,7 @@ def test_cancel_shows_the_receipt_then_the_cancelled_record(qapp: Any) -> None:
     assert engine.calls[-1] == ("cancel", "e1")
     assert "accepted=True" in dock.result_summary.text()
     assert _wait_until(lambda: not dock.timer.isActive())
-    assert json.loads(dock.result.toPlainText())["status"] == "CANCELLED"
+    assert json.loads(dock.raw.toPlainText())["status"] == "CANCELLED"
 
 
 def test_copy_json_puts_the_record_on_the_clipboard(qapp: Any) -> None:
@@ -1102,7 +1200,7 @@ def test_copy_json_puts_the_record_on_the_clipboard(qapp: Any) -> None:
 
     dock.copy_button.click()
 
-    assert QApplication.clipboard().text() == dock.result.toPlainText()
+    assert QApplication.clipboard().text() == dock.raw.toPlainText()
     assert dock.copy_button.text() == "已复制"
 
 
@@ -1231,21 +1329,36 @@ class FakeIface:
     """坞窗生命周期用到的那几个接口方法，背后是真的主窗口。
 
     ``addDockWidget`` 用的是窗口自己的，所以 Qt 类型不对的坞窗在这里也会被拒，跟
-    ``QgisInterface`` 一样；接受任何对象的伪造对象测不出这一点。
+    ``QgisInterface`` 一样；接受任何对象的伪造对象测不出这一点。菜单与工具栏只记账，不画。
 
     The interface calls the dock lifecycle makes, backed by a real main window.
     ``addDockWidget`` is the window's own, so a dock of the wrong Qt type is refused here
     exactly as ``QgisInterface`` refuses it; a fake that accepted any object would not.
+    The menu and the toolbar only keep books, they draw nothing.
     """
 
     def __init__(self, window: QMainWindow) -> None:
         self.window = window
+        self.menu: list[tuple[str, Any]] = []
+        self.toolbar: list[Any] = []
 
     def addDockWidget(self, area: Any, dock: Any) -> None:
         self.window.addDockWidget(area, dock)
 
     def removeDockWidget(self, dock: Any) -> None:
         self.window.removeDockWidget(dock)
+
+    def addPluginToMenu(self, name: str, action: Any) -> None:
+        self.menu.append((name, action))
+
+    def removePluginMenu(self, name: str, action: Any) -> None:
+        self.menu = [item for item in self.menu if item[1] is not action]
+
+    def addToolBarIcon(self, action: Any) -> None:
+        self.toolbar.append(action)
+
+    def removeToolBarIcon(self, action: Any) -> None:
+        self.toolbar = [item for item in self.toolbar if item is not action]
 
     def mainWindow(self) -> QMainWindow:
         return self.window
@@ -1299,7 +1412,9 @@ def fake_qgis(qapp: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     core = types.ModuleType("qgis.core")
     core.__dict__.update(
         QgsProject=types.SimpleNamespace(instance=lambda: project),
-        QgsApplication=types.SimpleNamespace(instance=lambda: qapp),
+        QgsApplication=types.SimpleNamespace(
+            instance=lambda: qapp, getThemeIcon=lambda path: QIcon()
+        ),
         QgsTaskManager=lambda: manager,
         QgsSettings=lambda: types.SimpleNamespace(value=lambda key: None),
         QgsTask=_FakeTask,
@@ -1334,6 +1449,10 @@ def test_a_second_load_leaves_one_dock_and_unload_stops_its_timer(
     assert isinstance(second, OperationDock)
     assert second is not first
     assert iface.docks == [second]
+    # 入口也只留一个：上一个开关自己的 action 也撤了
+    # one entry survives too: the previous toggle took its own action with it
+    assert iface.menu == [(plugin.ENTRY_MENU, instance.action)]
+    assert iface.toolbar == [instance.action]
 
     # 活着的轮询就是一次后台调用留下的现场 / a live poll is what a background call leaves
     second.timer.start()
@@ -1358,6 +1477,7 @@ def test_two_loads_and_unloads_leave_nothing_docked(fake_qgis: Any, qapp: Any) -
         instance.unload()
 
         assert iface.docks == []
+        assert iface.menu == [] and iface.toolbar == []
         assert instance.dock is None
         assert not dock.timer.isActive()
 
@@ -1384,8 +1504,55 @@ def test_the_main_window_fallback_docks_and_undocks_through_that_window(
     dock = instance.dock
     assert isinstance(dock, OperationDock)
     assert window.dockWidgetArea(dock) == Qt.RightDockWidgetArea
+    # 这个界面既没有菜单也没有工具栏，所以坞窗就位而入口缺席
+    # this interface has neither a menu nor a toolbar, so the dock lands and the entry does not
+    assert instance.action is None
 
     instance.unload()
 
     assert instance.dock is None
     assert window.dockWidgetArea(dock) == Qt.NoDockWidgetArea
+
+
+def test_a_closed_dock_is_asked_back_by_the_menu_item_and_the_toggle(
+    fake_qgis: Any, qapp: Any
+) -> None:
+    """关掉坞窗之后还能把它要回来：插件菜单一项、工具栏一个开关，说的都是同一个坞窗。
+
+    A closed dock can be asked back: one plugin-menu item and one toolbar toggle, both
+    about that same dock.
+    """
+
+    iface = FakeIface(QMainWindow())
+    instance = plugin.Plugin(iface)
+
+    instance.initGui()
+    iface.window.show()
+    QTest.qWait(60)
+    dock = instance.dock
+    action = instance.action
+
+    assert iface.menu == [(plugin.ENTRY_MENU, action)]
+    assert iface.toolbar == [action]
+    assert action.text() == plugin.ENTRY_TEXT
+    assert action.isCheckable() and action.isChecked()
+    assert action.toolTip().strip() and action.statusTip().strip()
+
+    # 关掉的坞窗只是隐藏；开关把它要回来——同一个对象，记录还在
+    # a closed dock is only hidden; the toggle asks it back -- the same object, record and all
+    dock.hide()
+    assert not action.isChecked()
+    action.trigger()
+    QTest.qWait(30)
+    assert not dock.isHidden()
+    assert action.isChecked()
+
+    # 反方向也成立：开关能把它收起来 / the other direction holds too: the toggle puts it away
+    action.trigger()
+    assert dock.isHidden()
+
+    instance.unload()
+
+    assert iface.menu == [] and iface.toolbar == []
+    assert instance.action is None
+    iface.window.close()

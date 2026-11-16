@@ -4,9 +4,11 @@
 属性建一个编辑器，然后调 Python Console 会调的那两个引擎方法——主线程操作走 ``run_sync``，
 后台操作走 ``submit`` 加轮询。
 
-界面是一屏 Operate：选择器、参数、结果自上而下，只有一处强调色（运行按钮），语义色只出现在
-有意义的地方——状态胶囊和错误面板。每个颜色都来自 :mod:`qgis_agent_plugin.ui.theme`，那里从
-应用调色板推出来，所以这里没有字面量，坞窗跟着 QGIS 的浅色和深色主题走。
+界面是一屏 Operate：选择器、参数、记录自上而下，只有一处强调色（运行按钮），语义色只出现在
+有意义的地方——状态胶囊和错误面板。记录分成三块，一个标签页一块：执行信息（``result`` 以外的
+每个字段）、结果（``result`` 本身）、原始 JSON（整条记录，用来粘贴到别处）。每个颜色都来自
+:mod:`qgis_agent_plugin.ui.theme`，那里从应用调色板推出来，所以这里没有字面量，坞窗跟着 QGIS
+的浅色和深色主题走。
 
 Qt 在这里模块级 import（``plugin`` 和 runners 持同样的许可）；QGIS 完全没 import，因为坞窗只
 认识注册表、引擎和 Qt，前两个与 QGIS 无关。
@@ -16,11 +18,14 @@ registry already publishes, builds one editor per ``input_schema`` property, and
 calls the two engine methods the Python Console would call -- ``run_sync`` for a
 main-thread operation, ``submit`` plus polling for a background one.
 
-The surface is an Operate one: selector, parameters and result stack top to
+The surface is an Operate one: selector, parameters and record stack top to
 bottom, one accent (the run button), and semantic colour only where it means
-something -- the status capsule and the error panel.  Every colour comes from
-:mod:`qgis_agent_plugin.ui.theme`, which derives it from the application palette,
-so nothing here is a literal and the dock follows the QGIS light and dark themes.
+something -- the status capsule and the error panel.  The record is three blocks,
+one per tab: the execution info (every field but ``result``), the result itself,
+and the raw JSON (the whole record, for pasting elsewhere).  Every colour comes
+from :mod:`qgis_agent_plugin.ui.theme`, which derives it from the application
+palette, so nothing here is a literal and the dock follows the QGIS light and dark
+themes.
 
 Qt is imported at module level here (``plugin`` and the runners carry the same
 permission); QGIS is not imported at all, because the dock only knows the registry,
@@ -35,7 +40,6 @@ from datetime import datetime
 from typing import Any
 
 from qgis.PyQt.QtCore import (  # pyright: ignore[reportMissingImports]
-    QEvent,
     QLocale,
     QPointF,
     QRect,
@@ -73,6 +77,7 @@ from qgis.PyQt.QtWidgets import (  # pyright: ignore[reportMissingImports]
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -125,7 +130,7 @@ _FORM_MIN = 54
 # 记录区没有东西可显示时说的话；两种情形不是一回事，提交失败的那次不能被劝去再跑一遍。
 # What the record area says when it has nothing to show; the two are not the same
 # thing, and a failed submit must not be told to run again.
-_IDLE_HINT = "运行一次后，这里显示 ExecutionRecord 的 JSON。"
+_IDLE_HINT = "运行一次后，这里分成执行信息、结果和原始 JSON 三块。"
 _NO_RECORD_HINT = "本次调用没有产生执行记录。"
 
 # schema 的 ``type`` 怎么变成一个编辑器；没列出的都是单行文本。
@@ -362,46 +367,19 @@ class _Field(QLineEdit):
 
 
 class _RecordView(QPlainTextEdit):
-    """记录视图，外加没有记录时显示的提示。
+    """记录用的只读文本视图。
 
-    The record view, plus the hint it shows while there is no record.
+    The read-only text view a record is shown in.
 
-    Qt paints a ``QPlainTextEdit`` placeholder behind the stylesheet's back: the
-    widget palette is ignored and half-strength text comes out at 3.4:1 on the
-    light field.  The dock states its own hint in its own colour instead.  The
-    view takes whatever is left over, so its size hint stays modest -- a plain
-    text edit asks for a screenful and would squeeze the form before the record.
+    What it shows is always a record, so it carries no hint of its own: the empty
+    case is one sentence in ``OperationDock.record_hint``, which also says what the
+    three blocks are.  The view takes whatever is left over, so its size hint stays
+    modest -- a plain text edit asks for a screenful and would squeeze the form
+    before the record.
     """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.hint = QLabel("", self.viewport())
-        self.hint.setObjectName("resultHint")
-        self.hint.setWordWrap(True)
-        self.hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        self.hint.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.hint.hide()
-        self.viewport().installEventFilter(self)
-        self.textChanged.connect(self._sync_hint)
-
-    def set_hint(self, text: str, color: Any) -> None:
-        self.hint.setText(text)
-        self.hint.setStyleSheet(f"color: {color.name()}; background: transparent;")
-        self._sync_hint()
 
     def sizeHint(self) -> QSize:
         return QSize(320, 120)
-
-    def _sync_hint(self) -> None:
-        empty = not self.toPlainText()
-        if empty and self.hint.text():
-            self.hint.setGeometry(self.viewport().rect().adjusted(10, 8, -10, -8))
-        self.hint.setVisible(empty and bool(self.hint.text()))
-
-    def eventFilter(self, source: Any, event: Any) -> bool:
-        if source is self.viewport() and event.type() == QEvent.Resize:
-            self._sync_hint()
-        return super().eventFilter(source, event)
 
 
 class OperationDock(QDockWidget):
@@ -523,7 +501,7 @@ class OperationDock(QDockWidget):
         self.copy_button = QPushButton("复制 JSON")
         self.copy_button.setObjectName("text")
         self.copy_button.setAccessibleName("复制 JSON")
-        self.copy_button.setToolTip("把结果区的 JSON 复制到剪贴板")
+        self.copy_button.setToolTip("把整条执行记录的 JSON 复制到剪贴板")
         self.copy_button.clicked.connect(self.copy_json)
         self.capsule = QLabel(theme.STATE_LABELS["idle"])
         self.capsule.setObjectName("capsule")
@@ -568,14 +546,23 @@ class OperationDock(QDockWidget):
         self.result_summary.setObjectName("resultSummary")
         self.result_summary.setWordWrap(True)
         self.result_summary.setVisible(False)
-        self.result = _RecordView()
-        self.result.setObjectName("result")
-        self.result.setReadOnly(True)
-        self.result.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.result.set_hint(_IDLE_HINT, self.look.muted)
-        self.result.setMinimumHeight(110)
-        self.result.setAccessibleName("执行记录 JSON")
-        self.result.setAccessibleDescription("只读；可以全选复制，或点“复制 JSON”。")
+        self.record_hint = QLabel(_IDLE_HINT)
+        self.record_hint.setObjectName("recordHint")
+        self.record_hint.setWordWrap(True)
+        self.record_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.tabs = QTabWidget()
+        self.tabs.setAccessibleName("执行记录")
+        self.tabs.addTab(self._build_meta_page(), "执行信息")
+        self.result = self._record_view("result", "结果 JSON")
+        self.raw = self._record_view("raw", "执行记录 JSON")
+        self.tabs.addTab(self.result, "结果")
+        self.tabs.addTab(self.raw, "原始 JSON")
+        # 三个标签各自说清它装的是什么：标签页把内容藏起来了，就得在悬停时说清藏了什么。
+        # Each tab says what it holds: a tab hides its content, so hovering has to say which.
+        self.tabs.setTabToolTip(0, "这次调用的元信息：状态、执行 ID、工程代数、时间、耗时、错误。")
+        self.tabs.setTabToolTip(1, "执行记录里的 result 字段。")
+        self.tabs.setTabToolTip(2, "整条执行记录，可以直接粘贴到别处。")
+        self.tabs.setVisible(False)
         self.empty_state = self._build_empty_state()
 
         self.output = QWidget()
@@ -584,7 +571,11 @@ class OperationDock(QDockWidget):
         output.setSpacing(8)
         output.addWidget(self.feedback)
         output.addWidget(self.result_summary)
-        output.addWidget(self.result, 1)
+        # 三块与那句话占同一个位置：有记录就是三块，没有就是一句话。
+        # The three blocks and that sentence share one place: three blocks with a
+        # record, the sentence without one.
+        output.addWidget(self.record_hint, 1)
+        output.addWidget(self.tabs, 1)
         output.addWidget(self.empty_state, 1)
 
         self.space_before = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
@@ -601,6 +592,44 @@ class OperationDock(QDockWidget):
         column.addSpacing(12)
         column.addWidget(self.output, 1)
         self.setWidget(body)
+
+    def _record_view(self, name: str, label: str) -> _RecordView:
+        """一块只读的 JSON：能选中、不能改；高度由记录区定。
+
+        One page of read-only JSON: selectable, never editable, and as tall as the record
+        block needs it to be.
+        """
+
+        view = _RecordView()
+        view.setObjectName(name)
+        view.setReadOnly(True)
+        view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        view.setMinimumHeight(110)
+        view.setAccessibleName(label)
+        view.setAccessibleDescription("只读；可以全选复制，或点“复制 JSON”。")
+        return view
+
+    def _build_meta_page(self) -> QWidget:
+        """执行信息那一块：可滚动的「标签 → 值」两列，每次调用重建。
+
+        The execution-info block: a scrollable label/value grid, rebuilt per call.
+        """
+
+        self.meta_host = QWidget()
+        self.meta_form = QFormLayout(self.meta_host)
+        self.meta_form.setContentsMargins(0, 0, 0, 0)
+        self.meta_form.setHorizontalSpacing(12)
+        self.meta_form.setVerticalSpacing(6)
+        self.meta_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.meta_form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        self.meta_form.setLabelAlignment(Qt.AlignLeft | Qt.AlignTop)
+        area = QScrollArea()
+        area.setObjectName("metaArea")
+        area.setWidget(self.meta_host)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return area
 
     def _build_empty_state(self) -> QWidget:
         """注册表里什么都没有时，顶替结果的位置显示的东西。
@@ -651,7 +680,8 @@ class OperationDock(QDockWidget):
         if not specs:
             self.operations.setPlaceholderText("没有可用的操作")
             self.result_summary.setVisible(False)
-            self.result.setVisible(False)
+            self.tabs.setVisible(False)
+            self.record_hint.setVisible(False)
             self.empty_state.setVisible(True)
             self._apply_state("empty")
             self._fit_wrapping_blocks()
@@ -683,7 +713,7 @@ class OperationDock(QDockWidget):
         if not self.isVisible():
             return
         width = max(0, self.width() - 32)  # 正体左右各 16 px 边距 / the body's 16 px margins
-        for block in (self.details, self.feedback, self.empty_state):
+        for block in (self.details, self.feedback, self.record_hint, self.empty_state):
             if block.isHidden():
                 block.setMinimumHeight(0)
                 continue
@@ -704,7 +734,8 @@ class OperationDock(QDockWidget):
         self._record = None
         self._note = ""
         self.result.clear()
-        self.result.set_hint(_IDLE_HINT, self.look.muted)
+        self.raw.clear()
+        self._show_record_views(_IDLE_HINT)
         self._render_summary()
         self._hide_banner()
         if spec is not None:
@@ -801,7 +832,8 @@ class OperationDock(QDockWidget):
         self._note = ""
         self._record = None
         self.result.clear()
-        self.result.set_hint(_IDLE_HINT, self.look.muted)
+        self.raw.clear()
+        self._show_record_views(_IDLE_HINT)
         self._render_summary()
         self._hide_banner()
         self._focus = QApplication.focusWidget()
@@ -885,7 +917,7 @@ class OperationDock(QDockWidget):
         Put the shown record on the clipboard, and say so on the button that did it.
         """
 
-        text = self.result.toPlainText()
+        text = self.raw.toPlainText()
         if not text:
             return
         QApplication.clipboard().setText(text)
@@ -952,10 +984,27 @@ class OperationDock(QDockWidget):
         return arguments
 
     def _show_record(self, record: ExecutionRecord) -> None:
+        """三块各拿自己那部分；状态、胶囊与横幅跟记录保持一致。
+
+        Each block takes its own part; the capsule and the banner agree with the record.
+
+            ``result`` 只在成功时才存在，所以「结果」那个标签页也跟着缺席：一个空的标签页读
+            起来像还在加载，而失败或取消的调用根本没有结果可看。
+            ``result`` exists only on success, so the 结果 tab is absent with it: an empty tab
+            reads as still loading, and a failed or cancelled call has no result to show.
+        """
+
+        first = self._record is None
         self._record = record
-        self.result.setPlainText(
-            json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2)
-        )
+        self._fill_meta(record)
+        self.result.setPlainText(_json(record.result) if record.result is not None else "")
+        self.raw.setPlainText(_json(record.model_dump(mode="json")))
+        self.tabs.setTabVisible(1, record.result is not None)
+        self._show_record_views(_IDLE_HINT)
+        if first and record.result is not None:
+            # 一次运行只自己翻到「结果」一次，之后操作者选中哪个就是哪个。
+            # One run turns to the result by itself once; after that the operator's choice stands.
+            self.tabs.setCurrentWidget(self.result)
         state = _state_of(record.status)
         self._apply_state(state)
         self._render_summary()
@@ -967,6 +1016,37 @@ class OperationDock(QDockWidget):
             self._show_engine_error(record.error.code, record.error.message)
         else:
             self._hide_banner()
+
+    def _fill_meta(self, record: ExecutionRecord) -> None:
+        """把这条记录的元信息铺进两列；上一份的每一行先删掉。
+
+        Lay this record's meta out in two columns, after removing every row of the last one.
+        """
+
+        while self.meta_form.rowCount():
+            self.meta_form.removeRow(0)
+        for label, value in _record_rows(record):
+            name = QLabel(label)
+            name.setObjectName("metaLabel")
+            cell = QLabel(value)
+            cell.setObjectName("metaValue")
+            cell.setWordWrap(True)
+            # 执行 ID 与时间戳是要拿去别处用的，所以它们能被选中复制。
+            # An execution id and a timestamp get used elsewhere, so they can be selected.
+            cell.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.meta_form.addRow(name, cell)
+
+    def _show_record_views(self, hint: str) -> None:
+        """三块与那句话占同一个位置：有记录就三块，没有记录就是一句话。
+
+        The three blocks and that sentence share one place: three blocks with a record,
+        the sentence without one.
+        """
+
+        self.tabs.setVisible(self._record is not None)
+        self.record_hint.setVisible(self._record is None)
+        if self._record is None:
+            self.record_hint.setText(hint)
 
     def _show_failure(self, error: Exception) -> None:
         """引擎抛出的失败：没有记录回来，所以坞窗清空。
@@ -1015,7 +1095,8 @@ class OperationDock(QDockWidget):
         self._record = None
         self._note = ""
         self.result.clear()
-        self.result.set_hint(_NO_RECORD_HINT, self.look.muted)
+        self.raw.clear()
+        self._show_record_views(_NO_RECORD_HINT)
         self._render_summary()
         self._hide_banner()
         self._apply_state("failed")
@@ -1119,7 +1200,52 @@ class OperationDock(QDockWidget):
             bool(self._specs) and not self._busy and not live and self.state != "running"
         )
         self.cancel_button.setEnabled(live and not self._busy)
-        self.copy_button.setEnabled(bool(self.result.toPlainText()))
+        self.copy_button.setEnabled(bool(self.raw.toPlainText()))
+
+
+def _json(value: Any) -> str:
+    """一份 JSON，缩进两格，中文不转成转义序列——屏幕上要读到的是这些字。
+
+    One JSON document, indented two spaces, with its Chinese left as characters: what is on
+    screen has to read as itself.
+    """
+
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def _record_rows(record: ExecutionRecord) -> list[tuple[str, str]]:
+    """一条记录除 ``result`` 之外的每个字段，按坞窗的话排成「标签, 值」两列。
+
+    Every field of the record but ``result``, as (label, value) pairs in the dock's words.
+
+        没有值的字段整行不出现：一次没开始的调用没有开始时间，一个破折号只是在数我们不知道的
+        东西。``error`` 是那一行的反面——它只在失败时存在，而那时它是这一屏最要紧的一行。
+        A field with no value gets no row: a call that never started has no start time, and a
+        dash would only count what we do not know.  ``error`` is the other side of that: it
+        exists only when the call failed, and then it is the most important line here.
+    """
+
+    rows = [
+        ("操作", record.operation),
+        ("类型", record.kind.value),
+        ("策略", record.strategy.value),
+        ("状态", record.status.value),
+        ("执行 ID", record.execution_id),
+        ("工程代数", str(record.project_epoch)),
+        ("进度", f"{record.progress:g}%"),
+        ("创建时间", record.created_at),
+    ]
+    if record.started_at:
+        rows.append(("开始时间", record.started_at))
+    if record.finished_at:
+        rows.append(("结束时间", record.finished_at))
+        rows.append(("耗时", _duration(record)))
+    if record.error is not None:
+        detail = f"{record.error.code}：{record.error.message}"
+        if record.error.details:
+            detail = f"{detail}\n{_json(record.error.details)}"
+        rows.append(("错误", detail))
+    return rows
 
 
 def _state_of(status: ExecutionStatus) -> str:

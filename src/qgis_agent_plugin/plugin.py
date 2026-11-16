@@ -42,7 +42,7 @@ from contextlib import suppress
 from dataclasses import fields
 from typing import TYPE_CHECKING, Any
 
-import pydantic
+import pydantic  # pyright: ignore[reportMissingImports]
 
 if TYPE_CHECKING:
     from .core.config import Settings
@@ -68,6 +68,15 @@ SETTINGS_GROUP = "qgis_agent_plugin"
 # Where the session is published on ``iface``; the Python Console reads these.
 ENGINE_ATTRIBUTE = "agent_engine"
 REGISTRY_ATTRIBUTE = "agent_registry"
+
+# 坞窗在界面上的入口：插件菜单下的一项，加工具栏上的一个开关。图标取自 QGIS 自己的主题，所以
+# 浅色、深色与 Night Mapping 各拿各的那一版，插件不再自带一个图形资源。
+# Where the dock is reached from: one item under the plugin menu and one toolbar toggle.
+# The icon is QGIS's own theme, so the light, dark and Night Mapping themes each get their
+# version and the plugin ships no graphics of its own.
+ENTRY_MENU = "&QGIS Agent"
+ENTRY_TEXT = "操作面板"
+ENTRY_ICON = "/mActionTerminal.svg"
 
 
 def require_supported_pydantic(version: str) -> None:
@@ -101,7 +110,7 @@ def read_settings(store: Any = None) -> Settings:
     from .core.config import Settings
 
     if store is None:
-        from qgis.core import QgsSettings
+        from qgis.core import QgsSettings  # pyright: ignore[reportMissingImports]
 
         store = QgsSettings()
     return Settings.from_mapping(
@@ -122,7 +131,7 @@ def _message_log_handler() -> logging.Handler:
     QGIS is imported inside, so this module still loads in a bare interpreter.
     """
 
-    from qgis.core import Qgis, QgsMessageLog
+    from qgis.core import Qgis, QgsMessageLog  # pyright: ignore[reportMissingImports]
 
     class _MessageLogHandler(logging.Handler):
         """一条 logging 记录变成 QgsMessageLog 的一行。
@@ -240,8 +249,8 @@ def application_supervisor(manager: Any, engine: Any, runner: Any) -> Supervisor
     that removes it once the last task has ended.
     """
 
-    from qgis.core import QgsApplication
-    from qgis.PyQt.QtCore import QObject
+    from qgis.core import QgsApplication  # pyright: ignore[reportMissingImports]
+    from qgis.PyQt.QtCore import QObject  # pyright: ignore[reportMissingImports]
 
     class ApplicationSupervisor(Supervisor, QObject):
         """跟着应用而不是插件被删除的 supervisor。
@@ -280,12 +289,15 @@ class Plugin:
         # 承载坞窗的对象：``iface`` 自己，或者回退时用的那个窗口。
         # Whoever hosts the dock: ``iface`` itself, or the window the fallback used.
         self._dock_host: Any = None
+        # 菜单与工具栏上那个开关；界面吞不下它时为空。
+        # The menu and toolbar toggle; None when the interface cannot take it.
+        self.action: Any = None
         # 把 logging 转给 QgsMessageLog 的 handler；unload 时移除。
         # The handler that forwards logging to QgsMessageLog; removed on unload.
         self._log_handler: Any = None
 
     def initGui(self) -> None:
-        from qgis.core import QgsProject, QgsTaskManager
+        from qgis.core import QgsProject, QgsTaskManager  # pyright: ignore[reportMissingImports]
 
         from .core.context import ProjectLifecycle
         from .core.engine import OperationEngine
@@ -321,6 +333,7 @@ class Plugin:
         # would be a second truth.
         project.aboutToBeCleared.connect(self._project_about_to_be_cleared)
         self._create_dock(registry, self.engine)
+        self._create_entry()
         self._publish()
         # 日志转发装在最后：这之后没有会抛的步骤，装配中途死掉的会话不会把 handler 漏给进程；
         # unload 把它拆掉。
@@ -330,7 +343,7 @@ class Plugin:
         logging.getLogger(__package__).addHandler(self._log_handler)
 
     def unload(self) -> None:
-        from qgis.core import QgsProject
+        from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
         # 什么都没连上：重复卸载，或者根本没加载。
         # Nothing of ours connected: a repeated unload, or no load at all.
@@ -339,6 +352,7 @@ class Plugin:
         # 坞窗先撤：它的轮询否则会碰上一个正在关闭的引擎。
         # The dock goes first: its poll would otherwise touch an engine that is closing.
         self._remove_dock()
+        self._remove_entry()
         engine, supervisor = self.engine, self.supervisor
         self._withdraw()
         self.engine = self.registry = self.lifecycle = self.supervisor = None
@@ -381,6 +395,76 @@ class Plugin:
         except Exception:  # noqa: BLE001 - a Qt slot may not raise
             _LOGGER.exception("the project replacement could not be recorded")
 
+    def _create_entry(self) -> None:
+        """给坞窗装上能被重新找到的入口：插件菜单一项、工具栏一个开关。
+
+        An entry that finds the dock again: one item in the plugin menu, one toolbar toggle.
+
+            关掉的坞窗只是隐藏，所以入口做的就是把同一个对象再显示出来——不重建，会话与它的记录
+            都还在。承载不了坞窗的界面（无头的、伪造的）也没有入口。
+            A closed dock is only hidden, so the entry shows that same object again: nothing is
+            rebuilt and the session and its record are still there.  An interface that cannot
+            host a dock neither can carry an entry.
+        """
+
+        dock = self.dock
+        add_menu = getattr(self.iface, "addPluginToMenu", None)
+        add_icon = getattr(self.iface, "addToolBarIcon", None)
+        window_of = getattr(self.iface, "mainWindow", None)
+        if dock is None or add_menu is None or add_icon is None or window_of is None:
+            return
+        from qgis.core import QgsApplication  # pyright: ignore[reportMissingImports]
+        from qgis.PyQt.QtGui import QAction  # pyright: ignore[reportMissingImports]
+
+        # 重复的 initGui 只留一个开关，跟坞窗一样：上一次的那个先撤。
+        # A repeated initGui keeps one toggle, as it keeps one dock: the last one goes first.
+        self._remove_entry()
+        action = QAction(QgsApplication.getThemeIcon(ENTRY_ICON), ENTRY_TEXT, window_of())
+        action.setObjectName("QGISAgentOperationDockAction")
+        action.setCheckable(True)
+        action.setToolTip("打开或关闭 QGIS Agent 操作面板")
+        action.setStatusTip("打开或关闭 QGIS Agent 操作面板")
+        action.triggered.connect(self._toggle_dock)
+        # 坞窗自己的关闭按钮也要让这个开关弹起来：它说的是坞窗在干什么，不是上次谁点了它。
+        # The dock's own close button springs this toggle too: the toggle says what the dock is
+        # doing, not who clicked it last.
+        dock.visibilityChanged.connect(action.setChecked)
+        add_menu(ENTRY_MENU, action)
+        add_icon(action)
+        self.action = action
+
+    def _toggle_dock(self, visible: bool) -> None:
+        """开关的两个方向：把坞窗要回来，或者收起来。
+
+        The two directions of the toggle: ask for the dock again, or put it away.
+        """
+
+        dock = self.dock
+        if dock is None:
+            return
+        if visible:
+            dock.show()
+            dock.raise_()
+        else:
+            dock.hide()
+
+    def _remove_entry(self) -> None:
+        """把入口撤下来：菜单、工具栏、动作对象，一个都不留给下一个会话。
+
+        Take the entry down -- menu, toolbar and the action -- so nothing outlives the session.
+        """
+
+        action, self.action = self.action, None
+        if action is None:
+            return
+        remove_menu = getattr(self.iface, "removePluginMenu", None)
+        if remove_menu is not None:
+            remove_menu(ENTRY_MENU, action)
+        remove_icon = getattr(self.iface, "removeToolBarIcon", None)
+        if remove_icon is not None:
+            remove_icon(action)
+        action.deleteLater()
+
     def _create_dock(self, registry: OperationRegistry, engine: OperationEngine) -> None:
         """创建操作坞窗并把它挂到右边，每个会话一次。
 
@@ -404,7 +488,7 @@ class Plugin:
                 return
             add = host.addDockWidget
         try:
-            from qgis.PyQt.QtCore import Qt
+            from qgis.PyQt.QtCore import Qt  # pyright: ignore[reportMissingImports]
 
             from .ui.dock import OperationDock
         except ImportError:
