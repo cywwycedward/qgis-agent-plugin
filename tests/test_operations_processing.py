@@ -4,17 +4,18 @@
 带哪些字段、交给 ``qgis.processing.run()`` 的到底是什么、关键字里有几项、一次运行从反馈
 对象上留下什么、结果图层落到哪里、哪些值能作为 JSON 离开。假件刻意做窄：一个进程级的
 ``run`` 只回一个写死的答案、一个会自己记账的反馈基类、一个带 QGIS 真实「id 不可重复」
-规则的工程。这里没有参数校验、没有实例工厂、也没有 ``canExecute()``，因为操作不允许
-去碰它们。
+规则的工程。参数检查在这里是预设的答案：假定义只说“接受”或“不接受”，原因是 QGIS 的判据
+不是本模块的，要由验收跑去量；测试要证明的是操作问了 QGIS 的问题，并且把答案报成了同一句话。
 
 The processing operations against a fake QGIS: the question is whether the contract
 holds -- which fields a definition report carries, what reaches ``qgis.processing.run()``
 and with which keywords, what a run keeps from its feedback, what happens to a result
 layer, and which values can leave as JSON.  The fakes are deliberately narrow: one
 process-wide ``run`` with a canned answer, a feedback base class that notes what was
-asked of it, and a project with QGIS's real duplicate-id rule.  Nothing here models a
-parameter check, an instance factory or a ``canExecute()``, because the operations must
-not reach for one.
+asked of it, and a project with QGIS's real duplicate-id rule.  The parameter checks
+are canned answers here: a fake definition says "acceptable" or not, because the
+criterion is QGIS's and the acceptance run measures it; what a test proves is that the
+operation asks QGIS's questions and reports the answers in the same sentence.
 """
 
 from __future__ import annotations
@@ -29,18 +30,36 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, NamedTuple
 
-import pytest
-from pydantic import ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import OperationContext
-from qgis_agent_plugin.core.models import INTERNAL_ERROR, INVALID_INPUT, FrameworkError
-from qgis_agent_plugin.core.registry import OperationRegistry
-from qgis_agent_plugin.operations import processing as ops
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import (  # pyright: ignore[reportMissingImports]
+    OperationContext,
+)
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
+    INTERNAL_ERROR,
+    INVALID_INPUT,
+    FrameworkError,
+)
+from qgis_agent_plugin.core.registry import OperationRegistry  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations import processing as ops  # pyright: ignore[reportMissingImports]
 
-# 与 3.44.13 里 ``FlagHidden`` 的取值一致。
-# Mirrors ``FlagHidden`` in 3.44.13.
+# 与 3.44.13 里 ``FlagHidden`` / ``FlagOptional`` 的取值一致。
+# Mirrors ``FlagHidden`` / ``FlagOptional`` in 3.44.13.
 _FLAG_HIDDEN = 4
+_FLAG_OPTIONAL = 8
+
+# 同两个算法标志的真实取值；假件只需要它们互不相同。
+# The real values of the two algorithm flags; the fake only needs them to differ.
+_FLAG_HIDE_FROM_TOOLBOX = 64
+_FLAG_KNOWN_ISSUES = 128
+
+# 两个开关的 QgsSettings 键；fake 把持久化的值原样返回，字符串归一由被测代码自己做。
+# The two switches' QgsSettings keys; the fake returns the persisted value as it is, and the
+# code under test does the string normalisation.
+_SETTINGS_WARN_UNMATCHING_CRS = "Processing/Configuration/WARN_UNMATCHING_CRS"
+_SETTINGS_SHOW_KNOWN_ISSUES = "Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES"
 
 LOGGER_NAME = "qgis_agent_plugin.operations.processing"
 
@@ -134,18 +153,25 @@ class FakeFeedback:
 
 
 class FakeParameterDefinition:
-    """只装一个标志位的命名空间：报告唯一读的就是 ``FlagHidden``。
+    """只装报告读到的两个标志位的命名空间。
 
-    The namespace holding the one flag the definition report reads.
+    The namespace holding the two flags the reports read.
     """
 
     FlagHidden = _FLAG_HIDDEN
+    FlagOptional = _FLAG_OPTIONAL
 
 
 class FakeDefinition:
-    """一条参数定义里被摘要读到的全部内容，多的不建。
+    """一条参数定义里被摘要与检查读到的全部内容，多的不建。
 
-    Enough of one parameter definition for one summary.
+    检查的答案由用例预设：``checkValueIsAcceptable`` 与 ``isSupportedOutputValue`` 只把问题
+    记下来并回一个写死的判决，因为真正的判据在 QGIS 里，不在本模块。
+
+    Everything a summary and the checks read from one parameter definition.  The
+    verdicts are canned: ``checkValueIsAcceptable`` and ``isSupportedOutputValue``
+    record the question and answer from the fixture, because the criterion lives in
+    QGIS and not in this module.
     """
 
     def __init__(
@@ -156,12 +182,28 @@ class FakeDefinition:
         description: str = "",
         help_: str = "",
         hidden: bool = False,
+        destination: bool = False,
+        optional: bool = False,
+        create_by_default: bool = True,
+        gui_default: Any = None,
+        acceptable: bool = True,
+        supported: bool = True,
+        output_error: str = "the output value is not supported",
     ) -> None:
         self._name = name
         self._type = type_
         self._description = description
         self._help = help_
         self._hidden = hidden
+        self._destination = destination
+        self._optional = optional
+        self._create_by_default = create_by_default
+        self._gui_default = gui_default
+        self._acceptable = acceptable
+        self._supported = supported
+        self._output_error = output_error
+        self.checked: list[Any] = []
+        self.supported_checks: list[Any] = []
 
     def name(self) -> str:
         return self._name
@@ -176,7 +218,27 @@ class FakeDefinition:
         return self._help
 
     def flags(self) -> int:
-        return _FLAG_HIDDEN if self._hidden else 0
+        flags = _FLAG_HIDDEN if self._hidden else 0
+        return flags | (_FLAG_OPTIONAL if self._optional else 0)
+
+    def isDestination(self) -> bool:  # noqa: N802 - the native spelling
+        return self._destination
+
+    def checkValueIsAcceptable(self, value: Any) -> bool:  # noqa: N802 - the native spelling
+        self.checked.append(value)
+        return self._acceptable
+
+    def defaultValueForGui(self) -> Any:  # noqa: N802 - the native spelling
+        return self._gui_default
+
+    def createByDefault(self) -> bool:  # noqa: N802 - the native spelling
+        return self._create_by_default
+
+    def isSupportedOutputValue(  # noqa: N802 - the native spelling
+        self, value: Any, context: Any
+    ) -> tuple[bool, str]:
+        self.supported_checks.append((value, context))
+        return self._supported, self._output_error
 
 
 class FakeEnumDefinition(FakeDefinition):
@@ -219,9 +281,10 @@ class FakeOutput:
 
 
 class FakeAlgorithm:
-    """一条已注册的算法定义；一次运行从头到尾不会碰这个对象。
+    """一条已注册的算法定义；运行前桌面版问的每个问题都在这里回一个预设的答案。
 
-    One registered algorithm definition; a run never touches this object.
+    One registered algorithm definition; every question the desktop asks before a run
+    answers from a canned verdict here.
     """
 
     def __init__(
@@ -234,6 +297,10 @@ class FakeAlgorithm:
         help_: str = "",
         definitions: tuple[Any, ...] = (),
         outputs: tuple[Any, ...] = (),
+        flags: int = 0,
+        parameters_ok: bool = True,
+        parameters_message: str = "",
+        crs_ok: bool = True,
     ) -> None:
         self.algorithm_id = algorithm_id
         self._name = name
@@ -242,48 +309,76 @@ class FakeAlgorithm:
         self._help = help_
         self._definitions = definitions
         self._outputs = outputs
+        self._flags = flags
+        self._parameters_ok = parameters_ok
+        self._parameters_message = parameters_message
+        self._crs_ok = crs_ok
+        self.parameter_checks: list[tuple[dict[str, Any], Any]] = []
+        self.crs_checks: list[tuple[dict[str, Any], Any]] = []
 
     def id(self) -> str:
         return self.algorithm_id
 
-    def displayName(self) -> str:
+    def displayName(self) -> str:  # noqa: N802 - the native spelling
         return self._name
 
     def group(self) -> str:
         return self._group
 
-    def shortDescription(self) -> str:
+    def flags(self) -> int:
+        return self._flags
+
+    def shortDescription(self) -> str:  # noqa: N802 - the native spelling
         return self._short_description
 
-    def shortHelpString(self) -> str:
+    def shortHelpString(self) -> str:  # noqa: N802 - the native spelling
         return self._help
 
-    def parameterDefinitions(self) -> list[Any]:
+    def parameterDefinitions(self) -> list[Any]:  # noqa: N802 - the native spelling
         return list(self._definitions)
 
-    def outputDefinitions(self) -> list[Any]:
+    def outputDefinitions(self) -> list[Any]:  # noqa: N802 - the native spelling
         return list(self._outputs)
+
+    def checkParameterValues(  # noqa: N802 - the native spelling
+        self, parameters: dict[str, Any], context: Any
+    ) -> tuple[bool, str]:
+        self.parameter_checks.append((parameters, context))
+        return self._parameters_ok, self._parameters_message
+
+    def validateInputCrs(  # noqa: N802 - the native spelling
+        self, parameters: dict[str, Any], context: Any
+    ) -> bool:
+        self.crs_checks.append((parameters, context))
+        return self._crs_ok
 
 
 class FakeRegistry:
-    """``QgsProcessingRegistry`` 的替身，故意不提供实例工厂。
+    """``QgsProcessingRegistry`` 的替身，只建被查找的算法。
 
-    ``QgsProcessingRegistry``, deliberately without an instance factory.
+    ``QgsProcessingRegistry``, creating only the algorithms it is asked for.
     """
 
     def __init__(self) -> None:
         self.algorithms_by_id: dict[str, FakeAlgorithm] = {}
         self.parameter_types: dict[str, FakeParameterType] = {}
         self.lookups: list[str] = []
+        self.created: list[str] = []
 
     def algorithms(self) -> list[FakeAlgorithm]:
         return list(self.algorithms_by_id.values())
 
-    def algorithmById(self, algorithm_id: str) -> FakeAlgorithm | None:
+    def algorithmById(self, algorithm_id: str) -> FakeAlgorithm | None:  # noqa: N802
         self.lookups.append(algorithm_id)
         return self.algorithms_by_id.get(algorithm_id)
 
-    def parameterType(self, name: str) -> FakeParameterType | None:
+    def createAlgorithmById(  # noqa: N802 - the native spelling
+        self, algorithm_id: str
+    ) -> FakeAlgorithm | None:
+        self.created.append(algorithm_id)
+        return self.algorithms_by_id.get(algorithm_id)
+
+    def parameterType(self, name: str) -> FakeParameterType | None:  # noqa: N802
         return self.parameter_types.get(name)
 
 
@@ -305,6 +400,24 @@ class Call(NamedTuple):
         """
         return self.kwargs["feedback"]
 
+    @property
+    def context(self) -> Any:
+        """同一个调用里建出来的那个 processing 上下文。
+
+        The processing context built in the same call.
+        """
+        return self.kwargs["context"]
+
+
+class FakeContext:
+    """``QgsProcessingContext`` 的替身：只记得是哪个反馈对象建了它。
+
+    ``QgsProcessingContext``: only which feedback built it.
+    """
+
+    def __init__(self, feedback: Any) -> None:
+        self.feedback = feedback
+
 
 class FakeProcessing:
     """``qgis.processing``：每次运行记一条调用，回一个备好的答案。
@@ -319,6 +432,12 @@ class FakeProcessing:
         # ``(方法名, 参数)`` 重放到本次的反馈对象上。
         # Replayed on this call's feedback.
         self.messages: list[tuple[str, tuple[Any, ...]]] = []
+        self.contexts: list[FakeContext] = []
+
+    def createContext(self, feedback: Any) -> FakeContext:  # noqa: N802 - the native spelling
+        context = FakeContext(feedback)
+        self.contexts.append(context)
+        return context
 
     def run(self, algorithm_id: str, parameters: dict[str, Any], **kwargs: Any) -> Any:
         self.calls.append(Call(algorithm_id, parameters, kwargs))
@@ -344,6 +463,13 @@ class FakeQgis:
     def __init__(self) -> None:
         self.registry = FakeRegistry()
         self.processing = FakeProcessing()
+        # 桌面版的“参数 CRS 不一致就先警告”开关，默认开着。
+        # The desktop's "warn before executing if parameter CRSes do not match" switch, on by
+        # default.
+        self.settings: dict[str, Any] = {
+            _SETTINGS_WARN_UNMATCHING_CRS: True,
+            _SETTINGS_SHOW_KNOWN_ISSUES: False,
+        }
 
     def modules(self) -> dict[str, types.ModuleType]:
         holder = self
@@ -353,15 +479,34 @@ class FakeQgis:
             def processingRegistry() -> FakeRegistry:
                 return holder.registry
 
+        class AlgorithmFlag:
+            HideFromToolbox = _FLAG_HIDE_FROM_TOOLBOX
+            KnownIssues = _FLAG_KNOWN_ISSUES
+
+        class Qgis:
+            ProcessingAlgorithmFlag = AlgorithmFlag
+
+        class QgsProcessing:
+            TEMPORARY_OUTPUT = "TEMPORARY_OUTPUT"
+
+        class QgsSettings:
+            def value(self, key: str, default: Any = None) -> Any:
+                return holder.settings.get(key, default)
+
         core = fake_module(
             "qgis.core",
+            Qgis=Qgis,
             QgsApplication=QgsApplication,
+            QgsProcessing=QgsProcessing,
             QgsProcessingFeedback=FakeFeedback,
             QgsProcessingParameterDefinition=FakeParameterDefinition,
             QgsProcessingParameterEnum=FakeEnumDefinition,
             QgsMapLayer=FakeLayer,
+            QgsSettings=QgsSettings,
         )
-        processing = fake_module("qgis.processing", run=self.processing.run)
+        processing = fake_module(
+            "qgis.processing", run=self.processing.run, createContext=self.processing.createContext
+        )
         return {
             "qgis": fake_module("qgis", core=core, processing=processing),
             "qgis.core": core,
@@ -406,6 +551,10 @@ def install(
     short_description: str = "",
     help_: str = "",
     outputs: tuple[Any, ...] = (),
+    flags: int = 0,
+    parameters_ok: bool = True,
+    parameters_message: str = "",
+    crs_ok: bool = True,
 ) -> FakeAlgorithm:
     algorithm = FakeAlgorithm(
         algorithm_id,
@@ -415,6 +564,10 @@ def install(
         help_=help_,
         definitions=definitions,
         outputs=outputs,
+        flags=flags,
+        parameters_ok=parameters_ok,
+        parameters_message=parameters_message,
+        crs_ok=crs_ok,
     )
     fake.registry.algorithms_by_id[algorithm_id] = algorithm
     return algorithm
@@ -433,8 +586,24 @@ def parameter_values(**overrides: Any) -> dict[str, Any]:
     return values
 
 
-def run_params(parameters: dict[str, Any], algorithm_id: str = "native:test") -> Any:
-    return ops.ProcessingRunAlgorithmParams(algorithm_id=algorithm_id, parameters=parameters)
+def run_params(
+    parameters: dict[str, Any],
+    algorithm_id: str = "native:test",
+    **overrides: Any,
+) -> Any:
+    return ops.ProcessingRunAlgorithmParams(
+        algorithm_id=algorithm_id, parameters=parameters, **overrides
+    )
+
+
+def destination(name: str = "OUTPUT", **values: Any) -> FakeDefinition:
+    """一个输出参数定义：默认必填、默认创建、没有预设的 GUI 默认值。
+
+    One destination definition: required, created by default, with no GUI default value.
+    """
+
+    values.setdefault("description", "the output")
+    return FakeDefinition(name, "sink", destination=True, **values)
 
 
 def run(fake: FakeQgis, parameters: dict[str, Any] | None = None, **kwargs: Any) -> Any:
@@ -443,6 +612,8 @@ def run(fake: FakeQgis, parameters: dict[str, Any] | None = None, **kwargs: Any)
     One successful call, with the run's answer already in place.
     """
 
+    if "native:test" not in fake.registry.algorithms_by_id:
+        install(fake)
     fake.processing.results = kwargs.pop("results", {})
     return ops.ProcessingRunAlgorithm().execute_main(
         make_context(kwargs.pop("project", FakeProject())),
@@ -536,6 +707,15 @@ def test_an_algorithm_id_cannot_be_empty() -> None:
         ops.ProcessingGetAlgorithmInfoParams(algorithm_id="")
     with pytest.raises(ValidationError):
         ops.ProcessingRunAlgorithmParams(algorithm_id="", parameters={})
+
+
+def test_the_crs_answer_is_a_strict_boolean() -> None:
+    params = ops.ProcessingRunAlgorithmParams(algorithm_id="a", parameters={})
+    assert params.continue_on_crs_mismatch is False
+    with pytest.raises(ValidationError):
+        ops.ProcessingRunAlgorithmParams(
+            algorithm_id="a", parameters={}, continue_on_crs_mismatch="true"
+        )
 
 
 def test_parameters_must_be_a_json_object() -> None:
@@ -659,19 +839,56 @@ def test_outputs_are_checked_as_json_too() -> None:
 # --- processing.list_algorithms：列出算法 / listing the algorithms ----------
 
 
-def test_every_algorithm_is_listed_in_id_order(fake_qgis: FakeQgis) -> None:
-    install(fake_qgis, algorithm_id="zzz:second", name="Second", group="Group B")
-    install(fake_qgis, algorithm_id="aaa:first", name="First", group="Group A")
-    install(fake_qgis, algorithm_id="native:buffer", name="Buffer", group="Vector geometry")
+def test_the_list_uses_the_flat_group_name_order(fake_qgis: FakeQgis) -> None:
+    # 分组名先、算法名后；两个键都故意与 id 的顺序相反。
+    # Group name first, algorithm name second; both keys deliberately disagree with id order.
+    install(fake_qgis, algorithm_id="zzz:alpha", name="Zulu", group="Alpha")
+    install(fake_qgis, algorithm_id="native:beta", name="Bravo", group="Alpha")
+    install(fake_qgis, algorithm_id="aaa:gamma", name="Alpha", group="Beta")
 
     result = ops.ProcessingListAlgorithms().execute_main(
         make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
     )
     assert [(summary.id, summary.name, summary.group) for summary in result.algorithms] == [
-        ("aaa:first", "First", "Group A"),
-        ("native:buffer", "Buffer", "Vector geometry"),
-        ("zzz:second", "Second", "Group B"),
+        ("native:beta", "Bravo", "Alpha"),
+        ("zzz:alpha", "Zulu", "Alpha"),
+        ("aaa:gamma", "Alpha", "Beta"),
     ]
+
+
+def test_the_list_drops_what_the_toolbox_hides(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, algorithm_id="native:hidden", flags=_FLAG_HIDE_FROM_TOOLBOX)
+    install(fake_qgis, algorithm_id="native:known-issues", flags=_FLAG_KNOWN_ISSUES)
+    install(fake_qgis, algorithm_id="native:plain")
+
+    result = ops.ProcessingListAlgorithms().execute_main(
+        make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
+    )
+    assert [summary.id for summary in result.algorithms] == ["native:plain"]
+
+
+@pytest.mark.parametrize("stored", ["false", "0", 0], ids=["text", "zero", "int"])
+def test_a_persisted_off_value_keeps_a_known_issue_hidden(fake_qgis: FakeQgis, stored: Any) -> None:
+    fake_qgis.settings[_SETTINGS_SHOW_KNOWN_ISSUES] = stored
+    install(fake_qgis, algorithm_id="native:known-issues", flags=_FLAG_KNOWN_ISSUES)
+
+    result = ops.ProcessingListAlgorithms().execute_main(
+        make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
+    )
+    assert result.algorithms == []
+
+
+def test_a_known_issue_is_listed_once_the_desktop_setting_shows_it(fake_qgis: FakeQgis) -> None:
+    fake_qgis.settings[_SETTINGS_SHOW_KNOWN_ISSUES] = True
+    install(fake_qgis, algorithm_id="native:hidden", flags=_FLAG_HIDE_FROM_TOOLBOX)
+    install(fake_qgis, algorithm_id="native:known-issues", flags=_FLAG_KNOWN_ISSUES)
+
+    result = ops.ProcessingListAlgorithms().execute_main(
+        make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
+    )
+    # HideFromToolbox 不受这个开关影响；KnownIssues 跟着它。
+    # HideFromToolbox does not follow the switch; KnownIssues does.
+    assert [summary.id for summary in result.algorithms] == ["native:known-issues"]
 
 
 def test_an_empty_registry_lists_nothing(fake_qgis: FakeQgis) -> None:
@@ -810,13 +1027,16 @@ def test_info_refuses_an_unknown_algorithm_as_invalid_input(fake_qgis: FakeQgis)
     with pytest.raises(FrameworkError) as caught:
         info(fake_qgis, "native:missing")
     assert caught.value.code == INVALID_INPUT
-    assert caught.value.message == "the algorithm is not registered"
+    # 帮助路径自己的句子，与 ``algorithmHelp()`` 打印的那一句相同。
+    # The help path's own sentence, the one ``algorithmHelp()`` prints.
+    assert caught.value.message == 'Algorithm "native:missing" not found.'
 
 
 # --- processing.run_algorithm：这次调用 / the call --------------------------
 
 
 def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis)
     fake_qgis.processing.results = {"OUTPUT": "done"}
     parameters = {"INPUT": "roads", "DISTANCE": 5, "OUTPUT": "memory:"}
 
@@ -827,28 +1047,249 @@ def test_the_run_hands_over_the_id_the_parameters_and_a_feedback(fake_qgis: Fake
     assert len(fake_qgis.processing.calls) == 1
     call = fake_qgis.processing.calls[0]
     assert (call.algorithm_id, call.parameters) == ("native:test", parameters)
-    # 除了反馈对象，别的都不传。
-    # 不要 context、onFinish 或 is_child_algorithm。
-    # Nothing but the feedback object is passed.
-    # No context, onFinish or is_child_algorithm.
-    assert list(call.kwargs) == ["feedback"]
+    # 反馈与上下文一起交出去，上下文就是用它建的那个；没有 onFinish 或 is_child_algorithm。
+    # The feedback and the context travel together, the context built from that feedback; no
+    # onFinish or is_child_algorithm.
+    assert sorted(call.kwargs) == ["context", "feedback"]
     assert isinstance(call.feedback, FakeFeedback)
+    assert call.context.feedback is call.feedback
+    assert fake_qgis.processing.contexts == [call.context]
     assert result.algorithm_id == "native:test"
     assert result.outputs == {"OUTPUT": "done"}
     assert result.messages == []
 
 
-def test_the_run_never_asks_the_registry_for_an_instance(fake_qgis: FakeQgis) -> None:
-    """假注册表没有 ``createAlgorithmById``，真要去调就会抛 ``AttributeError``。
+def test_the_run_resolves_the_id_through_the_registry_factory(fake_qgis: FakeQgis) -> None:
+    """桌面版运行路径用 ``createAlgorithmById`` 拿实例；这里也一样。
 
-    The fake registry has no ``createAlgorithmById``; a call to it would AttributeError.
+    The desktop's run path takes its instance from ``createAlgorithmById``; so does this.
     """
     install(fake_qgis)
-    assert not hasattr(fake_qgis.registry, "createAlgorithmById")
 
     run(fake_qgis)
 
+    assert fake_qgis.registry.created == ["native:test"]
     assert fake_qgis.registry.lookups == []
+
+
+def test_an_unknown_algorithm_is_invalid_input_before_anything_is_built(
+    fake_qgis: FakeQgis,
+) -> None:
+    with pytest.raises(FrameworkError) as caught:
+        ops.ProcessingRunAlgorithm().execute_main(
+            make_context(FakeProject()), run_params({}, algorithm_id="native:nope")
+        )
+    assert caught.value.code == INVALID_INPUT
+    # 运行路径的句子，连结尾换行也一起带回来。
+    # The run path's sentence, its trailing newline included.
+    assert caught.value.message == "Error: Algorithm native:nope not found\n"
+    assert fake_qgis.processing.contexts == []
+    assert fake_qgis.processing.calls == []
+
+
+# --- processing.run_algorithm：桌面版点“运行”前问的问题 / the questions before Run
+
+
+def test_a_missing_required_destination_gets_the_desktop_temporary_output(
+    fake_qgis: FakeQgis,
+) -> None:
+    output = destination()
+    install(fake_qgis, FakeDefinition("DISTANCE", "number"), output)
+
+    run(fake_qgis, {"DISTANCE": 5})
+
+    call = fake_qgis.processing.calls[0]
+    assert call.parameters == {"DISTANCE": 5, "OUTPUT": "TEMPORARY_OUTPUT"}
+    # 面板也会检查它自己的默认值，所以补上的值不是“跳过检查”。
+    # The panel checks its own default too, so a filled value is not a skipped check.
+    assert [value for value, _ in output.supported_checks] == ["TEMPORARY_OUTPUT"]
+
+
+def test_a_destination_the_caller_named_is_kept(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, destination())
+
+    run(fake_qgis, {"OUTPUT": "memory:"})
+    # ``None`` 是桌面版的“跳过输出”，不是“用默认值”。
+    # ``None`` is the desktop's "skip output", not "use the default".
+    run(fake_qgis, {"OUTPUT": None})
+
+    assert fake_qgis.processing.calls[0].parameters == {"OUTPUT": "memory:"}
+    assert fake_qgis.processing.calls[1].parameters == {"OUTPUT": None}
+
+
+def test_an_optional_destination_that_is_off_by_default_stays_absent(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, destination("REPORT", optional=True, create_by_default=False))
+
+    run(fake_qgis, {})
+
+    assert fake_qgis.processing.calls[0].parameters == {}
+
+
+def test_an_optional_destination_that_is_on_by_default_gets_the_temporary_output(
+    fake_qgis: FakeQgis,
+) -> None:
+    install(fake_qgis, destination("REPORT", optional=True, create_by_default=True))
+
+    run(fake_qgis, {})
+
+    assert fake_qgis.processing.calls[0].parameters == {"REPORT": "TEMPORARY_OUTPUT"}
+
+
+def test_a_hidden_destination_is_never_filled(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, destination(hidden=True))
+
+    run(fake_qgis, {})
+
+    assert fake_qgis.processing.calls[0].parameters == {}
+
+
+def test_a_gui_default_wins_over_the_temporary_output(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, destination(gui_default="fixed.gpkg"))
+
+    run(fake_qgis, {})
+
+    assert fake_qgis.processing.calls[0].parameters == {"OUTPUT": "fixed.gpkg"}
+
+
+def test_the_panel_sentence_is_the_one_for_a_bad_parameter(fake_qgis: FakeQgis) -> None:
+    bad = FakeDefinition("DISTANCE", "number", description="Distance", acceptable=False)
+    install(fake_qgis, bad, destination())
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {"DISTANCE": "abc"})
+
+    assert caught.value.code == INVALID_INPUT
+    assert caught.value.message == "Wrong or missing parameter value: Distance"
+    assert bad.checked == ["abc"]
+    assert fake_qgis.processing.calls == []
+
+
+def test_a_missing_parameter_is_checked_with_the_widgets_default(fake_qgis: FakeQgis) -> None:
+    # 面板的控件一出生就带着默认值，提交时也把它放进 map；缺键的 enum 在 QGIS 自己那里不会
+    # 回落到默认值，所以这里必须补。
+    # The panel's widget starts with the default and submits it; QGIS itself does not fall back
+    # to the default for an enum whose key is missing, so it has to be filled here.
+    predicate = FakeDefinition("PREDICATE", "enum", description="Predicate", gui_default=[0])
+    install(fake_qgis, FakeDefinition("INPUT", "source"), predicate)
+
+    run(fake_qgis, {"INPUT": "roads"})
+
+    assert predicate.checked == [[0]]
+    assert fake_qgis.processing.calls[0].parameters == {"INPUT": "roads", "PREDICATE": [0]}
+
+
+def test_a_parameter_the_caller_named_wins_over_the_default(fake_qgis: FakeQgis) -> None:
+    predicate = FakeDefinition("PREDICATE", "enum", description="Predicate", gui_default=[0])
+    install(fake_qgis, predicate)
+
+    run(fake_qgis, {"PREDICATE": [2]})
+
+    assert predicate.checked == [[2]]
+    assert fake_qgis.processing.calls[0].parameters == {"PREDICATE": [2]}
+
+
+def test_a_missing_parameter_without_a_default_is_checked_as_empty(fake_qgis: FakeQgis) -> None:
+    bad = FakeDefinition("INPUT", "source", description="Input layer", acceptable=False)
+    install(fake_qgis, bad)
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {})
+
+    assert caught.value.message == "Wrong or missing parameter value: Input layer"
+    assert bad.checked == [None]
+
+
+def test_a_hidden_parameter_is_not_checked_by_the_panel(fake_qgis: FakeQgis) -> None:
+    hidden = FakeDefinition("OPTIONS", "string", hidden=True, acceptable=False)
+    install(fake_qgis, hidden)
+
+    run(fake_qgis, {"OPTIONS": "x"})
+
+    assert hidden.checked == []
+
+
+def test_an_unsupported_output_value_is_invalid_input_with_the_qgis_sentence(
+    fake_qgis: FakeQgis,
+) -> None:
+    sentence = "“.zzz” files are not supported as outputs for this algorithm"
+    output = destination(supported=False, output_error=sentence)
+    install(fake_qgis, output)
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {"OUTPUT": r"C:\out\x.zzz"})
+
+    assert caught.value.code == INVALID_INPUT
+    assert caught.value.message == sentence
+    assert [value for value, _ in output.supported_checks] == [r"C:\out\x.zzz"]
+    assert fake_qgis.processing.calls == []
+
+
+def test_a_skipped_destination_is_not_extension_checked(fake_qgis: FakeQgis) -> None:
+    output = destination()
+    install(fake_qgis, output)
+
+    run(fake_qgis, {"OUTPUT": None})
+
+    assert output.supported_checks == []
+
+
+def test_a_crs_mismatch_is_refused_with_the_desktop_question(fake_qgis: FakeQgis) -> None:
+    algorithm = install(fake_qgis, crs_ok=False)
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {})
+
+    assert caught.value.code == INVALID_INPUT
+    assert caught.value.message == (
+        "Parameters do not all use the same CRS. This can cause unexpected results.\n"
+        "Do you want to continue?"
+    )
+    assert len(algorithm.crs_checks) == 1
+    assert algorithm.crs_checks[0][1] is fake_qgis.processing.contexts[0]
+    assert fake_qgis.processing.calls == []
+
+
+def test_the_crs_answer_lets_the_run_continue(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis, crs_ok=False)
+
+    ops.ProcessingRunAlgorithm().execute_main(
+        make_context(FakeProject()),
+        run_params({}, continue_on_crs_mismatch=True),
+    )
+
+    assert len(fake_qgis.processing.calls) == 1
+
+
+@pytest.mark.parametrize("stored", [False, "false", "0", 0], ids=["bool", "text", "zero", "int"])
+def test_the_crs_question_is_skipped_for_every_persisted_off_value(
+    fake_qgis: FakeQgis, stored: Any
+) -> None:
+    # 桌面版把持久化的值按 ``str(value).lower() == "true"`` 归一；``'false'``/``'0'`` 不是真。
+    # The desktop normalises a persisted value with ``str(value).lower() == "true"``; ``'false'``
+    # and ``'0'`` are not true.
+    fake_qgis.settings[_SETTINGS_WARN_UNMATCHING_CRS] = stored
+    algorithm = install(fake_qgis, crs_ok=False)
+
+    run(fake_qgis)
+
+    assert algorithm.crs_checks == []
+    assert len(fake_qgis.processing.calls) == 1
+
+
+def test_a_parameter_check_failure_is_invalid_input_with_the_qgis_sentence(
+    fake_qgis: FakeQgis,
+) -> None:
+    sentence = "Could not load source layer for INPUT: no value specified for parameter"
+    algorithm = install(fake_qgis, parameters_ok=False, parameters_message=sentence)
+
+    with pytest.raises(FrameworkError) as caught:
+        run(fake_qgis, {})
+
+    assert caught.value.code == INVALID_INPUT
+    assert caught.value.message == sentence
+    assert algorithm.parameter_checks[0][0] == {}
+    assert algorithm.parameter_checks[0][1] is fake_qgis.processing.contexts[0]
+    assert fake_qgis.processing.calls == []
 
 
 def test_the_parameters_reach_the_run_as_they_arrived(fake_qgis: FakeQgis) -> None:
@@ -874,6 +1315,7 @@ def test_a_none_result_is_an_empty_success(fake_qgis: FakeQgis) -> None:
 
 
 def test_a_result_that_is_not_a_mapping_is_refused(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis)
     fake_qgis.processing.results = ["not", "a", "mapping"]
     with pytest.raises(ValidationError):
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
@@ -1037,6 +1479,7 @@ class RunFailed(RuntimeError):
 def test_an_exception_from_the_run_is_raised_unchanged(
     fake_qgis: FakeQgis, caplog: pytest.LogCaptureFixture
 ) -> None:
+    install(fake_qgis)
     native = "ERROR 1: PQconnectdb failed, connection to 127.0.0.1, port 1 refused"
     fake_qgis.processing.messages = [("pushInfo", (native,)), ("reportError", ("giving up", True))]
     fake_qgis.processing.error = RunFailed("the algorithm did not finish")
@@ -1059,13 +1502,14 @@ def test_an_exception_from_the_run_is_raised_unchanged(
 
 
 def test_a_failed_run_reports_no_result_and_no_messages(fake_qgis: FakeQgis) -> None:
+    install(fake_qgis)
     fake_qgis.processing.messages = [("reportError", ("broken", False))]
     fake_qgis.processing.error = RunFailed("no result")
     with pytest.raises(RunFailed):
         ops.ProcessingRunAlgorithm().execute_main(make_context(FakeProject()), run_params({}))
     # 记录由引擎写，失败时不返回。
     # The engine builds it; a failure returns nothing.
-    assert fake_qgis.processing.calls[0].kwargs.keys() == {"feedback"}
+    assert fake_qgis.processing.calls[0].kwargs.keys() == {"feedback", "context"}
 
 
 # --- 声明、类的摆放与导入规则 / the declarations, the class placement, the import rule ---

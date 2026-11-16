@@ -1,3 +1,9 @@
+# 静态分析器自己的解释器里没有 qgis/pydantic，所以本文件只关掉“找不到模块”这一类报告；能不能
+# 真的加载由 QGIS 解释器的验收跑证明。
+# The analyzer's own interpreter has no qgis/pydantic, so this file turns off only the
+# missing-module report; whether it really loads is proven by the QGIS interpreter's run.
+# pyright: reportMissingImports=false
+
 """验收用例集：一条用例一个函数，按用例编号登记在 ``CASES`` 里，只返回一行证据。
 
 期待落空就抛 ``AssertionError``，所以用例不可能顺手通过；这台机器给不了的环境抛 ``Skip`` 并带上
@@ -2452,20 +2458,63 @@ def processing_probe_provider() -> None:
 def p01_list_algorithms(ctx: Context) -> str:
     require_processing()
     processing_probe_provider()
-    native = {algorithm.id(): algorithm for algorithm in processing_algorithms()}
+    from qgis.core import Qgis, QgsSettings
+
+    algorithms = processing_algorithms()
+    # 工具箱总会挡掉 HideFromToolbox；KnownIssues 只在对应开关关着时挡掉（默认关着）。
+    # The toolbox always hides HideFromToolbox; it hides KnownIssues only while the matching
+    # switch is off (off by default).
+    excluded = int(Qgis.ProcessingAlgorithmFlag.HideFromToolbox)
+    shown = (
+        str(
+            QgsSettings().value("Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES", False)
+        ).lower()
+        == "true"
+    )
+    if not shown:
+        excluded |= int(Qgis.ProcessingAlgorithmFlag.KnownIssues)
+    visible = {
+        algorithm.id(): algorithm
+        for algorithm in algorithms
+        if not int(algorithm.flags()) & excluded
+    }
+    hidden = [algorithm.id() for algorithm in algorithms if algorithm.id() not in visible]
+    require(
+        bool(hidden),
+        "no registered algorithm carries HideFromToolbox or a hidden KnownIssues flag, so the "
+        "filter is not measurable here",
+    )
 
     record = ctx.run("processing.list_algorithms", {})
     equal(record.status, ExecutionStatus.SUCCEEDED, "processing.list_algorithms status")
     summaries = result_of(record)["algorithms"]
     ids = [summary["id"] for summary in summaries]
 
-    equal(ids, sorted(native), "the ids against processingRegistry().algorithms()")
+    expected = sorted(
+        (algorithm.group(), algorithm.displayName(), algorithm.id())
+        for algorithm in visible.values()
+    )
+    # 列表是扁平投影，按（分组名、算法名、id）排序；不是工具箱的 provider/分组树序。顺序不是
+    # 判据，这条用例只钉住列表自己声明的那个键。
+    # The list is a flat projection ordered by (group, display name, id), not the toolbox's
+    # provider/group tree; order is not a criterion, and this case pins only the key the list
+    # declares.
+    equal(
+        [(summary["group"], summary["name"], summary["id"]) for summary in summaries],
+        expected,
+        "the flat (group, display name, id) order",
+    )
+    equal(ids, [algorithm_id for _, _, algorithm_id in expected], "the visible ids")
     equal(len(ids), len(set(ids)), "duplicate ids")
     for summary in summaries:
         equal(sorted(summary), ["group", "id", "name"], "the fields of one summary")
-    sample = summaries[0]
-    equal(sample["name"], native[sample["id"]].displayName(), "a display name from the registry")
-    equal(sample["group"], native[sample["id"]].group(), "a group from the registry")
+    sample = next(summary for summary in summaries if summary["id"] == "native:buffer")
+    equal(
+        sample["name"],
+        visible["native:buffer"].displayName(),
+        "a display name from the registry",
+    )
+    equal(sample["group"], visible["native:buffer"].group(), "a group from the registry")
     for algorithm_id in PROBE_ALGORITHMS:
         require(
             algorithm_id in ids,
@@ -2474,9 +2523,9 @@ def p01_list_algorithms(ctx: Context) -> str:
     prefixes = {algorithm_id.split(":")[0] for algorithm_id in ids}
     require(len(prefixes) > 1, f"only one provider prefix in the list: {sorted(prefixes)}")
     return (
-        f"{len(ids)} algorithms in id order, exactly the live registry's "
-        f"({len(ids) - len(PROBE_ALGORITHMS)} from QGIS's own providers plus the "
-        f"{len(PROBE_ALGORITHMS)} this run registered), over {len(prefixes)} provider prefixes "
+        f"{len(ids)} algorithms in the flat (group, display name, id) order -- not the toolbox "
+        f"tree -- exactly the live registry minus the {len(hidden)} carrying HideFromToolbox or "
+        f"KnownIssues ({', '.join(sorted(hidden)[:3])}…), over {len(prefixes)} provider prefixes "
         f"({', '.join(sorted(prefixes))}), three fields each"
     )
 
@@ -2652,27 +2701,30 @@ def p03_algorithm_info_fields(ctx: Context) -> str:
 def p04_unknown_algorithm(ctx: Context) -> str:
     require_processing()
     missing = "native:p5-acceptance-not-an-algorithm"
+    help_sentence = f'Algorithm "{missing}" not found.'
+    run_sentence = f"Error: Algorithm {missing} not found\n"
+    before = project_layer_ids()
 
     info = ctx.run("processing.get_algorithm_info", {"algorithm_id": missing})
     equal(info.status, ExecutionStatus.FAILED, "get_algorithm_info on an unknown id")
     equal(error_code(info), INVALID_INPUT, "the code for an unknown algorithm")
+    equal(message_of(info), help_sentence, "the get_algorithm_info sentence")
 
-    # 运行不再预检 id：QGIS 自己的查找就会抛异常，异常按引擎报告意外失败的那条路进记录。
-    # The run no longer pre-checks the id: QGIS's own lookup raises, and the exception reaches the
-    # record the one way the engine reports an unexpected failure.
+    # 运行路径自己解析 id：未知 id 在调用 ``processing.run()`` 之前就被拒，仍是调用方的输入错误。
+    # The run path resolves the id itself: an unknown id is refused before ``processing.run()``
+    # and stays a caller input mistake.
     run = run_algorithm(ctx, missing, {})
     equal(run.status, ExecutionStatus.FAILED, "run_algorithm on an unknown id")
-    equal(error_code(run), INTERNAL_ERROR, "the run code for an unknown algorithm")
-    message = message_of(run)
-    equal(message, "QgsProcessingException: unexpected failure", "the run message")
-    require(missing not in message, f"the message repeats the algorithm id: {message!r}")
+    equal(error_code(run), INVALID_INPUT, "the run code for an unknown algorithm")
+    equal(message_of(run), run_sentence, "the run sentence")
+    equal(project_layer_ids(), before, "the layers after the unknown id")
     for record in (info, run):
         require(record.result is None, "a refused call carries a result")
     return (
-        "an unknown algorithm id is FAILED(INVALID_INPUT) from get_algorithm_info's own registry "
-        "lookup and FAILED(INTERNAL_ERROR) from run_algorithm, whose message is the engine's "
-        f"fixed {message!r}: QGIS's own exception, logged locally and never quoted into the "
-        "record; neither call carries a result and nothing was executed"
+        f"an unknown id is FAILED(INVALID_INPUT) from both operations, each with its own GUI "
+        f"action's sentence: {help_sentence!r} from get_algorithm_info (algorithmHelp's "
+        f"printout) and {run_sentence!r} from run_algorithm (the run path's exception, newline "
+        "included); neither call carries a result or adds a layer"
     )
 
 
@@ -2780,14 +2832,42 @@ def p08_scalar_output(ctx: Context) -> str:
             type(outputs[key]) in (int, float),
             f"{key} is not a JSON number: {outputs[key]!r}",
         )
-    require(
-        "OUTPUT" not in outputs and "OUTPUT_HTML_FILE" not in outputs,
-        f"a destination nobody asked for appeared: {sorted(outputs)}",
+
+    # 桌面版两个输出控件的默认值都是“临时输出”，所以两个键都出现：一个临时图层、一个临时 HTML。
+    # Both desktop output widgets default to a temporary output, so both keys appear: a temporary
+    # layer and a temporary HTML file.
+    statistics = output_layer(ctx, record, "OUTPUT")
+    require(statistics.isValid(), "the statistics layer is not valid")
+    equal(statistics.featureCount(), 1, "the statistics table's row count")
+    html = outputs["OUTPUT_HTML_FILE"]
+    require(isinstance(html, str), f"the HTML output is {html!r}, not a path")
+    require(Path(html).is_file(), f"the HTML output {html!r} was not written")
+
+    # ``None`` 是桌面版“跳过输出”的位置：两个键都不出现，标量照旧。
+    # ``None`` is the desktop's "skip output": neither key appears, and the scalars stay.
+    skipped = run_algorithm(
+        ctx,
+        "native:basicstatisticsforfields",
+        {
+            "INPUT_LAYER": layer_id,
+            "FIELD_NAME": "pop",
+            "OUTPUT": None,
+            "OUTPUT_HTML_FILE": None,
+        },
     )
+    equal(skipped.status, ExecutionStatus.SUCCEEDED, f"skipped outputs: {skipped.error}")
+    skipped_outputs = outputs_of(skipped)
+    require(
+        "OUTPUT" not in skipped_outputs and "OUTPUT_HTML_FILE" not in skipped_outputs,
+        f"a skipped output still appeared: {sorted(skipped_outputs)}",
+    )
+    equal(skipped_outputs["SUM"], fixtures.POP_TOTAL, "the sum with both outputs skipped")
     return (
-        f"a scalar-only run returned {len(outputs)} finite JSON numbers (COUNT=3, SUM=200.0, "
-        f"MEAN={outputs['MEAN']:.3f}) with no layer and no destination key, so no single-layer "
-        "output shape is assumed"
+        f"a scalar-only run returned {len(outputs) - 2} finite JSON numbers (COUNT=3, "
+        f"SUM=200.0, MEAN={outputs['MEAN']:.3f}) plus the desktop's two temporary outputs: the "
+        f"statistics layer ({statistics.featureCount()} row) and the HTML file it wrote, while "
+        'passing ``None`` for both destinations is the desktop\'s "skip output" and leaves the '
+        "scalars only"
     )
 
 
@@ -2973,26 +3053,32 @@ def p13_destination_policy(ctx: Context) -> str:
     equal(temporary.status, ExecutionStatus.SUCCEEDED, f"TEMPORARY_OUTPUT: {temporary.error}")
     require(output_layer(ctx, temporary, "OUTPUT").isValid(), "the temporary output layer")
 
-    # 非文件目的地现在由 QGIS 判：有的提供者照样回 SUCCEEDED，输出字面值 "memory:" 原样返回，
-    # 也不往工程里加图层。插件不再二次猜测，就按 QGIS 说的成功记，值也照它返回的写。
-    # Non-file destinations are QGIS's to judge now: some providers still answer SUCCEEDED with the
-    # literal "memory:" as the output value and no layer added.  The plugin does not second-guess
-    # that, and reports the success QGIS claims with the value it returned.
+    # 非文件目的地也由桌面版输出控件先判：GDAL 提供者不支持非文件输出，所以 "memory:" 在参数
+    # 面板里就会被拒；插件用的是同一条判据、同一句话。
+    # A non-file destination is judged by the desktop output widget first: the GDAL provider does
+    # not support non-file outputs, so "memory:" is refused in the panel; the plugin uses the
+    # same criterion and the same sentence.
     made_up = run_algorithm(
         ctx, "gdal:buffervectors", {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": "memory:"}
     )
+    equal(made_up.status, ExecutionStatus.FAILED, "a memory destination on the gdal provider")
     equal(
-        made_up.status,
-        ExecutionStatus.SUCCEEDED,
-        f"a memory destination on the gdal provider: {made_up.error}",
+        error_code(made_up),
+        INVALID_INPUT,
+        "the code for a memory destination on the gdal provider",
     )
-    equal(outputs_of(made_up), {"OUTPUT": "memory:"}, "the memory destination's output value")
+    equal(
+        message_of(made_up),
+        "This algorithm only supports disk-based outputs",
+        "the memory destination's sentence",
+    )
     require(project_layers().get("memory:") is None, "the project holds a layer named 'memory:'")
 
-    # 插件对目的地不再有任何判决：远程值也照样到 QGIS。这个值指向本机关闭的端口，所以验收的
-    # 请求出不了这台机器。
-    # The plugin has no destination verdict left: a remote value reaches QGIS too.  This one names a
-    # closed local port, so the acceptance request cannot leave the machine.
+    # 远程字形不在可写扩展名的判据里：它先过同一条输出控件判据，然后由 QGIS 去开；这个值指向
+    # 本机关闭的端口，所以验收的请求出不了这台机器。
+    # A remote spelling is not one the writable-extension criterion can judge: it passes the same
+    # output-widget criterion and then QGIS opens it; this value names a closed local port, so the
+    # acceptance request cannot leave the machine.
     remote = run_algorithm(
         ctx,
         "native:buffer",
@@ -3006,15 +3092,16 @@ def p13_destination_policy(ctx: Context) -> str:
     )
 
     return (
-        "a destination is handed to QGIS as it arrived: gdal:convertformat wrote a GeoPackage at "
-        f"the path the caller named ({target.stat().st_size} bytes) that opens with the source's "
-        f"{product.featureCount()} features, the source's wkb type and a non-null geometry on "
-        "every one of them, and the outputs value is that same path; native:buffer with "
-        'OUTPUT="TEMPORARY_OUTPUT" SUCCEEDED with its result layer in the project; '
-        'gdal:buffervectors with OUTPUT="memory:" also reports SUCCEEDED, with the literal '
-        '"memory:" as its output value and no layer in the project -- QGIS\'s own answer, which '
-        f"the plugin no longer second-guesses; and a /vsicurl destination is FAILED({remote_code}) "
-        "from QGIS, not PATH_NOT_ALLOWED from the plugin"
+        "a destination is judged by the desktop output widget and then handed to QGIS: "
+        f"gdal:convertformat wrote a GeoPackage at the path the caller named "
+        f"({target.stat().st_size} bytes) that opens with the source's {product.featureCount()} "
+        "features, the source's wkb type and a non-null geometry on every one of them, and the "
+        'outputs value is that same path; native:buffer with OUTPUT="TEMPORARY_OUTPUT" '
+        "SUCCEEDED with its result layer in the project; gdal:buffervectors with "
+        'OUTPUT="memory:" is FAILED(INVALID_INPUT) with the panel\'s own sentence (the GDAL '
+        "provider supports disk-based outputs only) instead of QGIS's misleading SUCCEEDED with "
+        f'the literal "memory:"; and a /vsicurl destination is FAILED({remote_code}) from QGIS, '
+        "not PATH_NOT_ALLOWED from the plugin"
     )
 
 
@@ -3131,40 +3218,215 @@ def p16_submit_cancel_queued(ctx: Context) -> str:
     )
 
 
-def p17_no_injected_destination(ctx: Context) -> str:
+def p17_gui_output_defaults(ctx: Context) -> str:
     require_processing()
     layer_id = cities_layer(ctx, "p17 cities")
     before = project_layer_ids()
     parameters = {"INPUT": layer_id, "DISTANCE": 1.0, "SEGMENTS": 8, "DISSOLVE": False}
 
+    # 参数面板总会给输出参数一个值，默认就是临时输出；插件补的是同一个值。
+    # The parameter panel always carries a destination value, a temporary output by default; the
+    # plugin fills in the same value.
     record = run_algorithm(ctx, "native:buffer", parameters)
-    equal(record.status, ExecutionStatus.FAILED, "a run without the required destination")
-    # QGIS 自己的参数校验拒了它，异常走引擎的意外失败，不是为本用例新造的插件错误码。
-    # QGIS's own parameter check refuses it, and the exception is the engine's unexpected failure,
-    # not a plugin code invented for this case.
-    equal(error_code(record), INTERNAL_ERROR, "the code for a missing destination")
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"a run without OUTPUT: {record.error}")
+    outputs = outputs_of(record)
+    equal(sorted(outputs), ["OUTPUT"], "the output keys")
+    layer = output_layer(ctx, record, "OUTPUT")
+    equal(layer.featureCount(), 5, "the buffered features")
+    require(layer.isTemporary(), "the filled destination is not a temporary output")
+    equal(sorted(project_layer_ids()), sorted([*before, layer.id()]), "the project's layers")
+    return (
+        "native:buffer without OUTPUT SUCCEEDED: the required destination got the desktop "
+        f"panel's own default (a temporary output), so the {layer.featureCount()}-feature result "
+        f"layer ({layer.id()[:8]}…) is in the project; the plugin reports the key it filled"
+    )
+
+
+def p18_parameter_value_refused(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p18 cities")
+    before = project_layer_ids()
+
+    # 面板逐参数问 ``checkValueIsAcceptable``，第一句不过的就带它的描述拒掉整次调用。
+    # The panel asks ``checkValueIsAcceptable`` per parameter and refuses the whole call with the
+    # first description that fails it.
+    bad_type = run_algorithm(
+        ctx, "native:buffer", {"INPUT": layer_id, "DISTANCE": "abc", "OUTPUT": "memory:"}
+    )
+    equal(bad_type.status, ExecutionStatus.FAILED, "a numeric parameter given text")
+    equal(error_code(bad_type), INVALID_INPUT, "the code for a numeric parameter given text")
+    equal(
+        message_of(bad_type),
+        "Wrong or missing parameter value: Distance",
+        "the sentence for a bad number",
+    )
+
+    missing = run_algorithm(ctx, "native:buffer", {"DISTANCE": 1.0, "OUTPUT": "memory:"})
+    equal(missing.status, ExecutionStatus.FAILED, "a required source left out")
+    equal(error_code(missing), INVALID_INPUT, "the code for a required source left out")
+    equal(
+        message_of(missing),
+        "Wrong or missing parameter value: Input layer",
+        "the sentence for a missing source",
+    )
+
+    equal(project_layer_ids(), before, "the layers after both refusals")
+
+    # PREDICATE 的控件默认值是 [0]；面板会把它一起放进 map，而 QGIS 自己对缺键的 enum 不回落
+    # 到默认值，所以这条只有补了默认值才会成功。
+    # PREDICATE's widget default is [0]; the panel carries it, and QGIS itself does not fall back
+    # to the default for a missing enum key, so this succeeds only once the default is filled.
+    first = cities_layer(ctx, "p18 first")
+    second = cities_layer(ctx, "p18 second")
+    defaulted = run_algorithm(
+        ctx,
+        "native:extractbylocation",
+        {"INPUT": first, "INTERSECT": second, "OUTPUT": "memory:"},
+    )
+    equal(defaulted.status, ExecutionStatus.SUCCEEDED, f"the filled default: {defaulted.error}")
+    require("OUTPUT" in outputs_of(defaulted), "the defaulted run produced no OUTPUT")
+    return (
+        "a text where native:buffer wants a number and a missing required source are both "
+        "FAILED(INVALID_INPUT) with the panel's own sentences "
+        f"({message_of(bad_type)!r} and {message_of(missing)!r}), and neither adds a layer; "
+        "native:extractbylocation without PREDICATE SUCCEEDED because its widget default [0] was "
+        "filled in (QGIS itself refuses the missing key)"
+    )
+
+
+def p19_output_extension_refused(ctx: Context) -> str:
+    require_processing()
+    layer_id = cities_layer(ctx, "p19 cities")
+    target = ctx.fixtures.root / "p19 output.zzz"
+
+    # 输出控件会按提供者的可写格式判目的地；QGIS 自己写的时候会把 .zzz 补成 .gpkg，面板不会。
+    # The output widget judges a destination by the provider's writable formats; QGIS itself would
+    # append .gpkg to .zzz when writing, the panel does not.
+    record = run_algorithm(
+        ctx, "native:buffer", {"INPUT": layer_id, "DISTANCE": 1.0, "OUTPUT": str(target)}
+    )
+    equal(record.status, ExecutionStatus.FAILED, "an unsupported output extension")
+    equal(error_code(record), INVALID_INPUT, "the code for an unsupported output extension")
     equal(
         message_of(record),
-        "QgsProcessingException: unexpected failure",
-        "the message for a missing destination",
+        "“.zzz” files are not supported as outputs for this algorithm",
+        "the sentence for an unsupported output extension",
+    )
+    written = list(ctx.fixtures.root.glob("p19 output*"))
+    require(not written, f"the refused destination still wrote {[path.name for path in written]}")
+    return (
+        "OUTPUT='p19 output.zzz' is FAILED(INVALID_INPUT) with the output widget's sentence and "
+        "writes no file, not even the .zzz.gpkg QGIS would have appended"
+    )
+
+
+def p20_crs_mismatch_question(ctx: Context) -> str:
+    require_processing()
+    if "gdal:clipvectorbypolygon" not in {algorithm.id() for algorithm in processing_algorithms()}:
+        raise Skip(
+            "gdal:clipvectorbypolygon is not registered here, so the CRS question cannot be "
+            "measured"
+        )
+
+    # 夹具里的要素没有几何，而 GDAL 的裁剪需要真的几何：这里直接在工程里搭一个点图层（4326）
+    # 和一个面掩膜（32633），两者的 CRS 不一致就是本用例要测的那件事。
+    # The fixtures carry no geometry, and GDAL's clip needs real geometry: this case builds a
+    # point layer (4326) and a polygon mask (32633) in the project, and their mismatched CRSes are
+    # what the case measures.
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsProject, QgsVectorLayer
+
+    points = QgsVectorLayer("Point?crs=EPSG:4326&field=id:integer", "p20 points", "memory")
+    provider = points.dataProvider()
+    for index in range(3):
+        feature = QgsFeature(points.fields())
+        feature.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(float(index), float(index))))
+        feature["id"] = index
+        provider.addFeature(feature)
+    points.updateExtents()
+    QgsProject.instance().addMapLayer(points)
+
+    # 掩膜在 32633 里盖住这些点变换后的位置（约 166000E），所以裁剪会真的留下一层要素。
+    # The mask covers where those points land in 32633 (about 166000E), so the clip really keeps
+    # features.
+    mask = QgsVectorLayer("Polygon?crs=EPSG:32633&field=id:integer", "p20 mask", "memory")
+    provider = mask.dataProvider()
+    feature = QgsFeature(mask.fields())
+    feature.setGeometry(
+        QgsGeometry.fromPolygonXY(
+            [
+                [
+                    QgsPointXY(-1_000_000, -1_000_000),
+                    QgsPointXY(-1_000_000, 1_000_000),
+                    QgsPointXY(1_000_000, 1_000_000),
+                    QgsPointXY(1_000_000, -1_000_000),
+                ]
+            ]
+        )
+    )
+    feature["id"] = 1
+    provider.addFeature(feature)
+    mask.updateExtents()
+    QgsProject.instance().addMapLayer(mask)
+    before = project_layer_ids()
+
+    # 桌面版在参数 CRS 不一致时会问“要继续吗”，默认按钮是“否”；operation 用参数回答同一句。
+    # The desktop asks "do you want to continue?" when the parameters' CRSes differ, with "No" as
+    # the default button; the operation answers that question with a parameter.
+    parameters = {"INPUT": points.id(), "MASK": mask.id()}
+    refused = run_algorithm(ctx, "gdal:clipvectorbypolygon", parameters)
+    equal(refused.status, ExecutionStatus.FAILED, "a CRS mismatch with no answer")
+    equal(error_code(refused), INVALID_INPUT, "the code for a CRS mismatch with no answer")
+    equal(
+        message_of(refused),
+        "Parameters do not all use the same CRS. This can cause unexpected results.\n"
+        "Do you want to continue?",
+        "the CRS question",
     )
     equal(project_layer_ids(), before, "the layers after the refusal")
 
-    # 插件自己从不填这个键：真要是注入了 ``memory:``，这次调用本来会成功，因为同样的参数加上
-    # OUTPUT 就成功。
-    # The plugin never fills the key in: had it injected ``memory:``, this very call would have
-    # succeeded, because the same parameters plus OUTPUT do.
-    with_destination = run_algorithm(ctx, "native:buffer", {**parameters, "OUTPUT": "memory:"})
-    equal(
-        with_destination.status,
-        ExecutionStatus.SUCCEEDED,
-        f"the same parameters with OUTPUT: {with_destination.error}",
+    continued = ctx.run(
+        "processing.run_algorithm",
+        {
+            "algorithm_id": "gdal:clipvectorbypolygon",
+            "parameters": parameters,
+            "continue_on_crs_mismatch": True,
+        },
     )
+    equal(continued.status, ExecutionStatus.SUCCEEDED, f"the answered run: {continued.error}")
+    output = outputs_of(continued)["OUTPUT"]
+    require(isinstance(output, str), f"the continued run's OUTPUT is {output!r}, not a path")
+    require(Path(output).is_file(), f"the continued run wrote no file at {output!r}")
+    written = QgsVectorLayer(output, "p20 written", "ogr")
+    require(written.isValid(), f"the continued run's output {output!r} is not a readable layer")
+
+    # 开关关着 = 桌面版不问。持久化的是字符串 'false'，只有按 ProcessingConfig 的读法才算关。
+    # The switch off means the desktop does not ask.  The persisted value is the string 'false',
+    # and it is off only when read the way ProcessingConfig reads it.
+    from qgis.core import QgsSettings
+
+    settings = QgsSettings()
+    switch = "Processing/Configuration/WARN_UNMATCHING_CRS"
+    settings.setValue(switch, "false")
+    settings.sync()
+    try:
+        unchecked = run_algorithm(ctx, "gdal:clipvectorbypolygon", parameters)
+        equal(unchecked.status, ExecutionStatus.SUCCEEDED, f"the switch-off run: {unchecked.error}")
+        unchecked_output = outputs_of(unchecked)["OUTPUT"]
+        require(
+            Path(unchecked_output).is_file(),
+            f"the switch-off run wrote no file at {unchecked_output!r}",
+        )
+    finally:
+        settings.remove(switch)
+        settings.sync()
+
     return (
-        "native:buffer without OUTPUT is FAILED(INTERNAL_ERROR) with the fixed message "
-        f"{message_of(record)!r} (QGIS's own QgsProcessingException) and adds no layer, while the "
-        'same parameters plus OUTPUT="memory:" SUCCEED: the plugin injects no destination (and an '
-        "algorithm with no destination keeps its own result keys, P08/P09)"
+        "gdal:clipvectorbypolygon on a 4326 input and a 32633 mask is FAILED(INVALID_INPUT) "
+        f"with the desktop's question ({message_of(refused)!r}) and adds nothing; the same call "
+        f"with continue_on_crs_mismatch=true writes a readable GeoPackage "
+        f"({written.featureCount()} feature(s)); with the desktop's warning switch persisted as "
+        "'false' the same parameters also run, so the question follows the desktop's switch and "
+        "its answer is a parameter"
     )
 
 
@@ -4142,7 +4404,10 @@ CASES = (
     ("P14", p14_output_ownership),
     ("P15", p15_non_json_output),
     ("P16", p16_submit_cancel_queued),
-    ("P17", p17_no_injected_destination),
+    ("P17", p17_gui_output_defaults),
+    ("P18", p18_parameter_value_refused),
+    ("P19", p19_output_extension_refused),
+    ("P20", p20_crs_mismatch_question),
     ("S01", s01_vector_categories),
     ("S02", s02_raster_categories),
     ("S03", s03_invalid_categories),
