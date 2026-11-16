@@ -409,12 +409,13 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
 | Operation 名字 | `<group>.<verb>`，两段都小写 snake，只允许一个点 | `layer.set_visibility` |
 | Operation 类 | CamelCase，模块内以能力族开头 | `LayerSetVisibility`、`ProjectOpen` |
 | 输入/结果模型 | `<操作类名>Params` / `<操作类名>Result` | `LayerAddParams`、`ProjectOpenResult` |
+| 输出里的嵌套 DTO | 普通 `BaseModel`，自己写 `model_config = ConfigDict(extra="forbid")`；**不**继承 `Result` | `LayerSummary`、`ProcessingMessage` |
 | 后台快照/中间结果 | 描述数据的名词 + `Values` / `Sum` 等 | `FieldValues`、`FieldSum` |
 | 测试 | 文件 `test_<被测模块>.py`；用例名是一句描述行为的短句（下划线连接，不是固定的三段式） | `test_a_queued_call_cancelled_before_its_turn_never_runs`、`test_progress_rewrites_the_record_at_most_once_per_interval` |
 | 常量 | 全大写；上限类常量带单位或含义 | `MAX_PROJECT_DEPTH`、`PROGRESS_INTERVAL_SECONDS` |
 
-历史例外：`layer.sum_numeric_field` 的模型叫 `SumNumericFieldParams` / `SumNumericFieldResult`
-（没有 `Layer` 前缀）。新代码按上表走，不要扩散这个例外。
+历史例外：无。`layer.sum_numeric_field` 的两个模型曾经没有 `Layer` 前缀，已改名成
+`LayerSumNumericFieldParams` / `LayerSumNumericFieldResult`。
 
 ### 5.5 注释与 docstring
 
@@ -1330,17 +1331,19 @@ class FieldSum:  # worker 返回的中间结果：同样只有纯数据
 
 
 class LayerSumNumericField(
-    BaseQuery[SumNumericFieldParams, SumNumericFieldResult],
-    BackgroundOperationMixin[SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum],
+    BaseQuery[LayerSumNumericFieldParams, LayerSumNumericFieldResult],
+    BackgroundOperationMixin[
+        LayerSumNumericFieldParams, LayerSumNumericFieldResult, FieldValues, FieldSum
+    ],
 ):
     name = "layer.sum_numeric_field"
     description = "Sum one numeric field of a vector layer over a copied snapshot"
-    input_model = SumNumericFieldParams
-    output_model = SumNumericFieldResult
+    input_model = LayerSumNumericFieldParams
+    output_model = LayerSumNumericFieldResult
 
     def prepare_main(self, ctx, request) -> FieldValues: ...  # 读 QGIS，拷数据
     def execute_worker(self, snapshot, control) -> FieldSum: ...  # 不碰 QGIS
-    def finalize_main(self, ctx, request, result) -> SumNumericFieldResult: ...
+    def finalize_main(self, ctx, request, result) -> LayerSumNumericFieldResult: ...
     def dependent_layer_ids(self, request) -> list[str]: ...  # 可选
 ```
 

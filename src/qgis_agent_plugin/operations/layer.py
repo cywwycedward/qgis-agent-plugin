@@ -439,12 +439,12 @@ class LayerSetVisibility(
         )
 
 
-class SumNumericFieldParams(Params):
+class LayerSumNumericFieldParams(Params):
     layer_id: StrictStr = Field(min_length=1)
     field_name: StrictStr = Field(min_length=1)
 
 
-class SumNumericFieldResult(Result):
+class LayerSumNumericFieldResult(Result):
     """一份快照的和，不是任务结束时图层上的值。
 
     shortcut: 值按 float64 求和，所以值超过 2**53 的 QInt64 字段在 ``total`` 里会丢精度；
@@ -496,8 +496,10 @@ class FieldSum:
 
 
 class LayerSumNumericField(
-    BaseQuery[SumNumericFieldParams, SumNumericFieldResult],
-    BackgroundOperationMixin[SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum],
+    BaseQuery[LayerSumNumericFieldParams, LayerSumNumericFieldResult],
+    BackgroundOperationMixin[
+        LayerSumNumericFieldParams, LayerSumNumericFieldResult, FieldValues, FieldSum
+    ],
 ):
     """在主线程之外、在一份快照上求一个数值字段的和。
 
@@ -511,10 +513,12 @@ class LayerSumNumericField(
 
     name = "layer.sum_numeric_field"
     description = "Sum one numeric field of a vector layer over a copied snapshot"
-    input_model = SumNumericFieldParams
-    output_model = SumNumericFieldResult
+    input_model = LayerSumNumericFieldParams
+    output_model = LayerSumNumericFieldResult
 
-    def prepare_main(self, ctx: OperationContext, request: SumNumericFieldParams) -> FieldValues:
+    def prepare_main(
+        self, ctx: OperationContext, request: LayerSumNumericFieldParams
+    ) -> FieldValues:
         from qgis.core import NULL, QgsFeatureRequest, QgsVectorLayer
 
         layer = project_layer(ctx.project, request.layer_id)
@@ -610,13 +614,13 @@ class LayerSumNumericField(
         )
 
     def finalize_main(
-        self, ctx: OperationContext, request: SumNumericFieldParams, result: FieldSum
-    ) -> SumNumericFieldResult:
+        self, ctx: OperationContext, request: LayerSumNumericFieldParams, result: FieldSum
+    ) -> LayerSumNumericFieldResult:
         if ctx.lifecycle.current_epoch != result.project_epoch:
             raise FrameworkError(
                 STALE_PROJECT, "the project was replaced while the field was summed"
             )
-        return SumNumericFieldResult(
+        return LayerSumNumericFieldResult(
             layer_id=request.layer_id,
             field_name=request.field_name,
             count=result.count,
@@ -626,7 +630,7 @@ class LayerSumNumericField(
             snapshot_project_epoch=result.project_epoch,
         )
 
-    def dependent_layer_ids(self, request: SumNumericFieldParams) -> list[str]:
+    def dependent_layer_ids(self, request: LayerSumNumericFieldParams) -> list[str]:
         return [request.layer_id]
 
 

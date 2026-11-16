@@ -81,7 +81,7 @@ from qgis_agent_plugin.operations import register_all  # pyright: ignore[reportM
 from qgis_agent_plugin.operations.layer import (  # pyright: ignore[reportMissingImports]
     LayerSetVisibilityParams,
     LayerSumNumericField,
-    SumNumericFieldParams,
+    LayerSumNumericFieldParams,
 )
 from qgis_agent_plugin.operations.project import MAX_PROJECT_DEPTH  # pyright: ignore[reportMissingImports]
 
@@ -759,7 +759,7 @@ def at_12_layer_removed_while_running(ctx: Context) -> str:
     ctx.register_probes()
     reset_project(ctx)
     layer_id = cities_layer(ctx, "at12 cities")
-    request = SumNumericFieldParams(layer_id=layer_id, field_name="pop")
+    request = LayerSumNumericFieldParams(layer_id=layer_id, field_name="pop")
 
     equal(
         LayerSumNumericField().dependent_layer_ids(request), [layer_id], "the declared dependency"

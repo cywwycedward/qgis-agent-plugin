@@ -47,7 +47,7 @@ from qgis_agent_plugin.operations.layer import (
     FieldSum,
     FieldValues,
     LayerSumNumericField,
-    SumNumericFieldParams,
+    LayerSumNumericFieldParams,
 )
 
 QUEUED = ExecutionStatus.QUEUED
@@ -313,7 +313,7 @@ def test_the_task_depends_on_the_layer_it_reads() -> None:
     # the task declares the layer it reads, which is what lets QGIS cancel it
     assert harness.tasks[0].dependent_layers == [layer]
     assert LayerSumNumericField().dependent_layer_ids(
-        SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
+        LayerSumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
     ) == ["layer-1"]
 
 
@@ -337,14 +337,16 @@ def test_a_synchronous_field_sum_is_unsupported_and_leaves_no_record() -> None:
 @pytest.mark.parametrize("value", [None, 1, "", True])
 def test_the_parameters_accept_only_a_plain_layer_and_field_name(value: Any) -> None:
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate({"layer_id": value, "field_name": FIELD})
+        LayerSumNumericFieldParams.model_validate({"layer_id": value, "field_name": FIELD})
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate({"layer_id": "a", "field_name": value})
+        LayerSumNumericFieldParams.model_validate({"layer_id": "a", "field_name": value})
 
 
 def test_an_undeclared_parameter_is_refused() -> None:
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate({"layer_id": "a", "field_name": FIELD, "limit": 10})
+        LayerSumNumericFieldParams.model_validate(
+            {"layer_id": "a", "field_name": FIELD, "limit": 10}
+        )
 
 
 def test_the_operation_registers_as_a_background_query() -> None:
@@ -738,7 +740,7 @@ def test_the_worker_reports_progress_across_the_whole_range() -> None:
 def test_the_finalize_refuses_a_snapshot_from_an_older_generation() -> None:
     harness = harness_with(make_layer([(1,)]))
     operation = LayerSumNumericField()
-    request = SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
+    request = LayerSumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
     snapshot = FieldValues(
         layer_id="layer-1",
         field_name=FIELD,
