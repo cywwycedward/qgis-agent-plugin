@@ -1152,7 +1152,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1） |
 | 返回 | `renderer_types`（下拉框里的名字，按下拉框顺序，不去重不排序） |
 | 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器） |
-| 行为 | 矢量走 `QgsApplication.rendererRegistry().renderersList(layer)`（按几何过滤），栅格走注册表清单再按图层的 `rasterType()` 过滤（普通栅格里没有 `singlebandcolordata`，`SingleBandColorData` 栅格里只有它）；前置条件是符号页存在，即图层有渲染器。栅格那份清单来自新建的 `QgsRasterRendererRegistry()`（3.44 没把应用级那个访问器绑给 Python，见 `shortcut:`），所以第三方注册在 C++ 单例里的栅格渲染器既列不出来、也会被 `layer.set_renderer` 的同一份清单拒——这张表同时是写入的前置条件 |
+| 行为 | 矢量走 `QgsApplication.rendererRegistry().renderersList(layer)`（按几何过滤），栅格走注册表清单再按图层的 `rasterType()` 过滤（普通栅格里没有 `singlebandcolordata`，`SingleBandColorData` 栅格里只有它）；前置条件是符号页存在，即图层有渲染器。栅格那份清单来自新建的 `QgsRasterRendererRegistry()`（3.44 没把应用级那个访问器绑给 Python，见 `available_renderer_types` 上的 `shortcut:`），所以第三方注册在 C++ 单例里的栅格渲染器既列不出来、也会被 `layer.set_renderer` 的同一份清单拒——这张表同时是写入的前置条件 |
 
 #### layer.get_renderer
 
@@ -1172,7 +1172,7 @@ absolute_path(raw: str) -> Path
 | 业务错误码 | `INVALID_INPUT`（XML 解析失败——消息是解析器那句带行列号的话；解析出来了但没有这门图层类型认得的渲染器；类型不在这门图层的候选清单里）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（未预期异常，由引擎兜底） |
 | 行为 | 整份渲染器先建好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式，旧渲染器还在；矢量用 `QgsFeatureRenderer.load()`（QGIS 读样式文件时同一次调用），栅格用各类型自己的 `create(element, provider)`（注册表里那个建渲染器的函数，Python 拿不到函数指针所以按类型名写明）。只装候选清单里的类型，理由分两半：栅格那边实测有类型会被 QGIS 默不作声地保留（普通栅格上的 `singlebandcolordata`，报告成功就是谎报），矢量那边是下拉框已经按几何筛过、GUI 表达不出那个组合。类型名解析完就在文档根元素上，所以这道检查在建渲染器之前（建那一步会进注册表调对应元数据；清单里的类型照旧建）。成功后 `triggerRepaint()` + `setDirty(True)`，与属性对话框的 Apply 两步相同；只有这一个样式 op 是 destructive |
 
-文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读。能装什么由注册表按图层类型给的清单决定，这里不维护另一张表：`heatmapRenderer` 只在列它的图层类型上装得上（多边形图层上同一份文档会被拒），而清单里、元数据是 Python 实现的那一类会在重建时结束进程（见本文末的“未确认”）。
+文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读。能装什么由注册表按图层类型给的清单决定，这里不维护另一张表：`heatmapRenderer` 只在列它的图层类型上装得上（多边形图层上同一份文档会被拒），而清单里、元数据是 Python 实现的那一类会在重建时结束进程（见 §12“`layer.set_renderer` 的文档”那一行）。
 
 #### processing.list_algorithms
 
@@ -1519,5 +1519,6 @@ Git flow：
 | 记录保留 | 按条数与 TTL，在访问与写入终态时 prune | 超时记录在被访问前仍占内存；被访问时已经不存在 |
 | 取消的语义 | 协作式；`CANCEL_REQUESTED` 只有任务自己的报告才变 `CANCELLED` | 主线程已开始的操作不可中断 |
 | 后台名额的计数口径 | 适配器数的是自己活动表里的任务（`SCHEDULED`/`RUNNING`/`CANCEL_REQUESTED`），引擎里名为 `_ACTIVE_BACKGROUND` 的集合只有前两个 | 两者不同义：限流看适配器，发取消请求看引擎；`FINALIZING` 不占名额 |
+| `layer.set_renderer` 的文档 | 只装注册表按图层类型给的清单里的类型；矢量用 `QgsFeatureRenderer.load`，栅格用各类型自己的 `create(element, provider)` | 清单里、元数据由 Python 实现的渲染器（`QgsRendererAbstractMetadata` 子类）会让 `load` 走进 Python 并当场结束进程（`0xC0000409`，sip 所有权），所以这类类型只能出现在候选清单里、不能被装；栅格清单来自新建的 `QgsRasterRendererRegistry()`，第三方注册在 C++ 单例里的栅格渲染器既列不出来也装不上 |
 | 依赖版本 | pydantic 只支持 2.x（导入时拒绝其他 major），QGIS 3.44（`metadata.txt`） | 换 pydantic major 或 QGIS 大版本前要重新验证；非 2.x 是加载期 `RuntimeError`，不是运行期错误 |
 | 测得的数字 | 本文档里的耗时、崩溃码都是在 QGIS 3.44.13 / Windows x64 上测的 | 它们支撑判据（尤其是 §7.2 那两条 P3），不是承诺；换环境要重测再改阈值 |
