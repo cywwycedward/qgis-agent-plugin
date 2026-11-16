@@ -516,6 +516,16 @@ class FakeGroup:
     def children(self) -> list[Any]:
         return list(self.nodes)
 
+    def findLayer(self, layer_id: str) -> Any:
+        for node in self.nodes:
+            if isinstance(node, FakeGroup):
+                found = node.findLayer(layer_id)
+                if found is not None:
+                    return found
+            elif node.layerId() == layer_id:
+                return node
+        return None
+
     def itemVisibilityChecked(self) -> bool:
         return self.checked
 
@@ -588,7 +598,13 @@ class FakeTreeRoot:
         self.groups: list[FakeGroup] = []
 
     def findLayer(self, layer_id: str) -> FakeNode | None:
-        return self.nodes.get(layer_id)
+        if layer_id in self.nodes:
+            return self.nodes[layer_id]
+        for group in self.groups:
+            found = group.findLayer(layer_id)
+            if found is not None:
+                return found
+        return None
 
     def children(self) -> list[Any]:
         # 根的子节点就是分组加上直接挂在根上的图层节点；字典保持插入顺序。
@@ -772,7 +788,7 @@ class FakeQgis:
 
         # --- 渲染器文档 / renderer documents ---------------------------------
 
-        def raster_renderer_class(renderer_type: str) -> type:
+        def raster_renderer_class(renderer_type: str) -> Any:
             """一个栅格渲染器类：它的 ``create`` 就是那门类型重建设置的入口。
 
             One raster renderer class: its ``create`` is that type's rebuild entry point.
@@ -1370,6 +1386,35 @@ def test_layers_without_a_node_come_after_the_legend(fake_qgis: FakeQgis, data_r
 
     result = ops.LayerList().execute_main(make_context(project), ops.LayerListParams())
     assert [summary.layer_id for summary in result.layers] == ["zzz", "aaa", "untreed"]
+
+
+def test_the_order_walks_into_groups(fake_qgis: FakeQgis, data_root: Path) -> None:
+    """分组也是图例顺序的一部分：先外层分组自己，再它的子树。
+
+    A group is part of the legend order too: the outer group first, then its subtree.
+    """
+
+    project = FakeProject()
+    outer, inner = FakeGroup(), FakeGroup()
+    nodes = {}
+    for layer_id in ("outer-a", "inner-a", "inner-b"):
+        layer = make_layer(fake_qgis, layer_id)
+        project.layers[layer_id] = layer
+        nodes[layer_id] = FakeNode(layer_id=layer_id, layer=layer)
+
+    project.root.groups.append(outer)
+    outer.nodes = [nodes["outer-a"], inner]
+    inner.nodes = [nodes["inner-a"], nodes["inner-b"]]
+
+    result = ops.LayerList().execute_main(make_context(project), ops.LayerListParams())
+    assert [summary.layer_id for summary in result.layers] == [
+        "outer-a",
+        "inner-a",
+        "inner-b",
+    ]
+    # 分组里的图层照样算在树里，只是勾选状态由节点决定。
+    # A grouped layer is still in the tree; only its check state comes from its node.
+    assert all(summary.in_layer_tree for summary in result.layers)
 
 
 def test_a_layer_without_a_tree_node_has_no_visibility(
