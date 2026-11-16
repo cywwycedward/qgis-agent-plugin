@@ -254,10 +254,10 @@ class FakeProvider:
 
 
 class FakeAlgorithm:
-    """一条已注册的算法定义；运行前桌面版问的每个问题都在这里回一个预设的答案。
+    """一条已注册的算法定义；运行前要问的每个问题都在这里回一个预设的答案。
 
-    One registered algorithm definition; every question the desktop asks before a run
-    answers from a canned verdict here.
+    One registered algorithm definition; every question asked before a run answers from a canned
+    verdict here.
     """
 
     def __init__(
