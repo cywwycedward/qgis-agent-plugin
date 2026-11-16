@@ -421,6 +421,12 @@ def _values_with_defaults(algorithm: Any, parameters: dict[str, Any]) -> dict[st
             continue
         name = definition.name()
         if name in values:
+            # 显式 ``None`` 是调用方对“跳过输出”的回答：面板对跳过的输出不放键，QGIS 也只有
+            # 缺键时才把它当“没有这个输出”。
+            # An explicit ``None`` is the caller's "skip output" answer: the panel drops the key
+            # of a skipped output, and only a missing key reads as "no such output" to QGIS.
+            if definition.isDestination() and values[name] is None:
+                del values[name]
             continue
         value = definition.defaultValueForGui()
         if definition.isDestination():
@@ -431,14 +437,6 @@ def _values_with_defaults(algorithm: Any, parameters: dict[str, Any]) -> dict[st
         elif value is None:
             continue
         values[name] = value
-    # 显式 ``None`` 是调用方对“跳过输出”的回答：面板对跳过的输出不放键，QGIS 也只有缺键时
-    # 才把它当“没有这个输出”。
-    # An explicit ``None`` is the caller's "skip output" answer: the panel drops the key of a
-    # skipped output, and only a missing key reads as "no such output" to QGIS.
-    for definition in algorithm.parameterDefinitions():
-        name = definition.name()
-        if definition.isDestination() and values.get(name, False) is None:
-            del values[name]
     return values
 
 
