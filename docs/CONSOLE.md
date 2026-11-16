@@ -149,8 +149,11 @@ engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
 {"visible": true,  "effective_visible": true,  "changed": true }   # 再显示
 ```
 
-`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性；父组被隐藏时
-会出现 `visible=true, effective_visible=false`（单测覆盖，本文件未实测该组合）。
+`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性。打勾还会把祖先
+分组一起勾上（图例的勾选框就是这么做的：对一个叶子节点打勾会连父组一起勾，否则勾了也看不见），
+所以 `set_visibility(true)` 之后两者都是 `true`；取消只写这一个节点，父组保持原样。`changed` 说的
+是“本次有没有真的改变可见结果”，所以节点已经勾着、但父组被手动取消时，`set_visibility(true)` 仍然
+是 `changed=true`（验收用例 at_21b 实测）。
 
 ## 6. 后台求和（唯一的 background Operation）
 
@@ -166,9 +169,15 @@ engine.get(submitted.execution_id).status  # 下一轮事件循环后
 submit -> QUEUED
 observed statuses (polling): QUEUED -> SCHEDULED -> SUCCEEDED    # RUNNING 落在两次采样之间
 result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
-         "skipped_null": 1, "total": 225.0, "snapshot_project_epoch": 0}
+         "skipped_null": 1, "total": 225.0, "selected_only": false,
+         "snapshot_project_epoch": 0}
 progress: 100.0
 ```
+
+选择集跟随章程 A6 定的规则：有选择集时只算选中的要素，没有时算全部；结果里的 `selected_only` 如实
+说这次用了哪一种（面板上有那个“仅选中要素”开关，没有新参数）。实测（选中 2 个城市、`pop > 50`）：
+`count=2`、`total=160.0`、`selected_only=true`；`removeSelection()` 之后同一调用回到 `count=3`、
+`total=200.0`、`selected_only=false`。
 
 几条实测到的事实：
 
@@ -185,8 +194,8 @@ progress: 100.0
   丢掉，记录就是 `PREPARING 0 → SCHEDULED 0 → RUNNING 0 → FINALIZING 0 → SUCCEEDED 100`（实测）：
   这里的 `RUNNING` 来自完成路径补写，不是进度报告。
 - 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
-- 超过 `max_snapshot_features`（默认 10000）：10001 个要素 → `FAILED`
-  `SNAPSHOT_LIMIT_EXCEEDED`，不做静默截断。
+- 要素数没有上限（桌面版的统计面板也不设，`qgsvectorlayerutils.cpp:73-80`）：拷列成本实测
+  10 万要素 0.11 s / 800 KB、100 万要素 3.14 s / 8 MB。
 - 在 Console 里不要忙等：打完下一行代码就是一次事件循环，`get` 即可；等任务真正跑完再 `get`
   才会看到终态。
 
@@ -295,18 +304,16 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
 | `run_sync("no.such", {})` | 抛 `FrameworkError: OPERATION_NOT_FOUND` |
 | `get("no-such-id")` | 抛 `FrameworkError: EXECUTION_NOT_FOUND` |
 | 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
-| `layer.add` 传 `add_to_legend="true"` | `FAILED` `INVALID_INPUT` at `add_to_legend` |
 | `layer.add` 的路径是相对路径 | `FAILED` `PATH_NOT_ALLOWED` |
 | `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
-| `layer.add(kind="raster", sub_layer="x", ...)` | `FAILED` `INVALID_INPUT` at `<root>` |
+| `layer.add` 的 `sub_layer` 不在 provider 的清单里（矢量或栅格） | `FAILED` `INVALID_LAYER` |
 | `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |
-| `layer.set_visibility` 对一个 `add_to_legend=false` 的图层 | `FAILED` `LAYER_NOT_IN_TREE` |
+| `layer.set_visibility` 对一个不在图层树里的图层（加载来的工程可以这样） | `FAILED` `LAYER_NOT_IN_TREE` |
 | `layer.sum_numeric_field` 对文本字段 | `FAILED` `INVALID_FIELD_TYPE` |
 | `project.save` 不给路径且工程无关联文件 | `FAILED` `PROJECT_PATH_REQUIRED` |
 | `project.create` 传 `crs_authid="NOT:A_CRS"` | `FAILED` `INVALID_CRS`（当前工程未被替换） |
 | `project.create` 在有内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
 | 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
-| 全新安装（允许目录为空）调 `layer.add` / `project.save` | `FAILED` `PATH_NOT_ALLOWED` |
 
 ## 10. 未实测清单
 

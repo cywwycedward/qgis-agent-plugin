@@ -143,7 +143,6 @@ _FIELD_LABELS = {
     "source_path": "来源路径",
     "name": "名称",
     "sub_layer": "子图层",
-    "add_to_legend": "加入图例",
     "layer_id": "图层 ID",
     "visible": "可见",
     "field_name": "字段名",
@@ -189,10 +188,6 @@ _ERRORS = {
     "LAYER_NOT_FOUND": ("工程里没有这个图层。", "先运行 layer.list，从结果里取 layer_id。"),
     "LAYER_NOT_IN_TREE": ("图层不在图层面板里。", "把它加回图层面板后重试。"),
     "INVALID_FIELD_TYPE": ("这个字段的类型不适合做这件事。", "换一个数值字段再运行。"),
-    "SNAPSHOT_LIMIT_EXCEEDED": (
-        "图层要素数超过快照上限。",
-        "调大 max_snapshot_features，或换一个小图层。",
-    ),
     "TOO_MANY_EXECUTIONS": ("排队或并发到上限了。", "等正在运行的调用结束后重试。"),
     "TASK_SUBMISSION_FAILED": ("后台任务没有提交成功。", "重试一次；仍然失败就重启 QGIS。"),
     "STALE_PROJECT": ("调用开始时工程已经换了一代。", "确认当前工程后重新运行。"),

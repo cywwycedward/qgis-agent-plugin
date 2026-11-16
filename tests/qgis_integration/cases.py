@@ -60,6 +60,7 @@ from qgis_agent_plugin.core.models import (
     INVALID_INPUT,
     INVALID_LAYER,
     LAYER_NOT_FOUND,
+    LAYER_NOT_IN_TREE,
     OUTPUT_VALIDATION_FAILED,
     PATH_NOT_ALLOWED,
     PROJECT_OPEN_FAILED,
@@ -431,12 +432,47 @@ def at_06_submit_field_sum(ctx: Context) -> str:
     equal(values["total"], fixtures.POP_TOTAL, "the sum of pop")
     equal(values["count"], fixtures.POP_COUNT, "the number of summed values")
     equal(values["skipped_null"], fixtures.POP_NULLS, "the number of null values skipped")
+    equal(values["selected_only"], False, "no selection, so the whole layer")
     equal(values["snapshot_project_epoch"], ctx.lifecycle.current_epoch, "the snapshot epoch")
     return (
         f"QgsTask added (id {watch.added[0]}) and deleted by QGIS (id {watch.deleted[0]}), "
         f"status {record.status}, progress readable ({during.progress} while live, 100 at the "
         f"end); pop sum {values['total']} over {values['count']} values, "
-        f"{values['skipped_null']} nulls — matches the baseline"
+        f"{values['skipped_null']} nulls — matches the baseline, selected_only=false"
+    )
+
+
+def at_06b_sum_follows_the_selection(ctx: Context) -> str:
+    """有选择集时只算选中的：桌面版统计面板的“仅选中要素”开关就是这件事。
+
+    With a selection, only the selected features are summed: the statistics panel's
+    "selected features only" switch (qgsstatisticalsummarydockwidget.cpp:210, :218 ->
+    qgsvectorlayerutils.cpp:73-80).
+    """
+
+    layer_id = cities_layer(ctx, "at06b cities")
+    layer = project_layer(layer_id)
+    layer.selectByExpression("pop > 50")
+    equal(layer.selectedFeatureCount(), 2, "the features the expression selected")
+
+    submitted = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+    record = ctx.wait_terminal(submitted.execution_id)
+    equal(record.status, ExecutionStatus.SUCCEEDED, f"the field sum: {record.error}")
+    values = result_of(record)
+    equal(values["selected_only"], True, "the record says the selection was used")
+    equal(values["count"], 2, "the summed values are the selected ones")
+    equal(values["total"], 160.0, "the sum of pop over the selection")
+    equal(values["skipped_null"], 0, "the selection holds no null")
+
+    layer.removeSelection()
+    again = ctx.submit("layer.sum_numeric_field", {"layer_id": layer_id, "field_name": "pop"})
+    second = ctx.wait_terminal(again.execution_id)
+    equal(second.status, ExecutionStatus.SUCCEEDED, "the sum after clearing the selection")
+    equal(result_of(second)["selected_only"], False, "no selection, so the whole layer")
+    equal(result_of(second)["total"], fixtures.POP_TOTAL, "back to the whole layer")
+    return (
+        "with 2 of 5 cities selected the sum is count=2, total=160.0 and selected_only=true; "
+        "after removeSelection() the same call is selected_only=false with the layer's 200.0"
     )
 
 
@@ -1038,16 +1074,44 @@ def at_20_invalid_source(ctx: Context) -> str:
 
 
 def at_21_layer_without_tree_node(ctx: Context) -> str:
+    """加载来的工程里可以有不图层里的图层；两种读照样给答案，切可见性无从下手。
+
+    A loaded project can hold a layer that is not in the legend; both reads still answer,
+    and toggling its visibility has nothing to act on.
+    """
+
+    from qgis.core import QgsProject, QgsVectorLayer
+
     reset_project(ctx)
-    layer_id = ctx.add_layer(ctx.fixtures.cities, "at21 not in the tree", add_to_legend=False)
+    # layer.add 已经没有“不进图例”的参数了（A4），所以这里直接造工程文件能表达的那个形状：
+    # 图层进注册表、不进图层树。
+    # layer.add no longer has an "into the legend or not" parameter (A4), so build the shape a
+    # project file can express directly: in the registry, absent from the tree.
+    layer = QgsVectorLayer(
+        f"{ctx.fixtures.cities}|layername={fixtures.CITIES_LAYER}",
+        "at21 not in the tree",
+        "ogr",
+    )
+    require(layer.isValid(), "the probe layer is not valid")
+    require(QgsProject.instance().addMapLayer(layer, False) is not None, "the layer was not added")
+    require(
+        QgsProject.instance().layerTreeRoot().findLayer(layer.id()) is None,
+        "the probe layer ended up in the tree",
+    )
+
     rows = result_of(ctx.run("layer.list"))["layers"]
-    row = next(item for item in rows if item["layer_id"] == layer_id)
+    row = next(item for item in rows if item["layer_id"] == layer.id())
     equal(row["in_layer_tree"], False, "in_layer_tree")
     equal(row["visible"], None, "visible")
     equal(row["effective_visible"], None, "effective_visible")
+
+    record = ctx.run("layer.set_visibility", {"layer_id": layer.id(), "visible": True})
+    equal(record.status, ExecutionStatus.FAILED, "set_visibility on a tree-less layer")
+    equal(error_code(record), LAYER_NOT_IN_TREE, "the code for a tree-less layer")
     return (
         "a registered layer with no layer tree node lists as in_layer_tree=false, "
-        "visible=null and effective_visible=null"
+        "visible=null and effective_visible=null, and set_visibility is "
+        "FAILED(LAYER_NOT_IN_TREE)"
     )
 
 
@@ -1070,11 +1134,17 @@ def at_21b_group_hides_layer(ctx: Context) -> str:
 
     record = ctx.run("layer.set_visibility", {"layer_id": layer_id, "visible": True})
     equal(record.status, ExecutionStatus.SUCCEEDED, "set_visibility on a hidden layer")
-    equal(result_of(record)["changed"], False, "the layer was already checked")
-    equal(group.itemVisibilityChecked(), False, "the parent group's check state")
+    equal(
+        result_of(record)["changed"],
+        True,
+        "checking a layer under a hidden group also checks the group",
+    )
+    equal(result_of(record)["effective_visible"], True, "the layer after the check")
+    equal(group.itemVisibilityChecked(), True, "the parent group's check state")
     return (
-        "visible=true while effective_visible=false under an unchecked group; "
-        "set_visibility(true) reported changed=false and left the group unchecked"
+        "visible=true while effective_visible=false under an unchecked group; the legend's "
+        "check acts on the ancestors too, so set_visibility(true) reported changed=true and "
+        "left the layer and its group checked"
     )
 
 
@@ -1334,9 +1404,58 @@ def at_28_layer_add_sub_layer(ctx: Context) -> str:
         "ogr",
         "the provider layer.get_info reports",
     )
+    # 一个 provider 从未报过的子图层名不是答案（桌面版的选择框点不出它）。
+    # A sub-layer name the provider never reported is not an answer (desktop's dialog cannot
+    # offer it).
+    missing = ctx.run(
+        "layer.add",
+        {
+            "kind": "vector",
+            "source_path": str(source),
+            "name": "at28 missing",
+            "sub_layer": "p5 no such table",
+        },
+    )
+    equal(missing.status, ExecutionStatus.FAILED, "layer.add with a name the provider lacks")
+    equal(error_code(missing), INVALID_LAYER, "the code for a name the provider lacks")
+    equal(
+        len(QgsProject.instance().mapLayers()),
+        1,
+        "the project after a refused sub-layer name",
+    )
+    # 栅格也有子数据集清单：同一个源、kind=raster、点名那个子数据集也能加（A5）。
+    # A raster has a subdataset list too: the same kind of call with kind=raster and the
+    # name the provider reports (A5).
+    from qgis.core import QgsProviderRegistry
+
+    gdal = QgsProviderRegistry.instance().providerMetadata("gdal")
+    raster_name = gdal.querySublayers(str(ctx.fixtures.raster))[0].name()
+    raster_record = ctx.run(
+        "layer.add",
+        {
+            "kind": "raster",
+            "source_path": str(ctx.fixtures.raster),
+            "name": "at28 raster sub",
+            "sub_layer": raster_name,
+        },
+    )
+    equal(
+        raster_record.status,
+        ExecutionStatus.SUCCEEDED,
+        f"layer.add(kind='raster', sub_layer={raster_name!r}): {raster_record.error}",
+    )
+    raster_layer_id = result_of(raster_record)["layer_id"]
+    equal(
+        QgsProject.instance().mapLayer(raster_layer_id).providerType(),
+        "gdal",
+        "the provider of a raster sub-dataset add",
+    )
     return (
         f"layer.add(sub_layer='{fixtures.ROADS_LAYER}') on {source.name!r} SUCCEEDED, provider "
-        f"ogr, featureCount 1 (cities holds 5): the OGR encoder chose the named table"
+        f"ogr, featureCount 1 (cities holds 5): the provider's own sublayer URI chose the named "
+        f"table; a sub_layer the provider never reported is FAILED(INVALID_LAYER) and adds "
+        f"nothing; and kind='raster' with the name gdal reports ({raster_name!r}) SUCCEEDED as "
+        f"a gdal layer"
     )
 
 
@@ -2317,13 +2436,12 @@ VECTOR_CATEGORY_NAMES = [
 RASTER_CATEGORY_NAMES = [
     "LayerConfiguration",
     "Symbology",
-    "Labeling",
     "MapTips",
-    "AttributeTable",
     "Rendering",
     "CustomProperties",
     "Temporal",
     "Elevation",
+    "AttributeTable",
     "Notes",
 ]
 
@@ -3462,12 +3580,14 @@ def s02_raster_categories(ctx: Context) -> str:
         record = ctx.run("layer.list_style_categories", {"layer_id": layer_id})
         equal(record.status, ExecutionStatus.SUCCEEDED, f"{name}: status")
         categories = result_of(record)["categories"]
-        equal(categories, RASTER_CATEGORY_NAMES, f"{name}: the ten categories")
-        for required in ("Labeling", "AttributeTable"):
+        equal(categories, RASTER_CATEGORY_NAMES, f"{name}: the nine categories")
+        for required in ("AttributeTable", "Notes"):
             require(required in categories, f"{name}: {required} is missing from {categories}")
+        require("Labeling" not in categories, f"{name}: Labeling is not a raster checkbox")
     return (
-        "a one-band and a three-band raster both report the same ten categories, including "
-        "Labeling and AttributeTable, in the PRD's fixed order"
+        "a one-band and a three-band raster both report the same nine categories, including "
+        "AttributeTable and Notes and without Labeling, in the order desktop's category model "
+        "lists them"
     )
 
 
@@ -3475,20 +3595,35 @@ def s03_invalid_categories(ctx: Context) -> str:
     vector_id = sub_layer(ctx, "s03 polygon", fixtures.PARCELS_LAYER)
     raster_id = raster_layer(ctx, "s03 raster")
     requests = {
-        "an empty list": (vector_id, []),
         "a repeated category": (vector_id, ["Symbology", "Symbology"]),
         "an unknown name": (vector_id, ["p5NotAStyleCategory"]),
         "a vector-only category on a raster": (raster_id, ["Symbology3D"]),
-        "an empty list on a raster": (raster_id, []),
+        "a vector-only category on a raster, doubled": (raster_id, ["Fields", "Fields"]),
     }
     for label, (layer_id, categories) in requests.items():
         record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": categories})
         equal(record.status, ExecutionStatus.FAILED, f"{label}: status")
         equal(error_code(record), INVALID_INPUT, f"{label}: code")
         require(record.result is None, f"{label}: a half-finished export was returned")
+    # 一个都不选是桌面版的 Deselect All + OK：合法，导出的是零分类文档。
+    # "None of them" is desktop's Deselect All plus OK: legal, and it exports the
+    # zero-category document.
+    for label, layer_id in (("vector", vector_id), ("raster", raster_id)):
+        record = ctx.run("layer.get_qml", {"layer_id": layer_id, "categories": []})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{label}: an empty list")
+        qml = result_of(record)["qml"]
+        # 零分类导出的是 ``styleCategories=""``（实测），所以断言原始属性而不是集合。
+        # A zero-category export writes ``styleCategories=""`` (measured), so the raw
+        # attribute is what this asserts.
+        equal(
+            xml_root(qml).get("styleCategories") or "",
+            "",
+            f"{label}: the categories an empty list declares",
+        )
     return (
-        "an empty list, a repeated category, an unknown name and a vector-only category on a "
-        "raster are all FAILED(INVALID_INPUT) with no partial XML"
+        "a repeated category, an unknown name and a vector-only category on a raster are all "
+        "FAILED(INVALID_INPUT) with no partial XML, while an empty list on a vector and on a "
+        "raster both SUCCEED with a document that declares no style categories"
     )
 
 
@@ -3584,26 +3719,44 @@ def a01_vector_candidates(ctx: Context) -> str:
 
 
 def a02_raster_candidates(ctx: Context) -> str:
-    from qgis.core import QgsRasterRendererRegistry
+    from qgis.core import Qgis, QgsRasterRendererRegistry
 
     native = QgsRasterRendererRegistry().renderersList()
     equal(sorted(native), RASTER_RENDERER_TYPES, "the eight built-in raster renderers")
     equal(sorted(set(native)), sorted(native), "the raster registry repeats itself")
 
-    layer_id = raster_layer(ctx, "a02 raster", ctx.fixtures.raster3)
-    record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
-    equal(
-        record.status,
-        ExecutionStatus.SUCCEEDED,
-        f"layer.list_available_renderers: {record.error}",
-    )
-    types = result_of(record)["renderer_types"]
-    equal(types, sorted(set(native)), "the raster list against QgsRasterRendererRegistry")
-    equal(len(types), 8, "the registered raster renderer count")
+    layers = {
+        "one-band": raster_layer(ctx, "a02 one-band", ctx.fixtures.raster),
+        "three-band": raster_layer(ctx, "a02 three-band", ctx.fixtures.raster3),
+    }
+    for label, layer_id in layers.items():
+        layer = project_layer(layer_id)
+        # 桌面版的下拉框 = 注册表清单再按 rasterType() 过滤一层
+        # (qgsrasterlayerproperties.cpp:443-455)。
+        # Desktop's combo is the registry list filtered by rasterType().
+        single_band_color_data = layer.rasterType() == Qgis.RasterLayerType.SingleBandColorData
+        expected = sorted(
+            name
+            for name in set(native)
+            if (name == "singlebandcolordata") == single_band_color_data
+        )
+        record = ctx.run("layer.list_available_renderers", {"layer_id": layer_id})
+        equal(
+            record.status,
+            ExecutionStatus.SUCCEEDED,
+            f"{label}: layer.list_available_renderers: {record.error}",
+        )
+        types = result_of(record)["renderer_types"]
+        equal(types, expected, f"{label}: the layer's own combo list")
+        require(
+            "singlebandcolordata" not in types,
+            f"{label}: singlebandcolordata is not in an ordinary raster's combo ({types})",
+        )
+    require(len(native) == 8, f"the registry count changed: {len(native)}")
     return (
-        "a raster layer reports the same eight types QgsRasterRendererRegistry().renderersList() "
-        "holds for the whole environment, not a per-layer selection "
-        f"({', '.join(types)})"
+        "the registry holds eight raster renderers, while a raster layer's list is the registry "
+        "filtered by its own rasterType() as desktop's combo does: seven names each for a "
+        "one-band and a three-band raster, with singlebandcolordata left out"
     )
 
 
@@ -3704,14 +3857,33 @@ def a04_bad_layers(ctx: Context) -> str:
         record = ctx.run(operation, {"layer_id": "a04-no-such-layer"})
         equal(record.status, ExecutionStatus.FAILED, f"{operation}: an unknown id")
         equal(error_code(record), LAYER_NOT_FOUND, f"{operation}: the code for an unknown id")
-    for label, layer_id in (("a vector table", table.id()), ("an invalid layer", invalid.id())):
-        for operation in (*operations, "layer.get_qml"):
-            record = ctx.run(operation, {"layer_id": layer_id})
-            equal(record.status, ExecutionStatus.FAILED, f"{operation} on {label}")
-            equal(error_code(record), INVALID_LAYER, f"{operation}: the code for {label}")
+    # 一张没有几何的矢量表：两个样式对话框对任何矢量图层都给出整张分类清单，QML 也导得出来；
+    # 但没有渲染器的图层在桌面版里连符号页都没有，所以三个渲染器操作拒。
+    # A geometry-less table: both style dialogs hand any vector layer the whole category list
+    # and the QML exports; a layer without a renderer has no symbology page, so the three
+    # renderer operations refuse it.
+    for operation in ("layer.list_style_categories", "layer.get_qml"):
+        record = ctx.run(operation, {"layer_id": table.id()})
+        equal(record.status, ExecutionStatus.SUCCEEDED, f"{operation} on a vector table")
+    for operation in ("layer.list_available_renderers", "layer.get_renderer"):
+        record = ctx.run(operation, {"layer_id": table.id()})
+        equal(record.status, ExecutionStatus.FAILED, f"{operation} on a vector table")
+        equal(error_code(record), INVALID_LAYER, f"{operation}: the code for a vector table")
+    rendered = ctx.run(
+        "layer.set_renderer", {"layer_id": table.id(), "renderer": {"type": "nullSymbol"}}
+    )
+    equal(rendered.status, ExecutionStatus.FAILED, "layer.set_renderer on a vector table")
+    equal(error_code(rendered), INVALID_LAYER, "layer.set_renderer: the code for a vector table")
+    for operation in (*operations, "layer.get_qml"):
+        record = ctx.run(operation, {"layer_id": invalid.id()})
+        equal(record.status, ExecutionStatus.FAILED, f"{operation} on an invalid layer")
+        equal(error_code(record), INVALID_LAYER, f"{operation}: the code for an invalid layer")
     return (
-        "an unknown id is LAYER_NOT_FOUND on all three renderer/style reads; a valid vector table "
-        "(no geometry) and a registered but invalid layer are INVALID_LAYER on all four"
+        "an unknown id is LAYER_NOT_FOUND on all three renderer/style reads; a registered but "
+        "invalid layer is INVALID_LAYER on all four; a geometry-less vector table still answers "
+        "list_style_categories and get_qml (desktop gives any vector layer the whole list) while "
+        "the three renderer operations are INVALID_LAYER, the precondition desktop's symbology "
+        "page itself has"
     )
 
 
@@ -4338,7 +4510,11 @@ CASES = (
     ("AT-03", at_03_run_sync),
     ("AT-04", at_04_submit_layer_add),
     ("AT-05", at_05_run_sync_refuses_background),
-    ("AT-06", at_06_submit_field_sum),
+    (
+        "AT-06",
+        at_06_submit_field_sum,
+    ),
+    ("AT-06B", at_06b_sum_follows_the_selection),
     ("AT-07", at_07_worker_exception),
     ("AT-08", at_08_cancel_running),
     ("AT-08B", at_08b_cancel_scheduled),

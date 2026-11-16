@@ -12,11 +12,13 @@
 
 样式读取（``layer.list_style_categories``、``layer.get_qml``、
 ``layer.list_available_renderers``、``layer.get_renderer``）描述图层已经带着什么，不改它。
-哪些分类适用是一张固定清单，不是从 XML 反读出来的；QML 来自图层自己的原生导出；两份渲染器清单
-都来自活的 QGIS 注册表，不是这里维护的表。
+哪些分类适用是一张固定清单，不是从 XML 反读出来的——清单就是桌面版那两个样式对话框里的勾选框
+（``QgsMapLayerStyleCategoriesModel``）；QML 来自图层自己的原生导出；两份渲染器清单都来自活的
+QGIS 注册表，不是这里维护的表。
 
 渲染器设值是这个文件里唯一替换状态的操作。它先把整个原生渲染器建好再碰图层，然后用一次调用装
-上去，所以被拒的配置不会给图层留下半套或零套样式。
+上去，所以被拒的配置不会给图层留下半套或零套样式。桌面版只在图层有渲染器时才给出符号页
+（``QgsVectorLayerProperties``），所以没有渲染器的图层在这里也换不了。
 
 Every operation here but ``layer.sum_numeric_field`` runs on the main thread and
 works through ``ctx.project``, so it reads the project the engine holds rather than
@@ -35,13 +37,16 @@ for both would make a toggle look like it failed.
 The style reads (``layer.list_style_categories``, ``layer.get_qml``,
 ``layer.list_available_renderers``, ``layer.get_renderer``) describe what a layer
 already carries without changing it.  Which categories apply is a fixed list, not
-something read back out of the XML; the QML itself comes from the layer's own native
-export; and both renderer lists come from the live QGIS registries rather than a
-table kept here.
+something read back out of the XML -- it is the checkboxes of desktop's two style
+dialogs (``QgsMapLayerStyleCategoriesModel``); the QML itself comes from the layer's
+own native export; and both renderer lists come from the live QGIS registries rather
+than a table kept here.
 
 The renderer setter is the one operation here that replaces state.  It builds the
 whole native renderer before the layer is touched, then installs it in one call,
 so a refused configuration cannot leave the layer with half a style or with none.
+Desktop only shows the symbology page when the layer has a renderer
+(``QgsVectorLayerProperties``), so a layer without one cannot have one set here.
 """
 
 from __future__ import annotations
@@ -77,7 +82,6 @@ from ..core.models import (
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     LAYER_NOT_IN_TREE,
-    SNAPSHOT_LIMIT_EXCEEDED,
     STALE_PROJECT,
     FrameworkError,
     Params,
@@ -99,15 +103,13 @@ class LayerAddParams(Params):
 
     kind: LayerKind
     source_path: StrictStr = Field(min_length=1)
-    name: StrictStr = Field(min_length=1, max_length=128)
-    sub_layer: StrictStr | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
-    add_to_legend: StrictBool = True
-
-    @model_validator(mode="after")
-    def _sub_layer_is_vector_only(self) -> LayerAddParams:
-        if self.sub_layer is not None and self.kind != "vector":
-            raise ValueError("sub_layer is only valid for a vector source")
-        return self
+    name: StrictStr = Field(min_length=1)
+    # 名字是 provider 的自由文本（空格、斜杠、非 ASCII 都行），但空不是名字。矢量与栅格都能有：
+    # 桌面版两个页签都提供子数据集清单（``qgsapplayerhandling.cpp:1363-1381`` 先按类型筛选）。
+    # The name is the provider's free text (spaces, slashes, non-ASCII); an empty string is
+    # not a name. Vector and raster alike can have one: both tabs of desktop's add dialog
+    # offer a subdataset list (``qgsapplayerhandling.cpp:1363-1381`` filters by type first).
+    sub_layer: StrictStr | None = Field(default=None, min_length=1)
 
 
 class LayerAddResult(Result):
@@ -171,23 +173,43 @@ class LayerSetVisibilityResult(Result):
     changed: StrictBool
 
 
-def layer_source_uri(source: Path, sub_layer: str | None) -> str:
-    """返回一个数据源的 provider URI。
+def layer_source_uri(provider: str, source: Path, kind: LayerKind, sub_layer: str | None) -> str:
+    """provider 为这个源（或它里面的一个子图层）给的 URI，先回答“认得出来吗”。
 
-    调用方给的字符串只经过绝对路径检查，是不是本地文件由 provider 决定——``/vsicurl/`` 与
-    WMS 地址都是合法的源。子图层仍然要靠 ogr provider 自己的编码器：它的 URI 怎么把路径和图层名
-    拼在一起、每一段怎么转义，是 provider 的规则——自己照 ``path|layername=name`` 重建形状，就是
-    对那条规则的猜测。
+    桌面版加图层的门槛是 provider 认不认得这个源，不是图层读不读得出来：它先问
+    ``providerMetadata.querySublayers``（``qgsapplayerhandling.cpp:1363-1391``），清单为空就在消息栏
+    报 "Invalid Data Source" 并且什么也不加；清单不空则把认出的子图层交给
+    ``QgsProviderSublayerDetails::toLayer``，即使它的 ``isValid()`` 为假（``:796-815``），
+    坏掉的靠图例里的坏图层图标提示。所以这里只查清单，不查 ``isValid()``。
+
+    子图层的 URI 直接取那条 detail 的 ``uri()``——那是 ``toLayer`` 交给
+    ``QgsMapLayerFactory`` 的同一个字符串（``qgsprovidersublayerdetails.cpp:22-28``）。
+    自己拼是对 provider 规则的猜测：GDAL 把子数据集写成别的形状，实测用
+    ``encodeUri({"path", "layerName"})`` 拼出来的 ``…\\dem.tif|name`` 解回来
+    ``layerName`` 是 NULL、建出来的栅格无效。子图层也必须在这份清单里：桌面版的选择框只列得出来的
+    东西（``qgsprovidersublayersdialog.cpp:215``），点不出一个不存在的名字。
 
     shortcut: 这里只审调用方点名的文件，不审该文件自己点名的源——本地 ``.vrt`` 里可能装着
     ``/vsicurl/`` 或 WMS 源，不可信 VRT 变成输入时得升级。
 
-    The caller's string has been checked for being absolute and nothing more; whether
-    it is a local file is the provider's decision -- ``/vsicurl/`` and a WMS URL are both
-    legitimate sources.  A sub-layer still needs the ogr provider's own encoder: how its
-    URI joins a path and a layer name, and how it escapes each part, is the provider's
-    rule -- re-deriving the ``path|layername=name`` shape by hand is a guess about that
-    rule.
+    The URI the provider itself gives for this source, or for one sublayer inside it, after
+    answering "does the provider recognise it at all".
+
+    Desktop's gate for adding a layer is whether the provider recognises the source, not
+    whether the layer loads: it asks ``providerMetadata.querySublayers`` first
+    (``qgsapplayerhandling.cpp:1363-1391``), reports "Invalid Data Source" and adds nothing
+    when the list is empty, and otherwise hands every recognised sublayer to
+    ``QgsProviderSublayerDetails::toLayer`` even when its ``isValid()`` is false
+    (``:796-815``), leaving a broken one to the legend's bad-layer icon.  So only the list
+    is checked here, not ``isValid()``.
+
+    A sublayer's URI is that detail's own ``uri()`` -- the same string ``toLayer`` hands to
+    ``QgsMapLayerFactory`` (``qgsprovidersublayerdetails.cpp:22-28``).  Deriving it by hand
+    is a guess about the provider's rule: GDAL spells subdatasets differently, and the
+    ``…\\dem.tif|name`` form ``encodeUri({"path", "layerName"})`` produced decodes with a
+    NULL ``layerName`` and builds an invalid raster (measured).  A sublayer also has to be
+    in that list: desktop's dialog only lists what exists
+    (``qgsprovidersublayersdialog.cpp:215``), so a name it never offered is not an answer.
 
     shortcut: this vets the file the caller named, not the sources that file
     itself names -- a local ``.vrt`` may carry a ``/vsicurl/`` or WMS source
@@ -195,15 +217,28 @@ def layer_source_uri(source: Path, sub_layer: str | None) -> str:
     become an input.
     """
 
+    from qgis.core import Qgis, QgsProviderMetadata, QgsProviderRegistry
+
+    metadata = QgsProviderRegistry.instance().providerMetadata(provider)
+    recognised: list[Any] | None = None
+    if metadata.capabilities() & QgsProviderMetadata.QuerySublayers:
+        wanted = Qgis.LayerType.Vector if kind == "vector" else Qgis.LayerType.Raster
+        recognised = [
+            detail for detail in metadata.querySublayers(str(source)) if detail.type() == wanted
+        ]
+        if not recognised:
+            raise FrameworkError(INVALID_LAYER, "the layer source could not be loaded")
     if sub_layer is None:
         return str(source)
-    from qgis.core import QgsProviderRegistry
-
-    return (
-        QgsProviderRegistry.instance()
-        .providerMetadata("ogr")
-        .encodeUri({"path": str(source), "layerName": sub_layer})
-    )
+    if recognised is None:
+        # 不能列子图层的 provider 也给不出子图层的 URI，桌面版那条分支同样不提供子数据集选择。
+        # A provider that cannot list sublayers cannot name one either; desktop's branch for
+        # it offers no subdataset choice at all (``:1451-1469``).
+        raise FrameworkError(INVALID_LAYER, "the provider cannot name a sub-layer")
+    for detail in recognised:
+        if detail.name() == sub_layer:
+            return detail.uri()
+    raise FrameworkError(INVALID_LAYER, "the layer source has no such sub-layer")
 
 
 def layer_kind(layer: Any) -> LayerSummaryKind:
@@ -285,10 +320,19 @@ class LayerAdd(
         # declared kind, 所以没人能自己指定一个 / so a caller cannot name one.
         provider = "ogr" if request.kind == "vector" else "gdal"
         layer_class = QgsVectorLayer if request.kind == "vector" else QgsRasterLayer
-        layer = layer_class(layer_source_uri(source, request.sub_layer), request.name, provider)
-        if not layer.isValid():
-            raise FrameworkError(INVALID_LAYER, "the layer source could not be loaded")
-        ctx.project.addMapLayer(layer, request.add_to_legend)
+        uri = layer_source_uri(provider, source, request.kind, request.sub_layer)
+        layer = layer_class(uri, request.name, provider)
+        # 不查 isValid()：桌面版把 provider 认出的子图层直接加进图例，读不出来的靠坏图层图标提示
+        # （qgsapplayerhandling.cpp:796-815 与 :1383-1390 的分工）。
+        # No isValid() check: desktop adds every recognised sublayer to the legend and leaves a
+        # broken one to the bad-layer icon. The two source lines above are that split.
+        #
+        # 永远进图例：桌面版的 addToLegend=false 是“先进工程、随后进分组”，图层仍在图例里
+        # （qgsapplayerhandling.cpp:802-808），所以这里没有那个参数。
+        # Always into the legend: desktop's addToLegend=false is "into the project, then into a
+        # group", and the layer is still in the legend (qgsapplayerhandling.cpp:802-808), so
+        # there is no such parameter here.
+        ctx.project.addMapLayer(layer)
         return LayerAddResult(
             layer_id=layer.id(),
             name=layer.name(),
@@ -351,9 +395,18 @@ class LayerSetVisibility(
     BaseCommand[LayerSetVisibilityParams, LayerSetVisibilityResult],
     MainThreadOperationMixin[LayerSetVisibilityParams, LayerSetVisibilityResult],
 ):
-    """切一个图层自己的勾选状态；父分组保持原样。
+    """切一个图层在图例里的勾选；勾上时连祖先分组一起勾，取消只动这一个节点。
 
-    Toggle one layer's own check state; a parent group stays as it is.
+    勾选框不是“只改自己”：桌面版对一个叶子节点打勾时会连它的祖先一起勾
+    （``QgsLayerTreeModel.setData`` 对没有子节点的节点调
+    ``setItemVisibilityCheckedParentRecursive``，``qgslayertreemodel.cpp:401-405``），否则勾了也
+    看不见；取消只写节点自己（``:413-416``）。
+
+    Toggle one layer's legend check; checking also checks the ancestor groups, unchecking
+    touches only this node.  The checkbox is not "this node only": desktop ticks a leaf's
+    ancestors along with it (``setData`` calls ``setItemVisibilityCheckedParentRecursive``
+    for a childless node, ``qgslayertreemodel.cpp:401-405``), or the tick would show
+    nothing; unchecking writes the node alone (``:413-416``).
     """
 
     name = "layer.set_visibility"
@@ -368,9 +421,16 @@ class LayerSetVisibility(
         node = layer_tree_node(ctx.project, request.layer_id)
         if node is None:
             raise FrameworkError(LAYER_NOT_IN_TREE, "layer has no layer tree node")
-        changed = bool(node.itemVisibilityChecked()) != request.visible
+        # 勾上要连祖先，所以“已经对了”不是“节点已勾”而是“真的可见”/ checking must reach the
+        # ancestors, so "already there" means "already visible", not "node checked".
+        changed = bool(node.itemVisibilityChecked()) != request.visible or (
+            request.visible and not node.isVisible()
+        )
         if changed:
-            node.setItemVisibilityChecked(request.visible)
+            if request.visible:
+                node.setItemVisibilityCheckedParentRecursive(request.visible)
+            else:
+                node.setItemVisibilityChecked(request.visible)
         return LayerSetVisibilityResult(
             layer_id=request.layer_id,
             visible=bool(node.itemVisibilityChecked()),
@@ -402,6 +462,7 @@ class SumNumericFieldResult(Result):
     count: int
     skipped_null: int
     total: float
+    selected_only: StrictBool
     snapshot_project_epoch: int
 
 
@@ -416,6 +477,7 @@ class FieldValues:
     field_name: str
     values: tuple[float, ...]
     skipped_null: int
+    selected_only: bool
     project_epoch: int
 
 
@@ -429,6 +491,7 @@ class FieldSum:
     count: int
     total: float
     skipped_null: int
+    selected_only: bool
     project_epoch: int
 
 
@@ -472,16 +535,21 @@ class LayerSumNumericField(
             .setFlags(QgsFeatureRequest.NoGeometry)
             .setSubsetOfAttributes([index])
         )
-        limit = ctx.policy.max_snapshot_features
+        # 跟随桌面版统计面板的选择集规则：有选择集时只算选中的，没有时算全部；面板那个开关
+        # 就是这件事（qgsstatisticalsummarydockwidget.cpp:210 读它、:218 交给
+        # getValuesIterator，后者在 qgsvectorlayerutils.cpp:73-80 选 getSelectedFeatures
+        # 还是 getFeatures）。没有新参数：那是图层的状态，不是调用方的一个问句。
+        # Follow desktop's statistics-panel selection rule: with a selection, sum the selected
+        # features only; without one, sum them all. That is exactly what the panel's checkbox
+        # does (it is read at qgsstatisticalsummarydockwidget.cpp:210, handed to
+        # getValuesIterator at :218, which picks getSelectedFeatures or getFeatures at
+        # qgsvectorlayerutils.cpp:73-80). No new parameter: this is layer state, not a question
+        # for the caller.
+        selected_only = bool(layer.selectedFeatureCount())
+        features = layer.getSelectedFeatures(read) if selected_only else layer.getFeatures(read)
         values: list[float] = []
         skipped = 0
-        for seen, feature in enumerate(layer.getFeatures(read), start=1):
-            if seen > limit:
-                # 从不静悄悄截断 / never truncate quietly: 一个看起来完整的部分和比一次拒绝更糟 /
-                # 部分和比拒绝更糟 / a partial sum that looks complete is worse than a refusal.
-                raise FrameworkError(
-                    SNAPSHOT_LIMIT_EXCEEDED, f"the layer has more than {limit} features"
-                )
+        for feature in features:
             value = feature[index]
             # QGIS 把空属性交回它自己的 NULL 单例（一个 QVariant）/ QGIS hands a null
             # attribute back as its own NULL singleton (a QVariant), 有些构建则返回 None /
@@ -506,6 +574,7 @@ class LayerSumNumericField(
             field_name=request.field_name,
             values=tuple(values),
             skipped_null=skipped,
+            selected_only=selected_only,
             project_epoch=ctx.lifecycle.current_epoch,
         )
 
@@ -536,6 +605,7 @@ class LayerSumNumericField(
             count=count,
             total=total,
             skipped_null=snapshot.skipped_null,
+            selected_only=snapshot.selected_only,
             project_epoch=snapshot.project_epoch,
         )
 
@@ -552,6 +622,7 @@ class LayerSumNumericField(
             count=result.count,
             skipped_null=result.skipped_null,
             total=result.total,
+            selected_only=result.selected_only,
             snapshot_project_epoch=result.project_epoch,
         )
 
@@ -612,13 +683,12 @@ VECTOR_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
 RASTER_STYLE_CATEGORIES: tuple[StyleCategoryName, ...] = (
     "LayerConfiguration",
     "Symbology",
-    "Labeling",
     "MapTips",
-    "AttributeTable",
     "Rendering",
     "CustomProperties",
     "Temporal",
     "Elevation",
+    "AttributeTable",
     "Notes",
 )
 
@@ -636,32 +706,55 @@ def project_layer(project: Any, layer_id: str) -> Any:
 
 
 def layer_for_style(project: Any, layer_id: str) -> Any:
-    """id 背后的图层，前提它是一个有效的空间矢量或栅格。
+    """id 背后的图层，前提它是一个有效的矢量或栅格。
 
-    整个读取侧只对这两种形体有定义。一个矢量表、一个无效图层或别人的图层类型都是
-    ``INVALID_LAYER`` 而不是空答案，因为「没有分类」和「不适用」是两个不同结果。
+    样式读写只对这两种形体有定义，所以别人的图层类型是 ``INVALID_LAYER`` 而不是空答案：「没有分类」
+    和「不适用」是两个结果。几何不是条件：一个没有几何的矢量表（属性表）也有字段、表单、属性表
+    设置这些分类，也能导出 QML——桌面版对它给出的正是整张 18 项清单。
 
-    The whole read side is defined only for those two shapes.  A vector table, an
-    invalid layer or somebody else's layer type is ``INVALID_LAYER`` rather than
-    an empty answer, because "no categories" and "not applicable" are different
-    results.
+    Style reads and writes are defined only for those two shapes, so somebody else's
+    layer type is ``INVALID_LAYER`` rather than an empty answer: "no categories" and
+    "not applicable" are different results.  Geometry is not a condition: a
+    geometry-less vector table still has fields, forms and attribute-table settings to
+    export, and desktop's two style dialogs hand it the whole 18-item list.
     """
 
-    from qgis.core import Qgis
-
     layer = project_layer(project, layer_id)
-    if not layer.isValid():
-        raise FrameworkError(INVALID_LAYER, "the layer is not valid")
-    kind = layer_kind(layer)
-    if kind == "raster":
-        return layer
-    if kind == "vector" and layer.geometryType() in (
-        Qgis.GeometryType.Point,
-        Qgis.GeometryType.Line,
-        Qgis.GeometryType.Polygon,
-    ):
-        return layer
-    raise FrameworkError(INVALID_LAYER, "the layer is not a spatial vector or raster layer")
+    if not layer.isValid() or layer_kind(layer) == "other":
+        raise FrameworkError(INVALID_LAYER, "the layer is not a valid vector or raster layer")
+    return layer
+
+
+def layer_for_renderer(project: Any, layer_id: str) -> Any:
+    """一个能读、能换渲染器的图层：桌面版给它符号页的那个。
+
+    矢量属性对话框只看一件事：图层有没有渲染器；没有的话整个符号页被禁用
+    （``qgsvectorlayerproperties.cpp:1534-1549``：`if ( mLayer->renderer() ) … else
+    mOptsPage_Style->setEnabled( false )`），里面那个渲染器下拉框、当前渲染器和“换上这个渲染器”的
+    按钮就都不存在。一个没有几何的矢量表就是这样（实测 ``renderer()`` 是 ``None``）。所以没有
+    渲染器的图层在这里也是 ``INVALID_LAYER``：同一个前置条件，同一句话。
+
+    栅格那一半没有对应的页面级守卫（``qgsrasterlayerproperties.cpp`` 只在 ``:1095`` 的槽里早返回），
+    但它对有效栅格不可达：有效栅格总有渲染器。
+
+    A layer whose renderer can be read or replaced: the one desktop gives a symbology
+    page to.  The vector properties dialog looks at one thing: whether the layer has a
+    renderer.  Without one the whole page is disabled
+    (``qgsvectorlayerproperties.cpp:1534-1549``: `if ( mLayer->renderer() ) … else
+    mOptsPage_Style->setEnabled( false )`), and its renderer combo box, its current
+    renderer and its install button do not exist.  A geometry-less vector table is
+    exactly that case (measured: ``renderer()`` is ``None``).  So a layer without a
+    renderer is ``INVALID_LAYER`` here too: one precondition, one sentence.
+
+    The raster half has no page-level guard of that kind
+    (``qgsrasterlayerproperties.cpp`` only returns early inside the slot at ``:1095``), but
+    it is unreachable for a valid raster: a valid raster always has a renderer.
+    """
+
+    layer = layer_for_style(project, layer_id)
+    if layer.renderer() is None:
+        raise FrameworkError(INVALID_LAYER, "the layer has no renderer")
+    return layer
 
 
 def style_categories(layer: Any) -> tuple[StyleCategoryName, ...]:
@@ -676,11 +769,19 @@ def style_categories(layer: Any) -> tuple[StyleCategoryName, ...]:
 def style_category_flag(names: Sequence[str]) -> Any:
     """恰好点出 ``names`` 的原生位标志，按给定的顺序。
 
-    The native bit flag naming exactly ``names``, in their given order.
+    空序列对应原生那个“一个都不选”的位标志：保存样式对话框有 Deselect All
+    （``qgsmaplayersavestyledialog.cpp:82``），导出层接受零分类（实测返回空消息、163 字节文档）。
+
+    The native bit flag naming exactly ``names``, in their given order.  An empty
+    sequence is the native "nothing selected" flag: the save-style dialog has
+    Deselect All (``qgsmaplayersavestyledialog.cpp:82``) and the exporter takes zero
+    categories (measured: an empty message and a 163-byte document).
     """
 
     from qgis.core import QgsMapLayer
 
+    if not names:
+        return QgsMapLayer.StyleCategories()
     flag = getattr(QgsMapLayer, names[0])
     for name in names[1:]:
         flag = flag | getattr(QgsMapLayer, name)
@@ -698,7 +799,7 @@ class LayerListStyleCategoriesResult(Result):
 
 class LayerGetQmlParams(Params):
     layer_id: StrictStr = Field(min_length=1)
-    categories: Annotated[list[StyleCategoryName] | None, Field(min_length=1)] = None
+    categories: list[StyleCategoryName] | None = None
 
 
 class LayerGetQmlResult(Result):
@@ -795,6 +896,31 @@ class LayerGetQml(
         return LayerGetQmlResult(layer_id=request.layer_id, qml=document.toString())
 
 
+def raster_renderer_types(layer: Any) -> list[str]:
+    """栅格符号页下拉框里的那些名字：注册表清单再按图层的 ``rasterType()`` 过滤。
+
+    桌面版在 ``renderersList()`` 之后还有一层过滤：普通栅格不列 ``singlebandcolordata``，而
+    ``SingleBandColorData`` 栅格只列它那一个（``qgsrasterlayerproperties.cpp:443-455``）。实测：
+    单波段、三波段、调色板三类栅格都是 7 个名字，注册表是 8 个。
+
+    The names desktop puts in a raster layer's renderer combo: the registry list filtered
+    once more by the layer's own ``rasterType()``.  Desktop applies that filter after
+    ``renderersList()``: an ordinary raster does not list ``singlebandcolordata``, and a
+    ``SingleBandColorData`` raster lists only that one
+    (``qgsrasterlayerproperties.cpp:443-455``).  Measured: one-band, three-band and
+    paletted rasters each list 7 names against a registry of 8.
+    """
+
+    from qgis.core import Qgis, QgsRasterRendererRegistry
+
+    single_band_color_data = layer.rasterType() == Qgis.RasterLayerType.SingleBandColorData
+    return [
+        name
+        for name in QgsRasterRendererRegistry().renderersList()
+        if (name == "singlebandcolordata") == single_band_color_data
+    ]
+
+
 class LayerListAvailableRenderers(
     BaseQuery[LayerListAvailableRenderersParams, LayerListAvailableRenderersResult],
     MainThreadOperationMixin[LayerListAvailableRenderersParams, LayerListAvailableRenderersResult],
@@ -812,16 +938,16 @@ class LayerListAvailableRenderers(
     def execute_main(
         self, ctx: OperationContext, request: LayerListAvailableRenderersParams
     ) -> LayerListAvailableRenderersResult:
-        from qgis.core import QgsApplication, QgsRasterRendererRegistry
+        from qgis.core import QgsApplication
 
-        layer = layer_for_style(ctx.project, request.layer_id)
+        layer = layer_for_renderer(ctx.project, request.layer_id)
         if layer_kind(layer) == "raster":
             # 3.44 里 ``QgsApplication.rasterRendererRegistry()`` 是 SIP_SKIP / it is SIP_SKIP
             # in 3.44, 而且类没绑 ``instance()`` / and the class does not bind instance(),
             # 所以自建一个注册表对象是拿到栅格清单的唯一 Python 路径 / so a registry object is
             # the only Python path to the raster list, 也是这个构建给的全部 API / and all this
             # 构建给的全部 / build exposes.
-            renderer_types = QgsRasterRendererRegistry().renderersList()
+            renderer_types = raster_renderer_types(layer)
         else:
             renderer_types = QgsApplication.rendererRegistry().renderersList(layer)
         return LayerListAvailableRenderersResult(renderer_types=sorted(set(renderer_types)))
@@ -831,9 +957,9 @@ class LayerGetRenderer(
     BaseQuery[LayerGetRendererParams, LayerGetRendererResult],
     MainThreadOperationMixin[LayerGetRendererParams, LayerGetRendererResult],
 ):
-    """图层当前那个渲染器的类型名，有的话。
+    """图层当前那个渲染器的类型名。
 
-    The type name of the renderer the layer currently has, if any.
+    The type name of the renderer the layer currently has.
     """
 
     name = "layer.get_renderer"
@@ -844,11 +970,10 @@ class LayerGetRenderer(
     def execute_main(
         self, ctx: OperationContext, request: LayerGetRendererParams
     ) -> LayerGetRendererResult:
-        layer = layer_for_style(ctx.project, request.layer_id)
-        renderer = layer.renderer()
+        layer = layer_for_renderer(ctx.project, request.layer_id)
         return LayerGetRendererResult(
             layer_id=request.layer_id,
-            renderer_type="" if renderer is None else renderer.type(),
+            renderer_type=layer.renderer().type(),
         )
 
 
@@ -1305,9 +1430,12 @@ def vector_renderer(layer: Any, config: VectorRendererConfig) -> Any:
         QgsSingleSymbolRenderer,
     )
 
-    expected = expected_symbol_type(layer)
+    # 不画符号不需要几何：桌面版的 "No symbols" 对任何有渲染器的图层都能选，几何未知也一样。
+    # Not drawing a symbol needs no geometry: desktop's "No symbols" is available on every
+    # layer that has a renderer, unknown geometry included.
     if isinstance(config, NullSymbolRendererConfig):
         return QgsNullSymbolRenderer()
+    expected = expected_symbol_type(layer)
     if isinstance(config, SingleSymbolRendererConfig):
         return QgsSingleSymbolRenderer(simple_symbol(config.symbol, expected))
     if isinstance(config, CategorizedRendererConfig):
@@ -1427,7 +1555,7 @@ class LayerSetRenderer(
     def execute_main(
         self, ctx: OperationContext, request: LayerSetRendererParams
     ) -> LayerSetRendererResult:
-        layer = layer_for_style(ctx.project, request.layer_id)
+        layer = layer_for_renderer(ctx.project, request.layer_id)
         try:
             renderer = build_renderer(layer, request.renderer)
             layer.setRenderer(renderer)

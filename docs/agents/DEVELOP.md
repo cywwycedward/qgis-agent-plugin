@@ -211,7 +211,7 @@ qgis-agent-plugin/
 │   │   ├── engine.py             OperationEngine：run_sync/submit/get/cancel/shutdown/on_project_replaced
 │   │   ├── execution_store.py    ExecutionStore：记录快照、状态机、保留策略
 │   │   ├── context.py            ProjectLifecycle（epoch）与 require_main_thread
-│   │   ├── config.py             Settings（五项配置）与 from_mapping
+│   │   ├── config.py             Settings（四项配置）与 from_mapping
 │   │   ├── security.py           absolute_path（只要求绝对路径）
 │   │   └── runners/
 │   │       ├── __init__.py       只有 docstring
@@ -262,7 +262,7 @@ qgis-agent-plugin/
 
 | 模块 | 公开名字 | 说明 |
 | --- | --- | --- |
-| `core/models.py` | 25 个错误码常量、`ERROR_CODES` | 见 §7.4 的完整表 |
+| `core/models.py` | 24 个错误码常量、`ERROR_CODES` | 见 §7.4 的完整表 |
 | | `OperationKind`、`ExecutionStrategy`、`ExecutionStatus` | 三个 `StrEnum` |
 | | `FrameworkError(code, message)` | 控制面异常；构造时校验 code 已知 |
 | | `ErrorDetail`、`CancelReceipt`、`ExecutionRecord`、`OperationSpec` | Pydantic DTO，全部 `extra="forbid"` |
@@ -278,7 +278,7 @@ qgis-agent-plugin/
 | | `BackgroundRunner`、`BackgroundCanceller` | 后台适配器的两个注入点（类型别名） |
 | `core/execution_store.py` | `ExecutionStore`、`TERMINAL_STATUSES` | 唯一的记录写入者 |
 | `core/context.py` | `ProjectLifecycle`、`require_main_thread` | epoch 与线程 |
-| `core/config.py` | `Settings` | 五项配置的 frozen dataclass |
+| `core/config.py` | `Settings` | 四项配置的 frozen dataclass |
 | `core/security.py` | `absolute_path` | 路径参数的唯一规则：必须是绝对路径 |
 | `core/runners/main_thread.py` | `MainThreadRunner` | `post(execution_id, callback)` |
 | `core/runners/qgs_task.py` | `OperationTaskRunner`、`task_class()` | 后台适配器与 `QgsTask` 子类 |
@@ -578,7 +578,7 @@ class OperationContext:
     iface: Any  # QGIS 的 iface，或验收用的替身；headless 里可能是 None
     project: Any  # 当前 QgsProject 实例；headless 里是替身
     lifecycle: Any  # ProjectLifecycle 实例（工程代数）；契约层只透传，不依赖它的具体类型
-    policy: Settings  # 五项配置（frozen）
+    policy: Settings  # 四项配置（frozen）
 ```
 
 `OperationContext` 只交给主线程阶段，**永远不进 worker**。
@@ -628,7 +628,7 @@ revalidate_instances="always")`——拒未知键，并且传进来的已构造�
 `CANCELLED` 两者都不能有；非终态不能有 `finished_at` 或 `result`；只有 `FAILED` 能有 `error`。
 一份"状态机到不了的组合"会在构造时就 `ValueError`，不会被静默修好。
 
-`ErrorDetail` 有 `code`、`message`、`details`；`code` 在构造时校验必须在 25 个已知错误码里；
+`ErrorDetail` 有 `code`、`message`、`details`；`code` 在构造时校验必须在 24 个已知错误码里；
 `details` 目前恒为 `None`（没有通路的字段不要假装有）。
 
 两类失败，不要混：
@@ -636,7 +636,7 @@ revalidate_instances="always")`——拒未知键，并且传进来的已构造�
 | 形态 | 什么时候 | 调用方拿到 |
 | --- | --- | --- |
 | 控制面异常 | 调用本身无效：未知 Operation、未知执行 id、非主线程、引擎已关闭、对后台操作调 `run_sync` | 抛 `FrameworkError`，有 `.code`/`.message`，**不建记录** |
-| `FAILED` 记录 | 调用有效但执行失败：入参校验、路径策略、GIS 动作、输出校验、任务提交失败 | `ExecutionRecord.status == "FAILED"`，`record.error.code` 是 25 个码之一 |
+| `FAILED` 记录 | 调用有效但执行失败：入参校验、路径策略、GIS 动作、输出校验、任务提交失败 | `ExecutionRecord.status == "FAILED"`，`record.error.code` 是 24 个码之一 |
 
 ### 6.7 状态机（`ExecutionStore._TRANSITIONS`）
 
@@ -714,7 +714,6 @@ OperationEngine(
 | `max_active_background` | 适配器活动表里的任务数：`SCHEDULED`、`RUNNING`、`CANCEL_REQUESTED`（已交给 QGIS、还没结束）；再多一个就在等待队列里按提交顺序排。引擎里的 `_ACTIVE_BACKGROUND` 只有 `SCHEDULED`/`RUNNING`，那是"发取消请求"的集合，不用于限流（见 §6.10） |
 | `max_terminal_records` | 终态记录保留条数，超出先淘汰最旧的 |
 | `terminal_ttl_seconds` | 终态记录保留秒数，超时即淘汰 |
-| `max_snapshot_features` | 后台快照的要素上限（`layer.sum_numeric_field` 用） |
 
 保留策略没有定时器：`get` 与 `ids` 每次都 prune；`create`/`transition` 只在写入终态记录时
 prune。一条超过 TTL 的记录在被问到之前仍占内存，被问到时已经不存在。
@@ -830,7 +829,7 @@ class OperationTask(QgsTask):
 
 `initGui()` 的顺序是固定的：
 
-1. `read_settings()`：从 `QgsSettings` 读 `qgis_agent_plugin/<五项键>`，`Settings.from_mapping`
+1. `read_settings()`：从 `QgsSettings` 读 `qgis_agent_plugin/<四项键>`，`Settings.from_mapping`
    转成 frozen dataclass。没写的键保持默认。
 2. `ProjectLifecycle()`。
 3. 为本插件单独建一个 `QgsTaskManager()`（不用全局的，`cancelAll()` 会波及别的插件）。
@@ -869,7 +868,6 @@ class OperationTask(QgsTask):
 | `max_pending` | 32 | 排队上限（主线程 + 后台合计） |
 | `max_terminal_records` | 200 | 终态记录保留条数 |
 | `terminal_ttl_seconds` | 1800 | 终态记录保留秒数 |
-| `max_snapshot_features` | 10000 | 后台快照要素上限 |
 
 `Settings.from_mapping` 的规则：键缺失或为 `None` 都算"没设置"，保留默认；这个版本不认识的键
 （旧配置里留下的 `allowed_data_roots` 之类）直接忽略，不让加载失败；计数接受数字字符串，但
@@ -988,7 +986,7 @@ absolute_path(raw: str) -> Path
 
 ### 7.4 错误码
 
-25 个码是完整词表，多一个少一个都是缺陷（`FrameworkError` 与 `ErrorDetail` 构造时都校验）。
+24 个码是完整词表，多一个少一个都是缺陷（`FrameworkError` 与 `ErrorDetail` 构造时都校验）。
 按"什么时候产生"分三类，调用方的处理方式完全不同：
 
 | 类 | 出现方式 | 有没有记录 | 码 |
@@ -1018,11 +1016,10 @@ absolute_path(raw: str) -> Path
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |
 | `TARGET_EXISTS` | 目标已存在且没有 `overwrite=true` | `project.save` |
 | `PATH_NOT_ALLOWED` | 路径不是绝对的，或不是本地路径字形；工程文件过大、声明 XML 实体、不是 UTF-8、点名远程数据源 | `absolute_path`、`project.open` 的读前扫描 |
-| `INVALID_LAYER` | 图层源加载不出有效图层，或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
+| `INVALID_LAYER` | provider 的清单为空（没有认得出的子图层），或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
 | `LAYER_NOT_FOUND` | 工程里没有这个 id | `layer.get_info/set_visibility/sum_numeric_field` 与样式读 |
-| `LAYER_NOT_IN_TREE` | 图层已注册但没有树节点（`add_to_legend=false`） | `layer.set_visibility` |
+| `LAYER_NOT_IN_TREE` | 图层已注册但不在图层树里（加载来的工程可以这样；`layer.add` 已经造不出这种图层） | `layer.set_visibility` |
 | `INVALID_FIELD_TYPE` | 没有该字段、字段非数值、值或和不是有限数 | `layer.sum_numeric_field`、`layer.set_renderer` |
-| `SNAPSHOT_LIMIT_EXCEEDED` | 要素数超过 `max_snapshot_features` | `layer.sum_numeric_field` |
 | `TOO_MANY_EXECUTIONS` | `QUEUED` 数超过 `max_pending` | 引擎 `submit` |
 | `TASK_SUBMISSION_FAILED` | 没装后台适配器，或 `addTask` 返回 0 | 引擎 / 适配器 |
 | `STALE_PROJECT` | 结果落地时工程代数已变 | 后台 `finalize_main` / 适配器 |
@@ -1097,10 +1094,10 @@ absolute_path(raw: str) -> Path
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对路径）、`name`（1–128）、`sub_layer`（仅 vector，`^[A-Za-z0-9_-]{1,64}$`）、`add_to_legend`（默认 `true`） |
-| 返回 | `layer_id`、`name`、`kind`、`provider`（`ogr` 或 `gdal`）、`crs_authid` |
-| 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（构造后 `isValid()` 为假） |
-| 行为 | provider 由 `kind` 决定，调用方不能指定；sub-layer 的 URI 由 OGR provider 的 `encodeUri` 生成，不手拼；`add_to_legend=false` 的图层没有树节点，之后 `set_visibility` 会得 `LAYER_NOT_IN_TREE` |
+| 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对路径）、`name`（≥1，无长度上限）、`sub_layer`（≥1，名字是 provider 的自由文本；矢量与栅格都行） |
+| 返回 | `layer_id`、`name`、`kind`、`provider`（`ogr` 或 `gdal`）、`crs_authid`（图层无效时为 `""`） |
+| 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（provider 的 `querySublayers` 清单为空，或 `sub_layer` 不在那份清单里） |
+| 行为 | provider 由 `kind` 决定，调用方不能指定；门槛是“provider 认不认得这个源”，不是 `isValid()`：认出的子图层照样加进图例，读不出来的靠坏图层图标提示（桌面版 `qgsapplayerhandling.cpp:796-815` 与 `:1383-1390` 的分工）；子图层的 URI 就是 provider 那条清单里的 `uri()`（`qgsprovidersublayerdetails.cpp:22-28`），不自己拼；每次调用都进图例（桌面版的 `addToLegend=false` 是“先进工程、随后进分组”，图层仍在图例里） |
 
 #### layer.list
 
@@ -1127,34 +1124,34 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1）、`visible`（StrictBool） |
 | 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible`、`changed`（本次是否真的改了） |
 | 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE` |
-| 行为 | 只动这一个节点：不碰父级组、不碰其他图层、不改数据源 |
+| 行为 | 勾上时连祖先分组一起勾（图例的勾选框对叶子节点就是这么做的：`QgsLayerTreeModel.setData` → `setItemVisibilityCheckedParentRecursive`），取消只写这一个节点；`changed` 说“本次有没有真的改变可见结果”，所以节点已勾而父组未勾时仍算改变；按住 Ctrl 时桌面版取消也会连祖先一起取消（`qgslayertreemodel.cpp:406-412`），那一半没有参数表达 |
 
 #### layer.sum_numeric_field
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1）、`field_name`（≥1，必须是整型或浮点字段） |
-| 返回 | `layer_id`、`field_name`、`count`（参与求和的非 null 要素数）、`skipped_null`、`total`、`snapshot_project_epoch` |
-| 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没字段、非数值、值或和不是有限数）、`SNAPSHOT_LIMIT_EXCEEDED`、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
-| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch；非有限值与溢出都拒（NaN/Infinity 不是合法 JSON）；超过 `max_snapshot_features` 直接拒，不截断；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
-| 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程（`Dummy-1`）、`finished` 回调在 `MainThread`；10001 要素 → `SNAPSHOT_LIMIT_EXCEEDED`；记录里的进度序列（4 要素）`PREPARING 0 → SCHEDULED 0 → RUNNING 0 → RUNNING 33.333 → RUNNING 66.667 → FINALIZING 66.667 → SUCCEEDED 100`，9000 要素 `RUNNING 0 → 1.0 → 99.0 → FINALIZING 99.0 → SUCCEEDED 100` |
+| 返回 | `layer_id`、`field_name`、`count`（参与求和的非 null 要素数）、`skipped_null`、`total`、`selected_only`（本次是否只算了选择集）、`snapshot_project_epoch` |
+| 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没字段、非数值、值或和不是有限数）、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
+| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch；跟随选择集：有选择集时只算选中的要素，没有时算全部——这是章程 A6 定的规则，面板上有这个开关（`qgsstatisticalsummarydockwidget.cpp:210` 读它、`:218` 交给 `getValuesIterator`，后者在 `qgsvectorlayerutils.cpp:73-80` 选 `getSelectedFeatures` 还是 `getFeatures`），但面板默认是否勾选不在本检出里，所以插件不声称“面板默认如此”；结果里的 `selected_only` 如实反映这次用了哪一种；不加参数（那是图层的状态，不是调用方的问句）；非有限值与溢出都拒（NaN/Infinity 不是合法 JSON）；要素数没有上限（桌面版统计面板也不限，`qgsvectorlayerutils.cpp:73-80`）；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
+| 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`、`selected_only=false`；选中 2 个（`pop > 50`）后同一调用 → `count=2`、`total=160.0`、`selected_only=true`，`removeSelection()` 后又回到整层 `total=200.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程（`Dummy-1`）、`finished` 回调在 `MainThread`；记录里的进度序列（4 要素）`PREPARING 0 → SCHEDULED 0 → RUNNING 0 → RUNNING 33.333 → RUNNING 66.667 → FINALIZING 66.667 → SUCCEEDED 100`，9000 要素 `RUNNING 0 → 1.0 → 99.0 → FINALIZING 99.0 → SUCCEEDED 100`；要素数不再有上限（实测 100 万要素的拷列成本 3.14 s / 8 MB 元组） |
 
 #### layer.list_style_categories
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`categories`（按 QGIS 声明顺序；矢量 18 个、栅格 10 个） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或矢量没有点线面几何） |
-| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
+| 返回 | `layer_id`、`categories`（桌面版那两个样式对话框的勾选框名单；矢量 18 个按枚举声明顺序，栅格 9 个按 `QgsMapLayerStyleCategoriesModel` 的顺序，不含 `Labeling`） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，含别人的图层类型） |
+| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推；没有几何的矢量表也算数（桌面版照样给它整张 18 项）；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
 
 #### layer.get_qml
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部适用项；给了就非空、不重复、必须适用） |
+| 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部适用项；给了就不重复、必须适用，空列表=一个都不导出） |
 | 返回 | `layer_id`、`qml`（XML 字符串，只在内存里） |
-| 业务错误码 | `INVALID_INPUT`（重复或不适用的 category）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（导出失败） |
+| 业务错误码 | `INVALID_INPUT`（重复或不适用的 category）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格）、`INTERNAL_ERROR`（导出失败） |
 | 行为 | QML 来自图层自己的 `exportNamedStyle`；不写文件、不回显导出器的原始错误文本（可能带路径） |
 
 #### layer.list_available_renderers
@@ -1163,17 +1160,17 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
 | 返回 | `renderer_types`（去重、排序；来自活动的 QGIS 注册表，不是本地表） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER` |
-| 行为 | 矢量走 `QgsApplication.rendererRegistry()`，栅格走 `QgsRasterRendererRegistry()`（3.44 没有绑定实例化那个访问器） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器） |
+| 行为 | 矢量走 `QgsApplication.rendererRegistry()`，栅格走 `QgsRasterRendererRegistry().renderersList()` 再按图层的 `rasterType()` 过滤（桌面版下拉框就是这两步：`qgsrasterlayerproperties.cpp:443-455`），所以普通栅格里没有 `singlebandcolordata`，而 `SingleBandColorData` 栅格里只有它；前置条件是桌面版那个符号页存在，即图层有渲染器 |
 
 #### layer.get_renderer
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`renderer_type`（没有 renderer 时为 `""`） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER` |
-| 行为 | 只读一个类型名，不返回 renderer 对象或它的配置 |
+| 返回 | `layer_id`、`renderer_type`（图层当前渲染器的类型名） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器） |
+| 行为 | 只读一个类型名，不返回 renderer 对象或它的配置；没有渲染器的图层（例如一张属性表）在桌面版里连符号页都没有，所以也是 `INVALID_LAYER` |
 
 #### layer.set_renderer
 
@@ -1181,8 +1178,8 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `layer_id`（≥1）、`renderer`（判别联合，`type` 字段选型） |
 | 返回 | `layer_id`、`renderer_type`（安装后的类型名） |
-| 业务错误码 | `INVALID_INPUT`（符号与几何不符、category 重复、category 值与字段类型不符、band 越界、规则过滤器语法错、min≥max、ranges 重叠或未排序、stops 未严格递增）、`INVALID_FIELD_TYPE`（没有该字段/不是数值）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（原生设置失败，原生文本只进日志） |
-| 行为 | 整张 renderer 先在本地搭好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式；成功后 `triggerRepaint()` + `setDirty(True)`；只有这一个样式 op 是 destructive |
+| 业务错误码 | `INVALID_INPUT`（符号与几何不符、category 重复、category 值与字段类型不符、band 越界、规则过滤器语法错、min≥max、ranges 重叠或未排序、stops 未严格递增）、`INVALID_FIELD_TYPE`（没有该字段/不是数值）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（原生设置失败，原生文本只进日志） |
+| 行为 | 整张 renderer 先在本地搭好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式；成功后 `triggerRepaint()` + `setDirty(True)`（与桌面版 `apply()` 的两步相同）；只有这一个样式 op 是 destructive；前置条件也是桌面版的：图层有渲染器才有符号页；`nullSymbol` 不需要几何，所以几何未知的图层也能装它 |
 
 配置矩阵（`renderer.type`，共 9 种）：
 
@@ -1370,7 +1367,7 @@ class LayerSumNumericField(
 
 | 阶段 | 线程 | 可以做 | 不可以做 |
 | --- | --- | --- | --- |
-| `prepare_main` | 主线程 | 读 `ctx.project`、读要素、读字段、算小规模前置统计、把状态拷成纯数据 | 把 QGIS 对象放进快照；做**没有上限**的长循环（有上限的拷贝，例如 `max_snapshot_features` 个要素，正是本阶段的职责） |
+| `prepare_main` | 主线程 | 读 `ctx.project`、读要素、读字段、算小规模前置统计、把状态拷成纯数据 | 把 QGIS 对象放进快照；做没有取消检查的长循环 |
 | `execute_worker` | Qt 线程池 | 纯 Python 计算；用 `control.is_cancelled()` / `control.set_progress()` | 碰 `ctx`、碰 `QgsProject`、碰任何 QGIS/Qt 对象；假设自己在主线程 |
 | `finalize_main` | 主线程 | 比对 epoch、把 worker 结果包装成 `output_model`、必要时做少量主线程校验 | 写工程状态（本框架的后台操作都是 query）；重新读一遍大数据 |
 
@@ -1381,8 +1378,7 @@ class LayerSumNumericField(
 - 快照里带上 `project_epoch`，`finalize_main` 里与 `ctx.lifecycle.current_epoch` 比对；不一致抛
   `STALE_PROJECT`。适配器在落地前也会比对一次，两处都要有（一处防"算完了工程已换"，一处防
   "调用方忘了"）。
-- 超限就拒绝，不截断：静默的部分结果比失败更糟。上限从 `ctx.policy` 读（例如
-  `max_snapshot_features`），不要写死。
+- 拷贝要素时也要看取消，不要把一个几十万要素的列一口气读完；上限类阈值不要再发明（要素数就是没有上限，实测 100 万要素 3.14 s）。
 - 长循环里周期性检查取消并报进度；不要在每个元素上都报进度（适配器有 100 ms 节流，但 worker
   自己也不该制造无意义的调用）。进度不要主动写 100，成功由适配器写。
 - `execute_worker` 里可以抛 `FrameworkError` 表达业务失败（适配器保留错误码，例如求和溢出为
@@ -1418,7 +1414,7 @@ class LayerSumNumericField(
 - [ ] QGIS/Qt 只在函数体内 import（`ui/dock.py` 除外）。
 - [ ] 路径参数只走 `absolute_path`，不自己做存在性预检。
 - [ ] 可预期失败用 `FrameworkError` + 既有错误码。
-- [ ] 后台操作：快照纯数据、带 epoch、执行中检查取消、超限拒绝、结果无 NaN/Inf。
+- [ ] 后台操作：快照纯数据、带 epoch、执行中检查取消、结果无 NaN/Inf。
 - [ ] 新增了模块的话，它已加进 `tests/test_package.py` 的导入列表。
 - [ ] `metadata.txt` 与本文档里的 Operation 计数已同步。
 - [ ] 测试覆盖成功、输入失败、业务失败；需要真实 QGIS 的部分进验收跑。
@@ -1535,7 +1531,6 @@ Git flow：
 | 值本身就是 URL 的元数据 | 读前扫描会拒绝 | 这类工程打不开，是统一判据的已知误拒 |
 | 容器格式内部的远程源 | 不检查：只审调用方点名的文件，不审文件内部引用的源（例如本地 `.vrt` 里的 `/vsicurl/`） | 把这类文件当不可信输入时才需要升级这层检查（代码里的 `shortcut:` 注释写明了这个条件） |
 | 布局图片等其它取数落点 | 没有逐项枚举 | 不在承诺内 |
-| 后台快照上限 | `max_snapshot_features` 默认 10000 | 超限 `SNAPSHOT_LIMIT_EXCEEDED`，不截断 |
 | 后台结果的口径 | 是快照，不是结束时的实时值 | 期间有人编辑，返回的仍是旧数 |
 | 进度 | 最多每 100 ms 写一次；从不写 100 除成功 | 记录里的 `RUNNING` 可能来自完成路径补写 |
 | 记录保留 | 按条数与 TTL，在访问与写入终态时 prune | 超时记录在被访问前仍占内存；被访问时已经不存在 |

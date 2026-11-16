@@ -464,6 +464,7 @@ class SlowSum(LayerSumNumericField):
             count=len(snapshot.values),
             total=sum(snapshot.values),
             skipped_null=snapshot.skipped_null,
+            selected_only=snapshot.selected_only,
             project_epoch=snapshot.project_epoch,
         )
 

@@ -26,16 +26,15 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Settings:
-    """一份解析好的配置：五个计数。
+    """一份解析好的配置：四个计数。
 
-    One resolved configuration: five counts.
+    One resolved configuration: four counts.
     """
 
     max_active_background: int = 2
     max_pending: int = 32
     max_terminal_records: int = 200
     terminal_ttl_seconds: int = 1800
-    max_snapshot_features: int = 10000
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> Settings:
