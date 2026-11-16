@@ -97,12 +97,14 @@ PROJECT_SUFFIXES = (".qgs", ".qgz")
 def _save_target(raw: str) -> str:
     """``path`` 的形状：后缀是 ``.qgs`` 或 ``.qgz``，大小写不敏感。
 
-    只管后缀：绝对路径由 ``absolute_path`` 判，存在与可写由 ``write()`` 回答。
+    只判后缀：绝对路径由 ``absolute_path`` 判，目标存不存在由 ``execute_main`` 的覆盖检查回答，
+    可写与怎么写由 ``write()`` 回答。
 
     The shape of ``path``: a ``.qgs`` or ``.qgz`` suffix, case-insensitively.
 
-    The suffix is all this judges: ``absolute_path`` checks the absolute form, and ``write()``
-    answers existence and writability.
+    Only the suffix is judged here: ``absolute_path`` checks the absolute form, the overwrite check
+    in ``execute_main`` answers whether the target exists, and ``write()`` answers writability and
+    how to write.
     """
 
     if Path(raw).suffix.lower() not in PROJECT_SUFFIXES:
