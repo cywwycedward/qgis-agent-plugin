@@ -3,9 +3,9 @@
 四个都跑在主线程：``QgsProject`` 不能从后台线程碰。新建、打开、保存会替换或写入工程状态，所以把
 自己标成破坏性，调用方不读代码也能看见风险。
 
-替换当前工程之前先看它有没有没保存下来的东西：图层里没提交的编辑、带要素的 memory 图层或临时图层、
-工程自己的脏标记、栅格波段的属性表；依赖图层的任务还在跑时也不行，那个判断 QGIS 用的是模态框，而
-这里等不到人点。任何一条成立，就只有 ``discard_current=true`` 能让动作继续。
+替换当前工程之前，先看有没有任务还在用它的图层：那种任务必须由调用方取消掉再重试，``discard_current``
+不回答这一问。然后看工程里有没有没保存下来的东西：图层里没提交的编辑、带要素的 memory 图层或临时
+图层、工程自己的脏标记、栅格波段的属性表；``discard_current=true`` 就是这四问共同的“丢掉”答案。
 
 ``project.open`` 另有两处比 QGIS 早拒的文件形状，都是实测能让进程直接消失的：嵌套过深的文档与加密
 的 ``.qgz`` 成员。
@@ -16,11 +16,11 @@ All four run on the main thread, because a ``QgsProject`` may not be touched fro
 three that replace or write state declare themselves destructive so a caller sees the risk
 without reading the code.
 
-Before the current project is replaced, what it holds unsaved is looked at: uncommitted layer
-edits, a memory layer with features or a temporary layer, the project's own dirty flag, and a
-raster band's attribute table -- plus a task still depending on one of its layers, which QGIS
-answers with a modal box nobody here can dismiss.  Any of those means only
-``discard_current=true`` lets the action go on.
+Before the current project is replaced, tasks still using one of its layers are looked at: those
+have to be cancelled by the caller and the call retried, which ``discard_current`` does not
+answer.  Then what the project holds unsaved: uncommitted layer edits, a memory layer with
+features or a temporary layer, the project's own dirty flag, and a raster band's attribute
+table -- all four answered ``discard`` by ``discard_current=true``.
 
 ``project.open`` refuses two file shapes earlier than QGIS does, both measured to end the process
 outright: a document nested too deeply, and an encrypted ``.qgz`` member.
@@ -33,10 +33,11 @@ from __future__ import annotations
 
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from xml.parsers import expat
 
 from pydantic import (  # pyright: ignore[reportMissingImports]
+    AfterValidator,
     Field,
     StrictBool,
     StrictStr,
@@ -87,6 +88,27 @@ _NOT_CHANGED = "; it was not opened and the current project was not changed"
 # Bytes handed to the parser at a time, so the whole file need not fit in memory.
 _CHUNK = 1024 * 1024
 
+# 保存目标的后缀只有这两种：保存对话框按过滤器把名字补成其中之一，所以别的后缀不是它会给的答案。
+# The only two suffixes a save target may have: the save dialog appends one of them by filter, so
+# any other suffix is not an answer it can give.
+PROJECT_SUFFIXES = (".qgs", ".qgz")
+
+
+def _save_target(raw: str) -> str:
+    """``path`` 的形状：后缀是 ``.qgs`` 或 ``.qgz``，大小写不敏感。
+
+    只管后缀：绝对路径由 ``absolute_path`` 判，存在与可写由 ``write()`` 回答。
+
+    The shape of ``path``: a ``.qgs`` or ``.qgz`` suffix, case-insensitively.
+
+    The suffix is all this judges: ``absolute_path`` checks the absolute form, and ``write()``
+    answers existence and writability.
+    """
+
+    if Path(raw).suffix.lower() not in PROJECT_SUFFIXES:
+        raise ValueError("path must be a .qgs or .qgz path")
+    return raw
+
 
 class ProjectCreateParams(Params):
     discard_current: StrictBool = False
@@ -118,7 +140,7 @@ class ProjectOpenResult(Result):
 
 
 class ProjectSaveParams(Params):
-    path: StrictStr | None = Field(default=None, min_length=1)
+    path: Annotated[StrictStr, Field(min_length=1), AfterValidator(_save_target)] | None = None
     overwrite: StrictBool = False
 
 
@@ -210,17 +232,12 @@ class ProjectOpen(
         _refuse_if_ends_the_process(path)
 
         # QGIS 在 ``read()`` 之前先关掉当前工程，于是读失败时眼前这个是空的，而不是旧内容配上新
-        # 文件名。这里照抄这个顺序，失败状态才一样。
+        # 文件名；关掉与读取都在“不许置脏”的范围内，所以失败之后工程也是干净的。
         # QGIS closes the current project before ``read()``, so a failed read leaves an empty one
-        # rather than the old contents under a new file name.  Copying that order is what makes
-        # the failure state the same.
-        ctx.project.clear()
-
-        # 读的过程中不许把工程标脏：QGIS 打开工程时也是这么做的，于是刚打开的工程是干净的，读进
-        # 多少东西都一样。
-        # Nothing may dirty the project while it is read, which is what QGIS does when it opens one
-        # too: a project that was just opened is clean, whatever it loaded.
+        # rather than the old contents under a new file name; the close and the read both happen
+        # with dirtying blocked, so the project is clean after a failure too.
         with QgsProject.blockDirtying(ctx.project):
+            ctx.project.clear()
             opened = ctx.project.read(str(path))
         if not opened:
             # 失败原因由 QGIS 自己拼，它点出打不开的那个文件或解析器的抱怨。

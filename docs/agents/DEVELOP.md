@@ -1052,7 +1052,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `discard_current`（StrictBool，默认 `false`） |
 | 返回 | `crs_authid`（工程现在持有的规范 authid，构造不出 CRS 时是 `""`）、`layer_count`（默认模板可以带图层进来） |
 | 业务错误码 | `PROJECT_REPLACE_REQUIRED`（有任务还依赖当前工程的图层，或下面四道问句任一命中且没有 `discard_current=true`）、`INTERNAL_ERROR`（`iface.newProject(promptToSaveFlag=False)` 返回假） |
-| 行为 | 顺序就是 `QgisApp::fileNew(false)`：先任务检查（`QgsApplication.taskManager().tasksDependentOnLayer`；QGIS 那时弹 `Active Tasks` 模态框并返回假，这里把同一句话作为拒绝返回，调用方 `cancel` 掉任务再来），再三道问句：① 带 provider 的非 memory 矢量图层 `isEditable() && isModified()`；② 带要素的 memory 图层（设了 `skipMemoryLayersCheck` 的除外）或临时图层，两者都有时先报临时图层；③ 工程 `isDirty()`；④ 栅格波段的 RAT `isDirty()`，循环是 `bandNo = 1; bandNo < bandCount()`（最高那一带不问）。`discard_current=true` 就是这四句共同的 Discard 答案。然后 `iface.newProject(promptToSaveFlag=False)`：它自己清空当前工程、给新工程设置里的 CRS、读默认模板，最后 `setDirty(false)`。返回的 CRS 与图层数都从工程里读回来；新工程没有关联文件，所以没有 `file_path`。成功路径触发 `aboutToBeCleared`，`project_epoch` +1，旧代数的排队调用立即 `CANCELLED` |
+| 行为 | 先任务检查（`QgsApplication.taskManager().tasksDependentOnLayer`；QGIS 那时弹 `Active Tasks` 模态框并返回假，这里把同一句话作为拒绝返回，调用方 `cancel` 掉任务再来；这一问**不由 `discard_current` 回答**），再问四道问句（`QgisApp::fileNew` 在 `promptToSaveFlag` 为真时才问的就是这四道）：① 带 provider 的非 memory 矢量图层 `isEditable() && isModified()`；② 带要素的 memory 图层（设了 `skipMemoryLayersCheck` 的除外）或临时图层，两者都有时先报临时图层；③ 工程 `isDirty()`；④ 栅格波段的 RAT `isDirty()`，循环是 `bandNo = 1; bandNo < bandCount()`（最高那一带不问）。`discard_current=true` 就是这四句共同的 Discard 答案。然后 `iface.newProject(promptToSaveFlag=False)` 做 `QgisApp::fileNew(false)` 剩下的部分：清空当前工程、给新工程设置里的 CRS、读默认模板，最后 `setDirty(false)`。返回的 CRS 与图层数都从工程里读回来；新工程没有关联文件，所以没有 `file_path`。成功路径触发 `aboutToBeCleared`，`project_epoch` +1，旧代数的排队调用立即 `CANCELLED` |
 | 与 GUI 的偏差 | ① 不读 `qgis/askToSaveProjectChanges` 与 `askToSaveMemoryLayers`：它们只决定 GUI 问不问，而这里的问句就是 `discard_current`，读了会让同一组入参按用户偏好得出不同结果；② 没有 `crs_authid` 参数：`fileNew` 没有 CRS 入参，新工程的 CRS 来自设置与默认模板 |
 
 #### project.open
@@ -1062,17 +1062,17 @@ absolute_path(raw: str) -> Path
 | 参数 | `path`（StrictStr ≥1，绝对路径，**不判后缀**）；`discard_current`（默认 `false`） |
 | 返回 | `file_path`（调用方给的绝对路径）、`crs_authid`（可能为 `""`）、`layer_count`、`invalid_layer_count`（`isValid()` 为假的那些，就是 QGIS 那个 `unavailable layers` 对话框会列出来的） |
 | 业务错误码 | `PATH_NOT_ALLOWED`（不是绝对路径）、`PROJECT_REPLACE_REQUIRED`（与 `create` 同一组任务检查与四道问句）、`PROJECT_OPEN_FAILED`（`read()` 为假时消息就是 `QgsProject.error()`；嵌套超过 `MAX_PROJECT_DEPTH` 与加密成员是自写的一句加 `; it was not opened and the current project was not changed`，因为那两条拒在 `clear()` 之前） |
-| 行为 | 先任务检查与四道问句（`QgisApp::openProject` 的顺序），两者都拒在碰当前工程之前；再 `_refuse_if_ends_the_process(path)`（§7.2）；然后 `ctx.project.clear()`（`addProject` 先 `closeProject()`），再在 `QgsProject.blockDirtying()` 里 `read()`——`addProject` 全程挡着 dirty，所以刚打开的工程是干净的。不判后缀：`read()` 只把 `.qgz` 当压缩包、剩下的交给解析器（`x.qgs~` 备份也是这样打开的）。有坏图层算成功（`invalid_layer_count > 0`） |
+| 行为 | 先任务检查与四道问句（`QgisApp::openProject` 的顺序），两者都拒在碰当前工程之前；再 `_refuse_if_ends_the_process(path)`（§7.2）；然后在 `QgsProject.blockDirtying()` 里 `ctx.project.clear()` 与 `read()`（`addProject` 全程挡着 dirty：先 `closeProject()` 再 `read()`），所以打开的工程是干净的，读失败之后也是。不判后缀：`read()` 只把 `.qgz` 当压缩包、剩下的交给解析器（`x.qgs~` 备份也是这样打开的）。有坏图层算成功（`invalid_layer_count > 0`） |
 | 与 GUI 的偏差 | ① `<file>~` 备份那句补充问句不照拼：那是 Yes/No 问题，调用方可以自己再 open 一次那个路径；② 坏图层只报 `invalid_layer_count`，不复制那个对话框驱动的 `setDirty(true)`；③ `read()` 之后没有逐层检查（§7.2） |
 
 #### project.save
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `path`（StrictStr ≥1 \| null，为空则用工程当前关联文件；**不判后缀**）；`overwrite`（默认 `false`） |
+| 参数 | `path`（StrictStr ≥1 \| null，为空则用工程当前关联文件；给了就必须是 `.qgs`/`.qgz`，大小写不敏感，否则 `INVALID_INPUT`）；`overwrite`（默认 `false`） |
 | 返回 | `file_path`（写出的那个文件；`write()` 成功会把它记成关联文件） |
-| 业务错误码 | `PROJECT_PATH_REQUIRED`（没给路径且工程没有关联文件）、`PATH_NOT_ALLOWED`（不是绝对路径）、`TARGET_EXISTS`（**只有 Save As 才查**）、`PROJECT_SAVE_FAILED`（关联文件存在但不可写时是 QGIS 写之前那句 `The project file is not writable.`；`write()` 为假时是 `QgsProject.error()`） |
-| 行为 | 给了 `path` 就是 Save As：目标已存在且没有 `overwrite=true` 就拒（覆盖确认本来由保存对话框问，所以 `overwrite` 就是那个答案），不写视图设置。不给 `path` 就是 Save：先查关联文件可写（`QFileInfo.isWritable()`），再把 `iface.mapCanvas()` 的范围与旋转写进 `viewSettings()`（`QgisApp::fileSave` 的两步），最后 `write()`。不判后缀：后缀是保存对话框补的，`write()` 只按后缀决定 zip 还是 XML；不创建父目录 |
+| 业务错误码 | `PROJECT_PATH_REQUIRED`（没给路径且工程没有关联文件）、`INVALID_INPUT`（`path` 后缀不是 `.qgs`/`.qgz`）、`PATH_NOT_ALLOWED`（不是绝对路径）、`TARGET_EXISTS`（**只有 Save As 才查**）、`PROJECT_SAVE_FAILED`（关联文件存在但不可写时是 QGIS 写之前那句 `The project file is not writable.`；`write()` 为假时是 `QgsProject.error()`） |
+| 行为 | 给了 `path` 就是 Save As：目标已存在且没有 `overwrite=true` 就拒（覆盖确认本来由保存对话框问，所以 `overwrite` 就是那个答案），不写视图设置。不给 `path` 就是 Save：先查关联文件可写（`QFileInfo.isWritable()`），再把 `iface.mapCanvas()` 的范围与旋转写进 `viewSettings()`（`QgisApp::fileSave` 的两步），最后 `write()`。后缀：保存对话框把不是 `.qgs`/`.qgz` 的名字**补**成其中之一，所以这里收的只是它能给出的那些；`write()` 再按后缀决定写 zip 还是写 XML；不创建父目录 |
 | 与 GUI 的偏差 | `QgisApp::fileSave` 还查`磁盘上的文件在这次加载/上次保存之后被外部改过吗`（`Project Has Changed on Disk`），这里不查：那个时间戳是 QGIS Desktop 窗口自己记的，`QgsProject` 里没有对应值，操作层也不在调用之间留状态 |
 
 #### project.get_info

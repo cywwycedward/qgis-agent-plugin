@@ -245,6 +245,12 @@ class FakeProject:
         # While ``blockDirtying`` is in effect a dirtying call is dropped, as in ``QgsProject``.
         self.blocking = 0
         self.dirtied_while_blocked = 0
+        # 清空与读取各自记下当时有没有挡：真工程在清空时由图层树发信号叫 ``markDirty``。
+        # 没走到时是 -1。
+        # The close and the read each record whether blocking was in effect: at close time the real
+        # project is dirtied by signals from the layer tree.  -1 means the step never ran.
+        self.blocked_at_clear = -1
+        self.blocked_at_read = -1
 
     def mapLayers(self) -> dict[str, FakeMapLayer]:  # noqa: N802 - a PyQGIS name
         return dict(self.layers)
@@ -277,13 +283,18 @@ class FakeProject:
         self.clears += 1
         self.layers = {}
         self.file_name = ""
-        self.dirty = False
         self.crs_authid = ""
         self.title_text = ""
+        self.blocked_at_clear = self.blocking
+        # 清空会经由图层树与画布把工程标脏；挡板在时就吞掉。
+        # Closing the project dirties it through the layer tree and the canvas; the blocker swallows
+        # that when it is in effect.
+        self.setDirty(True)
 
     def read(self, path: str) -> bool:
         self.reads += 1
         self.read_path = path
+        self.blocked_at_read = self.blocking
         # 真 ``read()`` 先记住文件名，再决定读不读得出来。
         # The real ``read()`` remembers the file name first, then decides.
         self.file_name = path
@@ -344,6 +355,9 @@ class FakeIface:
             self.project.clear()
             self.project.crs_authid = self.new_crs
             self.project.layers = dict(self.new_layers)
+            # 真 ``fileNew`` 最后一步是 ``setDirty(false)``。
+            # The real ``fileNew`` ends with ``setDirty(false)``.
+            self.project.setDirty(False)
         return self.result
 
     def mapCanvas(self) -> FakeCanvas:  # noqa: N802 - a PyQGIS name
@@ -584,12 +598,16 @@ def test_an_empty_path_is_refused_by_the_model(model: Any) -> None:
         model(path="")
 
 
-def test_a_save_target_may_have_any_suffix() -> None:
-    # 后缀是保存对话框补的，而这里拿到的是它的结果：``write()`` 只按后缀决定写 zip 还是写 XML，
-    # 别的分支由它自己回答。
-    # The suffix is appended by the save dialog and what arrives here is its result: ``write()``
-    # only uses the suffix to choose zip or XML, and answers everything else itself.
-    assert project.ProjectSaveParams(path="C:/maps/a.txt").path == "C:/maps/a.txt"
+@pytest.mark.parametrize("raw", ["C:/maps/a.txt", "C:/maps/a.qgs~", "C:/maps/a"])
+def test_a_save_target_must_carry_a_project_suffix(raw: str) -> None:
+    # 保存对话框按过滤器把名字补成 .qgs/.qgz，所以别的后缀不是它能给出的答案。
+    # The save dialog appends .qgs or .qgz by filter, so no other suffix is an answer it can give.
+    with pytest.raises(ValidationError):
+        project.ProjectSaveParams(path=raw)
+
+
+def test_a_save_suffix_is_case_insensitive() -> None:
+    assert project.ProjectSaveParams(path="C:/maps/a.QGZ").path == "C:/maps/a.QGZ"
 
 
 @pytest.mark.parametrize("raw", ["a.qgs", "C:maps/a.qgs", "\\a.qgs"])
@@ -771,16 +789,34 @@ def test_open_clears_the_project_before_reading(qgis: types.ModuleType, tmp_path
     assert loaded.clears == 1
 
 
-def test_open_does_not_dirty_the_project_while_reading(
+def test_open_closes_and_reads_with_dirtying_blocked(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # 读的过程中置脏被挡住：刚打开的工程是干净的，读进多少东西都一样。
-    # Dirtying is blocked while the file is read: a project that was just opened is clean,
-    # whatever it loaded.
+    # 关掉旧工程与读取都在挡板里：清空会经由图层树把工程标脏，而读失败时 GUI 留下的工程是干净的。
+    # Both the close and the read run with dirtying blocked: closing dirties the project through the
+    # layer tree, and a failed read leaves a clean project.
     target = a_qgs(project_dir(tmp_path))
     loaded = FakeProject()
     project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
-    assert loaded.dirtied_while_blocked >= 1
+    assert loaded.blocked_at_clear >= 1
+    assert loaded.blocked_at_read >= 1
+    assert loaded.dirtied_while_blocked >= 2
+    assert loaded.dirty is False
+
+
+def test_a_failed_open_leaves_a_clean_project(qgis: types.ModuleType, tmp_path: Path) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(read_result=False)
+    refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    # 读失败时眼前这个工程是空的，也是干净的；否则下一次替换会多拒一次。
+    # A failed read leaves an empty project, and a clean one; otherwise the next replacement would
+    # be refused for nothing.
+    assert loaded.mapLayers() == {}
     assert loaded.dirty is False
 
 

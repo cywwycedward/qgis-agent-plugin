@@ -287,8 +287,9 @@ get_info     -> SUCCEEDED  {"file_path": ".../demo.qgz", "crs_authid": "", "is_d
 
 另外四条实测行为：
 
-- **不判后缀**：`save to .txt -> SUCCEEDED`，`write()` 自己按后缀决定写 zip 还是写 XML；`x.qgs~`
-  备份与手改名的 `.txt` 工程也都打得开（`open` 只把 `.qgz` 当压缩包）。
+- **后缀**：保存只收保存对话框能给的那两种名字（`.qgs`/`.qgz`，大小写不敏感），别的后缀在入参
+  就拒（`INVALID_INPUT`）；打开不判后缀，`x.qgs~` 备份与手改名的 `.txt` 工程都打得开（`open` 只把
+  `.qgz` 当压缩包）。
 - **不可写**：关联文件存在但不可写时在写之前就拒，`save read-only -> FAILED PROJECT_SAVE_FAILED |
   The project file is not writable.`，文件一个字节没变。
 - **坏图层**：数据源不在了的工程照样打开，`invalid_layer_count` 说出那几个
