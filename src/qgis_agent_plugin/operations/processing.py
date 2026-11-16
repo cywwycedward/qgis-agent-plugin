@@ -5,6 +5,7 @@
 
 这里没有算法白名单，也没有 ``runnable`` 字段：``list_algorithms`` 报告桌面版工具箱里能看到的
 每个算法（``HideFromToolbox`` 与 ``KnownIssues`` 两个标志把算法挡在工具箱外，也就挡在列表外），
+按分组名、算法名摊平排序——工具箱的 provider/分组树序不复刻，顺序不是判据；
 ``get_algorithm_info`` 读算法自己的原生定义（``algorithmHelp()`` 打印的那些字段，转成 JSON），
 ``run_algorithm`` 是所有算法共同的唯一入口。
 
@@ -33,9 +34,10 @@ so it cannot move to a worker.
 There is no algorithm allow-list and no ``runnable`` field: ``list_algorithms``
 reports every algorithm the desktop toolbox shows -- the ``HideFromToolbox`` and
 ``KnownIssues`` flags keep an algorithm out of the toolbox, and out of the list --
-``get_algorithm_info`` reads the native definitions -- the fields
-``algorithmHelp()`` prints, as JSON -- and ``run_algorithm`` is the one entry point
-for all of them.
+flattened by group name and algorithm name; the toolbox's provider/group tree order is
+not reproduced, and order is not a criterion.  ``get_algorithm_info`` reads the native
+definitions -- the fields ``algorithmHelp()`` prints, as JSON -- and ``run_algorithm`` is
+the one entry point for all of them.
 
 ``run_algorithm`` does not re-implement QGIS, but it asks exactly the questions the
 desktop window asks before Run, and every question goes through QGIS's own
@@ -375,29 +377,71 @@ def _json_result(project: Any, value: Any, added: set[str]) -> Any:
     return image
 
 
-def _unknown_algorithm(algorithm_id: str) -> FrameworkError:
-    """未知算法 id 的说法：与桌面版运行路径抛出的那一句相同。
+def _help_unknown_algorithm(algorithm_id: str) -> FrameworkError:
+    """帮助路径对未知 id 的说法，与 ``algorithmHelp()`` 打印的那一句相同。
 
-    How an unknown algorithm id is stated: the sentence the desktop's run path raises.
+    What the help path says for an unknown id, the sentence ``algorithmHelp()`` prints.
     """
 
-    return FrameworkError(INVALID_INPUT, f"Error: Algorithm {algorithm_id} not found")
+    return FrameworkError(INVALID_INPUT, f'Algorithm "{algorithm_id}" not found.')
+
+
+def _run_unknown_algorithm(algorithm_id: str) -> FrameworkError:
+    """运行路径对未知 id 的说法，与 ``processing.run`` 报出并抛出的那一句相同（含结尾换行）。
+
+    What the run path says for an unknown id, the sentence ``processing.run`` reports and
+    raises (including its trailing newline).
+    """
+
+    return FrameworkError(INVALID_INPUT, f"Error: Algorithm {algorithm_id} not found\n")
+
+
+def _desktop_switch(key: str, default: bool) -> bool:
+    """桌面版读布尔配置的方式：只有 ``true`` 才算开。
+
+    ``ProcessingConfig`` 把持久化的值按 ``str(value).lower() == "true"`` 归一（缺键时保留默认），
+    所以 ``'false'`` 或 ``'0'`` 不是真；直接 ``bool()`` 会把它们当成真。
+
+    How the desktop reads a boolean setting: only ``true`` is on.  ``ProcessingConfig``
+    normalises the persisted value with ``str(value).lower() == "true"`` (keeping the
+    default when the key is absent), so ``'false'`` or ``'0'`` is not true; a plain
+    ``bool()`` would treat them as true.
+    """
+
+    from qgis.core import QgsSettings  # pyright: ignore[reportMissingImports]
+
+    raw = QgsSettings().value(key, default)
+    if raw is None:
+        # 显式存成 null 时桌面版保留默认值。
+        # An explicitly null value keeps the desktop's default.
+        return default
+    return str(raw).lower() == "true"
 
 
 def _gui_parameter_values(algorithm: Any, parameters: dict[str, Any]) -> dict[str, Any]:
-    """桌面版参数面板会交出的那张表：只补输出参数的默认值。
+    """桌面版参数面板会交出的那张表：缺席的参数补上控件自己的默认值。
 
-    非输出参数的缺席与给默认值等价，因为 QGIS 自己把缺席解析成默认值；输出参数没有这个等价关系，
-    面板总会给一个值（默认“临时输出”），而没有值的必填输出会被 QGIS 直接拒绝。可选、且不默认
-    创建的输出在面板里是“跳过输出”，这里也保持缺席；隐藏参数面板从不发送，这里也不补。
+    面板给每个可见参数建控件，控件一出生就带着 ``defaultValueForGui()``（没有 GUI 设置时就是
+    参数自己的默认值）；提交时它把每个控件的值都放进 map，包括那些没被碰过的。所以这里对缺席的
+    非输出参数也放同一个值——QGIS 自己的 ``checkParameterValues`` 对缺键的 enum 并不回落到默认
+    值，只靠“QGIS 会解析缺席”是不够的。没有默认值的保持缺席（面板那边是空控件，两边都会拒）。
+    输出参数照旧：没有默认值就是临时输出，可选且不默认创建的保持缺席（面板的“跳过输出”）。
+    隐藏参数面板从不发送，这里也不补。补进来的默认值可能是 QGIS 对象（控件本来就是），它们只往
+    QGIS 走，不会出现在结果里。
 
-    The map the desktop panel would hand over: only destination defaults are filled.  A
-    missing non-destination parameter is equivalent to its default because QGIS resolves
-    it that way; a destination has no such equivalence -- the panel always carries a value
-    (a temporary output by default), while QGIS refuses a required destination that has
-    none.  An optional destination that is not created by default is the panel's "skip
-    output" and stays absent here; hidden parameters are never sent by the panel and are
-    not filled here either.
+    The map the desktop panel would hand over: missing parameters get the widget's own
+    default.  The panel creates a widget per visible parameter, the widget starts at
+    ``defaultValueForGui()`` (the parameter's own default when no GUI setting overrides
+    it), and the panel submits every widget's value, touched or not.  So a missing
+    non-destination parameter is filled with that same value here -- QGIS's own
+    ``checkParameterValues`` does not fall back to the default for an enum whose key is
+    missing, so relying on "QGIS resolves a missing value" is only half the story.  A
+    parameter with no default stays absent (the panel's widget is empty and both sides
+    refuse it).  Destinations keep their rule: no default means a temporary output, and
+    an optional destination that is not created by default stays absent (the panel's
+    "skip output").  Hidden parameters are never sent by the panel and are not filled here
+    either.  A filled default may be a QGIS object (the widget's value is), and it only
+    travels to QGIS; it never appears in the result.
     """
 
     from qgis.core import (  # pyright: ignore[reportMissingImports]
@@ -409,16 +453,19 @@ def _gui_parameter_values(algorithm: Any, parameters: dict[str, Any]) -> dict[st
     optional = QgsProcessingParameterDefinition.FlagOptional
     values = dict(parameters)
     for definition in algorithm.parameterDefinitions():
-        if definition.flags() & hidden or not definition.isDestination():
+        if definition.flags() & hidden:
             continue
         name = definition.name()
         if name in values:
             continue
         value = definition.defaultValueForGui()
-        if value is None or (isinstance(value, str) and not value):
-            if definition.flags() & optional and not definition.createByDefault():
-                continue
-            value = QgsProcessing.TEMPORARY_OUTPUT
+        if definition.isDestination():
+            if value is None or (isinstance(value, str) and not value):
+                if definition.flags() & optional and not definition.createByDefault():
+                    continue
+                value = QgsProcessing.TEMPORARY_OUTPUT
+        elif value is None:
+            continue
         values[name] = value
     return values
 
@@ -432,10 +479,7 @@ def _require_acceptable(
     functions.
     """
 
-    from qgis.core import (  # pyright: ignore[reportMissingImports]
-        QgsProcessingParameterDefinition,
-        QgsSettings,
-    )
+    from qgis.core import QgsProcessingParameterDefinition  # pyright: ignore[reportMissingImports]
 
     hidden = QgsProcessingParameterDefinition.FlagHidden
     for definition in algorithm.parameterDefinitions():
@@ -455,7 +499,7 @@ def _require_acceptable(
     # 桌面版只在“参数 CRS 不一致就先警告”这个开关打开时问；关掉时它直接继续。
     # The desktop asks only while its "warn before executing if parameter CRSes do not match"
     # switch is on; with the switch off it continues straight away.
-    warned = bool(QgsSettings().value("Processing/Configuration/WARN_UNMATCHING_CRS", True))
+    warned = _desktop_switch("Processing/Configuration/WARN_UNMATCHING_CRS", True)
     if (
         warned
         and not continue_on_crs_mismatch
@@ -471,9 +515,13 @@ class ProcessingListAlgorithms(
     BaseQuery[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
     MainThreadOperationMixin[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
 ):
-    """桌面版工具箱能看到的每个算法，按工具箱的阅读顺序。
+    """桌面版工具箱能看到的每个算法，按（分组名、算法名）摊平排序。
 
-    Every algorithm the desktop toolbox shows, in the order the toolbox reads.
+    工具箱是一棵树（provider → 分组 → 算法），列表是扁平的：树序不复刻，顺序不是判据。
+
+    Every algorithm the desktop toolbox shows, flattened by group name then algorithm name.
+    The toolbox is a tree (provider, group, algorithm) and the list is flat: the tree order is
+    not reproduced, and order is not a criterion.
     """
 
     name = "processing.list_algorithms"
@@ -487,15 +535,14 @@ class ProcessingListAlgorithms(
         from qgis.core import (  # pyright: ignore[reportMissingImports]
             Qgis,
             QgsApplication,
-            QgsSettings,
         )
 
         # 工具箱总会挡掉 HideFromToolbox；KnownIssues 只在“显示有已知问题的算法”关着时挡掉。
         # The toolbox always hides HideFromToolbox; it hides KnownIssues only while "show
         # algorithms with known issues" is off.
         excluded = int(Qgis.ProcessingAlgorithmFlag.HideFromToolbox)
-        shown = QgsSettings().value("Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES", False)
-        if not bool(shown):
+        shown = _desktop_switch("Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES", False)
+        if not shown:
             excluded |= int(Qgis.ProcessingAlgorithmFlag.KnownIssues)
         algorithms = [
             algorithm_summary(algorithm)
@@ -537,7 +584,7 @@ class ProcessingGetAlgorithmInfo(
             # 合法调用说出未知算法是调用方的输入错误，不是未知的插件操作。
             # A valid call naming an unknown algorithm is a caller input mistake; it is not
             # an unknown plugin operation.
-            raise _unknown_algorithm(request.algorithm_id)
+            raise _help_unknown_algorithm(request.algorithm_id)
 
         # ``algorithmHelp()`` 会跳过隐藏参数，这里也一样。
         # ``algorithmHelp()`` skips a hidden parameter, and so does this.
@@ -643,7 +690,7 @@ class ProcessingRunAlgorithm(
 
         algorithm = QgsApplication.processingRegistry().createAlgorithmById(request.algorithm_id)
         if algorithm is None:
-            raise _unknown_algorithm(request.algorithm_id)
+            raise _run_unknown_algorithm(request.algorithm_id)
         feedback = ProcessingRunFeedback()
         context = processing.createContext(feedback)
         parameters = _gui_parameter_values(algorithm, request.parameters)

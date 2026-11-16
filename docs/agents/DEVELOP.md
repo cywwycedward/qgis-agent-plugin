@@ -1205,7 +1205,7 @@ absolute_path(raw: str) -> Path
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无 |
-| 返回 | `algorithms`（按工具箱阅读顺序——分组名、再算法名、再 id——的 `{id, name, group}`） |
+| 返回 | `algorithms`（按（分组名、算法名、id）排序的 `{id, name, group}`；这是扁平投影，不是工具箱的 provider/分组树序——顺序不是判据） |
 | 业务错误码 | 无 |
 | 行为 | 列桌面版工具箱能看到的算法：`HideFromToolbox` 总是挡掉，`KnownIssues` 只在"显示有已知问题的算法"开关关着时挡掉（默认关着）；没有 allow-list、没有"能不能跑"的字段；`get_algorithm_info` 仍能读被挡掉的算法（与 `algorithmHelp()` 一致） |
 
@@ -1215,7 +1215,7 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `algorithm_id`（≥1） |
 | 返回 | `algorithm`（`id`、`name`、`short_description`、`help`）；`parameters[]`（`name`、`description`、`help`、`type`、`options`、`accepted_types`）；`outputs[]`（`name`、`type`、`description`） |
-| 业务错误码 | `INVALID_INPUT`（算法未注册——是调用方输入错误，不是未知插件操作；消息是运行路径那句 `Error: Algorithm <id> not found`） |
+| 业务错误码 | `INVALID_INPUT`（算法未注册——是调用方输入错误，不是未知插件操作；消息是 `algorithmHelp()` 打印的那句 `Algorithm "<id>" not found.`） |
 | 行为 | 隐藏参数直接跳过（与 `algorithmHelp()` 一致）；`options` 只有枚举才有，其余是 `null`；字段取值来自原生定义，不在这里翻译或校验 |
 
 #### processing.run_algorithm
@@ -1224,8 +1224,8 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `algorithm_id`（≥1）、`parameters`（以原生参数名为键的 JSON 树）、`continue_on_crs_mismatch`（StrictBool，默认 `false`；桌面版在参数 CRS 不一致时问的那句"要继续吗"，默认按钮是"否"） |
 | 返回 | `algorithm_id`、`outputs`（原生键下的输出，结果图层报 id）、`messages`（`level`/`text`/`fatal`，七种级别） |
-| 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象；未知算法 id；参数值过不了 QGIS 的 `checkValueIsAcceptable`；输出值过不了 `isSupportedOutputValue`；`checkParameterValues` 拒绝；CRS 不一致且 `continue_on_crs_mismatch=false`）、`INTERNAL_ERROR`（`qgis.processing.run` 抛异常、结果无无损 JSON 形式、结果图层没加进工程、结果键不是字符串） |
-| 行为 | 不重新实现 QGIS，但运行前问的每个问题与桌面版窗口一样，而且都是 QGIS 自己的函数：`createAlgorithmById` 取实例，补上参数面板会给的输出默认值，逐个参数问 `checkValueIsAcceptable`、对每个有值的输出问 `isSupportedOutputValue`、问 CRS 不一致的确认（受桌面版"参数 CRS 不一致就先警告"开关约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息就是桌面版对同一问题说的那一句。通过后才把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.run()`。七个 `push*`/`reportError` 覆写都先调 `super()`，保留 QGIS 自己的日志，再把同一条文本记进 `messages`；未声明的参数键、远程 URI 一律原样透传；异常文本与 feedback 消息只进日志，调用方只拿到引擎的未预期失败码；结果图层会加进当前工程并报 id，结果无法返回时只移除这次调用加的那几个（算法自己的外部副作用不声称回滚） |
+| 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象；未知算法 id，消息是运行路径那句 `Error: Algorithm <id> not found`（含结尾换行）；参数值过不了 QGIS 的 `checkValueIsAcceptable`；输出值过不了 `isSupportedOutputValue`；`checkParameterValues` 拒绝；CRS 不一致且 `continue_on_crs_mismatch=false`）、`INTERNAL_ERROR`（`qgis.processing.run` 抛异常、结果无无损 JSON 形式、结果图层没加进工程、结果键不是字符串） |
+| 行为 | 不重新实现 QGIS，但运行前问的每个问题与桌面版窗口一样，而且都是 QGIS 自己的函数：`createAlgorithmById` 取实例，补上参数面板会交出的值（非输出参数缺席时用它自己的 `defaultValueForGui()`，输出参数没有默认值就是临时输出），逐个参数问 `checkValueIsAcceptable`、对每个有值的输出问 `isSupportedOutputValue`、问 CRS 不一致的确认（受桌面版"参数 CRS 不一致就先警告"开关约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息就是桌面版对同一问题说的那一句。通过后才把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.run()`。七个 `push*`/`reportError` 覆写都先调 `super()`，保留 QGIS 自己的日志，再把同一条文本记进 `messages`；未声明的参数键、远程 URI 一律原样透传；异常文本与 feedback 消息只进日志，调用方只拿到引擎的未预期失败码；结果图层会加进当前工程并报 id，结果无法返回时只移除这次调用加的那几个（算法自己的外部副作用不声称回滚） |
 | 输出目标 | 输出参数是调用方的回答，缺席不是"随便"：桌面版参数面板对每个输出参数都自带一个值，默认就是临时输出，所以缺席的必填输出会被补成 `QgsProcessing.TEMPORARY_OUTPUT`（字符串，JSON 安全），可选且不默认创建的输出保持缺席（面板的"跳过输出"），显式 `None` 也是跳过输出。远程字形先过 `isSupportedOutputValue`，再由 QGIS 打开。实测：`native:buffer` + `TEMPORARY_OUTPUT`（或缺席）→ 结果图层进工程；`gdal:convertformat` + 磁盘路径 → 文件写出且 `outputs` 里就是该路径；`gdal:buffervectors` + `memory:` → `INVALID_INPUT`、消息 `This algorithm only supports disk-based outputs`（桌面版输出控件同一判据；QGIS 自己会误报 `SUCCEEDED` 并把字面量 `memory:` 当输出值）；`.zzz` 这种扩展名在桌面版会被拒，插件同样拒（不然 QGIS 会自己补成 `.zzz.gpkg` 写出去）；`/vsicurl/…` 目标过判据后由 QGIS 报错 |
 
 ### 7.7 一次调用会碰到的其它码

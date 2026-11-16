@@ -2465,8 +2465,13 @@ def p01_list_algorithms(ctx: Context) -> str:
     # The toolbox always hides HideFromToolbox; it hides KnownIssues only while the matching
     # switch is off (off by default).
     excluded = int(Qgis.ProcessingAlgorithmFlag.HideFromToolbox)
-    shown = QgsSettings().value("Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES", False)
-    if not bool(shown):
+    shown = (
+        str(
+            QgsSettings().value("Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES", False)
+        ).lower()
+        == "true"
+    )
+    if not shown:
         excluded |= int(Qgis.ProcessingAlgorithmFlag.KnownIssues)
     visible = {
         algorithm.id(): algorithm
@@ -2489,10 +2494,15 @@ def p01_list_algorithms(ctx: Context) -> str:
         (algorithm.group(), algorithm.displayName(), algorithm.id())
         for algorithm in visible.values()
     )
+    # 列表是扁平投影，按（分组名、算法名、id）排序；不是工具箱的 provider/分组树序。顺序不是
+    # 判据，这条用例只钉住列表自己声明的那个键。
+    # The list is a flat projection ordered by (group, display name, id), not the toolbox's
+    # provider/group tree; order is not a criterion, and this case pins only the key the list
+    # declares.
     equal(
         [(summary["group"], summary["name"], summary["id"]) for summary in summaries],
         expected,
-        "the toolbox reading order (group, then display name)",
+        "the flat (group, display name, id) order",
     )
     equal(ids, [algorithm_id for _, _, algorithm_id in expected], "the visible ids")
     equal(len(ids), len(set(ids)), "duplicate ids")
@@ -2513,8 +2523,8 @@ def p01_list_algorithms(ctx: Context) -> str:
     prefixes = {algorithm_id.split(":")[0] for algorithm_id in ids}
     require(len(prefixes) > 1, f"only one provider prefix in the list: {sorted(prefixes)}")
     return (
-        f"{len(ids)} algorithms in the toolbox's reading order (group, then display name), "
-        f"exactly the live registry minus the {len(hidden)} carrying HideFromToolbox or "
+        f"{len(ids)} algorithms in the flat (group, display name, id) order -- not the toolbox "
+        f"tree -- exactly the live registry minus the {len(hidden)} carrying HideFromToolbox or "
         f"KnownIssues ({', '.join(sorted(hidden)[:3])}…), over {len(prefixes)} provider prefixes "
         f"({', '.join(sorted(prefixes))}), three fields each"
     )
@@ -2691,13 +2701,14 @@ def p03_algorithm_info_fields(ctx: Context) -> str:
 def p04_unknown_algorithm(ctx: Context) -> str:
     require_processing()
     missing = "native:p5-acceptance-not-an-algorithm"
-    sentence = f"Error: Algorithm {missing} not found"
+    help_sentence = f'Algorithm "{missing}" not found.'
+    run_sentence = f"Error: Algorithm {missing} not found\n"
     before = project_layer_ids()
 
     info = ctx.run("processing.get_algorithm_info", {"algorithm_id": missing})
     equal(info.status, ExecutionStatus.FAILED, "get_algorithm_info on an unknown id")
     equal(error_code(info), INVALID_INPUT, "the code for an unknown algorithm")
-    equal(message_of(info), sentence, "the get_algorithm_info sentence")
+    equal(message_of(info), help_sentence, "the get_algorithm_info sentence")
 
     # 运行路径自己解析 id：未知 id 在调用 ``processing.run()`` 之前就被拒，仍是调用方的输入错误。
     # The run path resolves the id itself: an unknown id is refused before ``processing.run()``
@@ -2705,14 +2716,15 @@ def p04_unknown_algorithm(ctx: Context) -> str:
     run = run_algorithm(ctx, missing, {})
     equal(run.status, ExecutionStatus.FAILED, "run_algorithm on an unknown id")
     equal(error_code(run), INVALID_INPUT, "the run code for an unknown algorithm")
-    equal(message_of(run), sentence, "the run sentence")
+    equal(message_of(run), run_sentence, "the run sentence")
     equal(project_layer_ids(), before, "the layers after the unknown id")
     for record in (info, run):
         require(record.result is None, "a refused call carries a result")
     return (
-        f"an unknown id is FAILED(INVALID_INPUT) from both operations with the one sentence "
-        f"{sentence!r} -- the sentence QGIS's own run path raises -- and neither call carries a "
-        "result or adds a layer"
+        f"an unknown id is FAILED(INVALID_INPUT) from both operations, each with its own GUI "
+        f"action's sentence: {help_sentence!r} from get_algorithm_info (algorithmHelp's "
+        f"printout) and {run_sentence!r} from run_algorithm (the run path's exception, newline "
+        "included); neither call carries a result or adds a layer"
     )
 
 
@@ -3259,10 +3271,26 @@ def p18_parameter_value_refused(ctx: Context) -> str:
     )
 
     equal(project_layer_ids(), before, "the layers after both refusals")
+
+    # PREDICATE 的控件默认值是 [0]；面板会把它一起放进 map，而 QGIS 自己对缺键的 enum 不回落
+    # 到默认值，所以这条只有补了默认值才会成功。
+    # PREDICATE's widget default is [0]; the panel carries it, and QGIS itself does not fall back
+    # to the default for a missing enum key, so this succeeds only once the default is filled.
+    first = cities_layer(ctx, "p18 first")
+    second = cities_layer(ctx, "p18 second")
+    defaulted = run_algorithm(
+        ctx,
+        "native:extractbylocation",
+        {"INPUT": first, "INTERSECT": second, "OUTPUT": "memory:"},
+    )
+    equal(defaulted.status, ExecutionStatus.SUCCEEDED, f"the filled default: {defaulted.error}")
+    require("OUTPUT" in outputs_of(defaulted), "the defaulted run produced no OUTPUT")
     return (
         "a text where native:buffer wants a number and a missing required source are both "
         "FAILED(INVALID_INPUT) with the panel's own sentences "
-        f"({message_of(bad_type)!r} and {message_of(missing)!r}), and neither adds a layer"
+        f"({message_of(bad_type)!r} and {message_of(missing)!r}), and neither adds a layer; "
+        "native:extractbylocation without PREDICATE SUCCEEDED because its widget default [0] was "
+        "filled in (QGIS itself refuses the missing key)"
     )
 
 
@@ -3370,11 +3398,35 @@ def p20_crs_mismatch_question(ctx: Context) -> str:
     require(Path(output).is_file(), f"the continued run wrote no file at {output!r}")
     written = QgsVectorLayer(output, "p20 written", "ogr")
     require(written.isValid(), f"the continued run's output {output!r} is not a readable layer")
+
+    # 开关关着 = 桌面版不问。持久化的是字符串 'false'，只有按 ProcessingConfig 的读法才算关。
+    # The switch off means the desktop does not ask.  The persisted value is the string 'false',
+    # and it is off only when read the way ProcessingConfig reads it.
+    from qgis.core import QgsSettings
+
+    settings = QgsSettings()
+    switch = "Processing/Configuration/WARN_UNMATCHING_CRS"
+    settings.setValue(switch, "false")
+    settings.sync()
+    try:
+        unchecked = run_algorithm(ctx, "gdal:clipvectorbypolygon", parameters)
+        equal(unchecked.status, ExecutionStatus.SUCCEEDED, f"the switch-off run: {unchecked.error}")
+        unchecked_output = outputs_of(unchecked)["OUTPUT"]
+        require(
+            Path(unchecked_output).is_file(),
+            f"the switch-off run wrote no file at {unchecked_output!r}",
+        )
+    finally:
+        settings.remove(switch)
+        settings.sync()
+
     return (
         "gdal:clipvectorbypolygon on a 4326 input and a 32633 mask is FAILED(INVALID_INPUT) "
         f"with the desktop's question ({message_of(refused)!r}) and adds nothing; the same call "
         f"with continue_on_crs_mismatch=true writes a readable GeoPackage "
-        f"({written.featureCount()} feature(s)), so the question is a parameter, not a default"
+        f"({written.featureCount()} feature(s)); with the desktop's warning switch persisted as "
+        "'false' the same parameters also run, so the question follows the desktop's switch and "
+        "its answer is a parameter"
     )
 
 

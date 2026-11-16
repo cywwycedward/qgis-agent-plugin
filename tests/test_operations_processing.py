@@ -866,6 +866,17 @@ def test_the_list_drops_what_the_toolbox_hides(fake_qgis: FakeQgis) -> None:
     assert [summary.id for summary in result.algorithms] == ["native:plain"]
 
 
+@pytest.mark.parametrize("stored", ["false", "0", 0], ids=["text", "zero", "int"])
+def test_a_persisted_off_value_keeps_a_known_issue_hidden(fake_qgis: FakeQgis, stored: Any) -> None:
+    fake_qgis.settings[_SETTINGS_SHOW_KNOWN_ISSUES] = stored
+    install(fake_qgis, algorithm_id="native:known-issues", flags=_FLAG_KNOWN_ISSUES)
+
+    result = ops.ProcessingListAlgorithms().execute_main(
+        make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
+    )
+    assert result.algorithms == []
+
+
 def test_a_known_issue_is_listed_once_the_desktop_setting_shows_it(fake_qgis: FakeQgis) -> None:
     fake_qgis.settings[_SETTINGS_SHOW_KNOWN_ISSUES] = True
     install(fake_qgis, algorithm_id="native:hidden", flags=_FLAG_HIDE_FROM_TOOLBOX)
@@ -1015,7 +1026,9 @@ def test_info_refuses_an_unknown_algorithm_as_invalid_input(fake_qgis: FakeQgis)
     with pytest.raises(FrameworkError) as caught:
         info(fake_qgis, "native:missing")
     assert caught.value.code == INVALID_INPUT
-    assert caught.value.message == "Error: Algorithm native:missing not found"
+    # 帮助路径自己的句子，与 ``algorithmHelp()`` 打印的那一句相同。
+    # The help path's own sentence, the one ``algorithmHelp()`` prints.
+    assert caught.value.message == 'Algorithm "native:missing" not found.'
 
 
 # --- processing.run_algorithm：这次调用 / the call --------------------------
@@ -1066,7 +1079,9 @@ def test_an_unknown_algorithm_is_invalid_input_before_anything_is_built(
             make_context(FakeProject()), run_params({}, algorithm_id="native:nope")
         )
     assert caught.value.code == INVALID_INPUT
-    assert caught.value.message == "Error: Algorithm native:nope not found"
+    # 运行路径的句子，连结尾换行也一起带回来。
+    # The run path's sentence, its trailing newline included.
+    assert caught.value.message == "Error: Algorithm native:nope not found\n"
     assert fake_qgis.processing.contexts == []
     assert fake_qgis.processing.calls == []
 
@@ -1148,7 +1163,31 @@ def test_the_panel_sentence_is_the_one_for_a_bad_parameter(fake_qgis: FakeQgis) 
     assert fake_qgis.processing.calls == []
 
 
-def test_a_missing_parameter_is_checked_as_the_widget_would_leave_it(fake_qgis: FakeQgis) -> None:
+def test_a_missing_parameter_is_checked_with_the_widgets_default(fake_qgis: FakeQgis) -> None:
+    # 面板的控件一出生就带着默认值，提交时也把它放进 map；缺键的 enum 在 QGIS 自己那里不会
+    # 回落到默认值，所以这里必须补。
+    # The panel's widget starts with the default and submits it; QGIS itself does not fall back
+    # to the default for an enum whose key is missing, so it has to be filled here.
+    predicate = FakeDefinition("PREDICATE", "enum", description="Predicate", gui_default=[0])
+    install(fake_qgis, FakeDefinition("INPUT", "source"), predicate)
+
+    run(fake_qgis, {"INPUT": "roads"})
+
+    assert predicate.checked == [[0]]
+    assert fake_qgis.processing.calls[0].parameters == {"INPUT": "roads", "PREDICATE": [0]}
+
+
+def test_a_parameter_the_caller_named_wins_over_the_default(fake_qgis: FakeQgis) -> None:
+    predicate = FakeDefinition("PREDICATE", "enum", description="Predicate", gui_default=[0])
+    install(fake_qgis, predicate)
+
+    run(fake_qgis, {"PREDICATE": [2]})
+
+    assert predicate.checked == [[2]]
+    assert fake_qgis.processing.calls[0].parameters == {"PREDICATE": [2]}
+
+
+def test_a_missing_parameter_without_a_default_is_checked_as_empty(fake_qgis: FakeQgis) -> None:
     bad = FakeDefinition("INPUT", "source", description="Input layer", acceptable=False)
     install(fake_qgis, bad)
 
@@ -1220,10 +1259,14 @@ def test_the_crs_answer_lets_the_run_continue(fake_qgis: FakeQgis) -> None:
     assert len(fake_qgis.processing.calls) == 1
 
 
-def test_the_crs_question_is_skipped_when_the_desktop_warning_is_off(
-    fake_qgis: FakeQgis,
+@pytest.mark.parametrize("stored", [False, "false", "0", 0], ids=["bool", "text", "zero", "int"])
+def test_the_crs_question_is_skipped_for_every_persisted_off_value(
+    fake_qgis: FakeQgis, stored: Any
 ) -> None:
-    fake_qgis.settings[_SETTINGS_WARN_UNMATCHING_CRS] = False
+    # 桌面版把持久化的值按 ``str(value).lower() == "true"`` 归一；``'false'``/``'0'`` 不是真。
+    # The desktop normalises a persisted value with ``str(value).lower() == "true"``; ``'false'``
+    # and ``'0'`` are not true.
+    fake_qgis.settings[_SETTINGS_WARN_UNMATCHING_CRS] = stored
     algorithm = install(fake_qgis, crs_ok=False)
 
     run(fake_qgis)
