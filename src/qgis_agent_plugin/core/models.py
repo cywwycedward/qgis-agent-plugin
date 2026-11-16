@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import (
+from pydantic import (  # pyright: ignore[reportMissingImports]
     BaseModel,
     ConfigDict,
     Field,
@@ -46,7 +46,6 @@ ENGINE_CLOSING = "ENGINE_CLOSING"
 UNSUPPORTED_EXECUTION_MODE = "UNSUPPORTED_EXECUTION_MODE"
 EXECUTION_NOT_FOUND = "EXECUTION_NOT_FOUND"
 INVALID_INPUT = "INVALID_INPUT"
-INVALID_CRS = "INVALID_CRS"
 PROJECT_REPLACE_REQUIRED = "PROJECT_REPLACE_REQUIRED"
 PROJECT_OPEN_FAILED = "PROJECT_OPEN_FAILED"
 PROJECT_SAVE_FAILED = "PROJECT_SAVE_FAILED"
@@ -73,7 +72,6 @@ ERROR_CODES = frozenset(
         UNSUPPORTED_EXECUTION_MODE,
         EXECUTION_NOT_FOUND,
         INVALID_INPUT,
-        INVALID_CRS,
         PROJECT_REPLACE_REQUIRED,
         PROJECT_OPEN_FAILED,
         PROJECT_SAVE_FAILED,

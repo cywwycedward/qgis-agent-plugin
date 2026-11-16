@@ -9,10 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-import pytest
-from pydantic import BaseModel, StrictBool, ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel, StrictBool, ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     ERROR_CODES,
     INTERNAL_ERROR,
     LAYER_NOT_FOUND,
@@ -41,7 +41,6 @@ PRD_ERROR_CODES = {
     "UNSUPPORTED_EXECUTION_MODE",
     "EXECUTION_NOT_FOUND",
     "INVALID_INPUT",
-    "INVALID_CRS",
     "PROJECT_REPLACE_REQUIRED",
     "PROJECT_OPEN_FAILED",
     "PROJECT_SAVE_FAILED",

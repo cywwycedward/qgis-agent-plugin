@@ -125,7 +125,7 @@ npm run deploy:list   # 只列会拷贝什么，不落盘
 | 组 | 断的是什么 | 什么时候跑 | 命令 | 条数与耗时 |
 | --- | --- | --- | --- | --- |
 | **规范组**（`conformance`） | 整个仓库的成文规则：注释双语、导入位置、文档索引、注册面 | **每次改完代码都跑** | `npm run test:rules` | 12 条，约 2 s |
-| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 744 条，约 33 s |
+| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 678 条，约 18 s |
 
 一条测试属于规范组，当且仅当三件事都成立：它断言的是**对整个仓库都成立**的规则（不是某条行为）、
 它**读源码或文档**而不是驱动代码、它**不需要 QGIS**。文件顶部写 `pytestmark = pytest.mark.conformance`
@@ -138,18 +138,18 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 ```
 
 通过的判据（三行都要在输出里）：`All checks passed`、`N files already formatted`、
-`12 passed, 732 deselected`。
+`12 passed, 666 deselected`。
 
 **按需加跑**（碰了什么跑什么）：
 
 | 改动 | 加跑 | 通过长什么样 |
 | --- | --- | --- |
-| `src/` 里任何逻辑 | `npm run test`（全量） | `744 passed` |
-| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `732 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
+| `src/` 里任何逻辑 | `npm run test`（全量） | `678 passed` |
+| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `625 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
 | 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
 | 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
 | 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
-| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `744 passed` |
+| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `678 passed` |
 | 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
 | 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
 
@@ -158,7 +158,7 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 - 裸解释器的绿色少三个用例，不能按条数比；**按解释器判断跑没跑过**。
 - 验收跑退出码 `2` 是"拒绝使用给定的工作目录"，不是失败；换个空目录，或让脚本自己建。
 - PowerShell 里 `$LASTEXITCODE` 会被管道上一条命令污染，以单独跑一次的输出为准。
-- 机器忙时时间阈值会偶发红（`.qgz` 成员数那条 1.5 s 的上限），先单跑那条，再判断是不是负载。
+- 机器忙时时间阈值会偶发红（`AT-40` / `AT-43` 那两条 20 s 的上限），先单跑那条，再判断是不是负载。
 - "应该能过"不算结论：报告里贴实际输出，红的就是红的。
 
 ### 2.4 工具配置
@@ -219,7 +219,7 @@ qgis-agent-plugin/
 │   │       └── qgs_task.py       OperationTaskRunner：QgsTask 适配器（两并发、进度、取消、完成）
 │   ├── operations/
 │   │   ├── __init__.py           PROJECT_/LAYER_/PROCESSING_OPERATIONS、OPERATIONS、register_all
-│   │   ├── project.py            四个 project.* 操作及其模型与读前扫描
+│   │   ├── project.py            四个 project.* 操作及其模型与深度守卫
 │   │   ├── layer.py              十个 layer.* 操作及其模型、QML 与 renderer 构建
 │   │   └── processing.py         三个 processing.* 操作及其 JSON 边界
 │   └── ui/
@@ -411,7 +411,7 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
 | 输入/结果模型 | `<操作类名>Params` / `<操作类名>Result` | `LayerAddParams`、`ProjectOpenResult` |
 | 后台快照/中间结果 | 描述数据的名词 + `Values` / `Sum` 等 | `FieldValues`、`FieldSum` |
 | 测试 | 文件 `test_<被测模块>.py`；用例名是一句描述行为的短句（下划线连接，不是固定的三段式） | `test_a_queued_call_cancelled_before_its_turn_never_runs`、`test_progress_rewrites_the_record_at_most_once_per_interval` |
-| 常量 | 全大写；上限类常量带单位或含义 | `MAX_PROJECT_BYTES`、`PROGRESS_INTERVAL_SECONDS` |
+| 常量 | 全大写；上限类常量带单位或含义 | `MAX_PROJECT_DEPTH`、`PROGRESS_INTERVAL_SECONDS` |
 
 历史例外：`layer.sum_numeric_field` 的模型叫 `SumNumericFieldParams` / `SumNumericFieldResult`
 （没有 `Layer` 前缀）。新代码按上表走，不要扩散这个例外。
@@ -923,55 +923,37 @@ absolute_path(raw: str) -> Path
 没有根目录白名单，也没有 `allowed_*_roots` 配置：一条路径可以是这台机器上进程能读写的任何位置。
 这是刻意的边界，记在 `12。
 
-`project.open` 在 `read()` 之前多一层扫描，因为 `QgsProject.read()` 会就地构造文件里写的每个图层、
-取布局里的图片：一个远程 URI 就是主线程上的一次 HTTP 请求或一次带 Windows 凭据的 SMB 连接，
-等逐层检查时请求已经发出去了。扫描用标准库 `expat`（事件驱动、不建树），只读字节：
+`project.open` 在 `read()` 之前只做一件额外的事：拒掉两种会让**进程直接消失**的输入
+（P3 防死）。这是本插件唯一比 GUI 严的地方，所以两条都有本机 QGIS 3.44.13 上的实测，而且界限
+只由"崩"定，不由"慢"定：
 
-- **每个元素的整段文本**（start 到匹配 end 之间的每个字符数据事件按序拼接，即
-  `QDomElement::text()` 的语义）与**每个属性值**过同一条判据：`strip` → 剥掉开头的本地 scheme
-  （`file:`、`attachment:`）→ 以 `/vsi`、UNC 前缀（`\\`、`//`）或 `scheme://` **开头**就
-  `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not opened`。
-  属性值必须一起判：布局图片项把图片写在 `file=` 属性里，`read()` 取布局时就去取它——只问
-  `<datasource>` 文本的版本放行过这种工程（实测：5 KB 文件让 `project.open` 发 **9 次 TCP** 并
-  返回 `SUCCEEDED`；对端接受连接但永不回应时主线程停 **180.1 s**，仍报 `SUCCEEDED`）。
-- **`<datasource>` 再加一条"包含"判据**：`://` 出现在值里任何位置都拒。GDAL 把远程文件写在
-  自己的本地语法里（`NETCDF:"/vsicurl/http://…":var`、`GTIFF_DIR:1:/vsicurl/http://…`、
-  `type=xyz&url=https://…`），只看开头会放行（实测：5 KB 工程让 `read()` 发 **5 次 TCP**）。
-- **别的值只看值的开头，不做子串匹配**：`D:/vsi_data/x.gpkg`、`./vsi_data/…`、正文里引用 URL
-  的 `<abstract>Downloaded from https://…</abstract>` 都不被误拒。代价是值本身就是 URL 的
-  元数据（`<identifier>https://…</identifier>`、`Option value="https://…"`）会被拒，见 §12。
-- **字符引用先解码再判**：`&#47;vsicurl&#47;…` 与它指向的路径同一种判法；元素的文本也不只是
-  `element.text` 或子元素 `tail`（实测：只读 `element.text` 时 `read()` 会为拆成多段的 URI 发出
-  **42 次 HTTP 请求**；五段拼接的 `/vsicurl` 地址在逐段判时穿过了前扫，`project.open` 失败前
-  已发 **8 次 TCP**）。
-- **解析前拒带内部子集的 DOCTYPE**（出现 `<!ENTITY`，或 `<!DOCTYPE` 后出现 `[`）：expat 会把
-  实体展开进元素文本，展开后的体积不进任何预算（实测：1 MiB 实体读 50 次的 1 MiB 工程让前扫
-  峰值 **100 MiB**；8 MiB × 90 峰值 **1,440 MiB**）。QGIS 自己写的 `<!DOCTYPE qgis PUBLIC …>`
-  没有 `[`，不会误拒。
-- **深度**由解析事件数（开标签 +1、闭标签 −1，迭代遍历）：注释/CDATA 里的尖括号不是元素。
-  上限 `256`，按 `read()` 的**耗时**标定而不是崩溃点：实测 200 层嵌套分组 0.28 s、600 层 8.84 s、
-  900 层 30.11 s（同体积的 4.2 MB 平铺工程 0.14 s，所以那是深度不是体积）；QGIS 自己写的 100 层
-  分组图层树是 105 层深；5500 层还能开，6000 层带 `0xC00000FD` 直接杀死进程。
-- **标签数**先看一次 `bytes.count(b"<")`（元素数的上界）：超过 `400_000` 直接
-  `PROJECT_OPEN_FAILED`。实测 400000 个标签解析 0.12–0.19 s；真实 16 MB 工程的标签密度是
-  42.6–61 字节/标签，即 26–39 万个标签，落在这个上限内。
-- **体积预算按实际解压出来的字节**算（分块读、边读边加），不信 zip 清单声明的尺寸；工程文件
-  本身与 `.qgz` 里每个成员解压后的总量都不得超过 16 MB，否则 `PATH_NOT_ALLOWED`。逐个成员判不够：
-  实测 100 个 1 MB 成员的 112 KB 档案能吃 **200 MB**；声明 100 字节的 204 KB 档案解压峰值
-  **437 MiB**。档案文件自己的大小也用同一条 16 MB 判据在进 zip 之前查（一次 `stat()`）：
-  40 万个空成员的 39 MB 档案要花 2.92 s / **222 MiB** 才能轮到"成员太多"那条拒绕。
-- **`.qgz` 成员数**超过 `1000` → `PROJECT_OPEN_FAILED`（实测 10 万个空成员的 10.4 MB 档案让
-  前扫忙 **1.75 s**，按成员数线性增长）。加密成员（`flag_bits & 0x1`）、压缩方法不是
-  stored/deflate、或流里对不上清单（CRC、尺寸）的档案不交给 `read()`：QGIS 3.44 在加密成员上
-  直接 `0xC0000005` 崩掉。
-- 字节里有 NUL（不是 UTF-8）或 XML 不合法 → 拒；后者用 `read()` 失败时同一句消息，文件不再
-  交给 `read()`。
+- **嵌套深度**由标准库 `expat` 的事件数算（开标签 +1、闭标签 −1；注释与 CDATA 不是元素）。
+  上限 `4096` 层。实测：`read()` 在 6000 层以 `0xC00000FD`（栈溢出）结束进程，5500 层 0.10 s
+  读完；元素名叫 `a` / `b` / `maplayer` / `properties` 的崩溃点一模一样，所以那是 DOM 深度而不是
+  某个标签的性质。900 层要 30 s 才读完（200 层 0.30 s、600 层 8.62 s、2000 层 518 s），但"慢"
+  不是拒绝的理由：GUI 同样慢。QGIS 自己写出的 100 层嵌套分组是 105 层深。深度只数一个文档：
+  `QgsProjectArchive::projectFile()` 只返回归档里第一个 `.qgs`（`src/core/qgsarchive.cpp:147`–`157`），
+  `QgsProject::unzip` 也只把它交给 `readProjectFile()`（`src/core/project/qgsproject.cpp:4677`），
+  第二个 `.qgs` 再深也进不了 DOM。
+- **`.qgz` 里的加密成员**（`flag_bits & 0x1`）：`read()` 解开整个归档，碰到它直接以
+  `0xC0000005` 结束进程，连异常都没有（实测）。成员表只看头部字段，一个成员都不解压。
 
-这一层是**读前的尽力而为清单**，不是"QGIS 会取什么"的完备枚举：除了 `<datasource>` 里那个
-`://`，它只问每个值的开头，所以值中间才出现的远程形状它看不见；容器格式内部引用的远程文件
-也不看（见 `12）。`read()` 之后不再有逐层检查：工程点名的数据源可以是根外路径、目录、不存在的
-源或远程源，插件不判它们——那种工程会正常打开，加载不出来的层只让 `invalid_layer_count` 变大。
-它挡的是**主线程上的一次网络往返**，不是访问控制。
+被量过、但**不**杀进程的形状一个都不留，全部交给 `read()`：
+
+| 形状 | 本机实测 | 现在 |
+| --- | --- | --- |
+| 远程数据源（`/vsicurl`、UNC、`<datasource>` 里任意位置的 `://`、布局图片 URL） | GUI 自己去取，`read()` 照样读 | 不判，加载不出来的层只让 `invalid_layer_count` 变大 |
+| XML 实体声明（`<!ENTITY`、带 `[` 的 DOCTYPE） | `read()` 0.53 s 读完、`ok=True`（QDomDocument 不展开自定义实体） | 不判；扫描流式解析、不累积，实体展开也不进内存 |
+| 体积（工程文件与 `.qgz` 成员） | 64 MiB 的 `.qgs` 在 1.80 s 内读完、`ok=True` | 没有上限，GUI 也是 `readAll()` |
+| 标签数（标签炸弹） | 40 万个标签解析 0.12–0.19 s | 没有计数 |
+| `.qgz` 成员数 | 10 万个空成员要 1.75 s | 没有上限 |
+| 压缩方法不是 stored/deflate（如 bzip2） | `read()` 读完、`ok=True` | 不判 |
+| 成员的 CRC 对不上 | `read()` 读完、`ok=True` | 不判 |
+| 成员声明的解压尺寸撒谎 | `read()` 返回假 → `PROJECT_OPEN_FAILED`，与拒掉同码 | 不判 |
+| 字节里有 NUL / 不是 UTF-8 / XML 不合法 | `read()` 返回假 → `PROJECT_OPEN_FAILED` | 不判；扫描解析失败就交给 `read()` |
+
+扫描读不懂的文件不是扫描的结论：`expat` 报错就返回，`read()` 用自己的码回答。`read()` 之后也
+不再有逐层检查：工程点名的数据源可以是根外路径、目录、不存在的源或远程源，插件不判它们。
 
 ### 7.3 destructive 标记
 
@@ -1009,13 +991,12 @@ absolute_path(raw: str) -> Path
 | `UNSUPPORTED_EXECUTION_MODE` | 对后台操作调 `run_sync` | 引擎 |
 | `EXECUTION_NOT_FOUND` | 未知或已淘汰的执行 id | 记录仓库 |
 | `INVALID_INPUT` | 入参不合法（未知键、类型、形状、未知算法 id） | 引擎校验、操作内 validator |
-| `INVALID_CRS` | 构造不出有效 CRS | `project.create` |
-| `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且没有 `discard_current=true` | `project.create/open` |
-| `PROJECT_OPEN_FAILED` | 工程读不出来，或读前扫描判定不可打开 | `project.open` |
+| `PROJECT_REPLACE_REQUIRED` | GUI 的四道问句任一命中（图层编辑、memory 或临时图层、工程脏、栅格 RAT，见 §7.6）且没有 `discard_current=true` | `project.create/open` |
+| `PROJECT_OPEN_FAILED` | 工程读不出来（含嵌套超上限、加密的 `.qgz` 成员） | `project.open` |
 | `PROJECT_SAVE_FAILED` | `write()` 返回假；文件可能已部分写入 | `project.save` |
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |
-| `TARGET_EXISTS` | 目标已存在且没有 `overwrite=true` | `project.save` |
-| `PATH_NOT_ALLOWED` | 路径不是绝对的，或不是本地路径字形；工程文件过大、声明 XML 实体、不是 UTF-8、点名远程数据源 | `absolute_path`、`project.open` 的读前扫描 |
+| `TARGET_EXISTS` | Save As 的目标已存在且没有 `overwrite=true`（Save 自己的关联文件不查） | `project.save` |
+| `PATH_NOT_ALLOWED` | 路径不是绝对路径 | `absolute_path` |
 | `INVALID_LAYER` | provider 的清单为空（没有认得出的子图层），或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
 | `LAYER_NOT_FOUND` | 工程里没有这个 id | `layer.get_info/set_visibility/sum_numeric_field` 与样式读 |
 | `LAYER_NOT_IN_TREE` | 图层已注册但不在图层树里（加载来的工程可以这样；`layer.add` 已经造不出这种图层） | `layer.set_visibility` |
@@ -1058,37 +1039,37 @@ absolute_path(raw: str) -> Path
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `crs_authid`（StrictStr ≥1，默认 `EPSG:4326`）；`discard_current`（StrictBool，默认 `false`） |
-| 返回 | `crs_authid`（规范 authid）、`file_path`（新工程无关联文件时为 `null`）、`layer_count` |
-| 业务错误码 | `INVALID_CRS`（在动当前工程之前拒）、`PROJECT_REPLACE_REQUIRED`、`INTERNAL_ERROR`（`iface.newProject(promptToSaveFlag=False)` 返回假） |
-| 行为 | 替换当前工程；成功路径触发 `aboutToBeCleared`，`project_epoch` +1，旧代数的排队调用立即 `CANCELLED`，本次调用照常 `SUCCEEDED`；`setCrs` 会把工程标脏，之后 `get_info` 可能是 `is_dirty=true` |
+| 参数 | `crs_authid`（StrictStr ≥1 \| null，默认 `null`）；`discard_current`（StrictBool，默认 `false`） |
+| 返回 | `crs_authid`（工程现在持有的规范 authid，构造不出 CRS 时是 `""`）、`file_path`（新工程无关联文件时为 `null`）、`layer_count` |
+| 业务错误码 | `PROJECT_REPLACE_REQUIRED`（下面四道问句任一命中且没有 `discard_current=true`）、`INTERNAL_ERROR`（`iface.newProject(promptToSaveFlag=False)` 返回假） |
+| 行为 | 换工程之前先回答 GUI 的四道问句，顺序就是 GUI 的顺序（`qgisapp.cpp:5820`）：① 非 memory 矢量图层 `isEditable() && isModified()`（`:13560`、`:13573`、`:13578`）；② 带要素的 memory 图层，设了 `skipMemoryLayersCheck` 的除外（`:13684`），或临时图层（`:13690`，两者都有时 GUI 先问临时图层）；③ 工程 `isDirty()`（`:13522`，`saveDirty()` 会先为 ① 的编辑 `markDirty()`，`:13509`）；④ 栅格波段的 RAT `isDirty()`，循环是 `bandNo = 1; bandNo < bandCount()`（`:13615`，最高那一带 GUI 不问，这里也不问）。`discard_current=true` 就是这四句共同的 Discard 答案；两个设置（`qgis/askToSaveProjectChanges`、`askToSaveMemoryLayers`）不读，它们只决定 GUI 问不问。GUI 在问之前还先做 `checkTasksDependOnProject()`（`qgisapp.cpp:5815`），operation 的顺序相反：先答问句，再让 `iface.newProject` 做那一步（它自己会返回假，于是 `INTERNAL_ERROR`）。之后才等价于 GUI 的 New Project 动作（`iface.newProject(False)` 就是 `QgisApp::fileNew(false)`）：它自己会给新工程一个 CRS（设置里的 `projections/defaultProjectCrs`，以及默认模板）并读默认模板；`crs_authid` 不给就不碰那个值，给了就 `setCrs` 覆盖它（无效值也照装，结果是空 authid，GUI 的新建动作不拒这个）；最后 `setDirty(false)`，与 `fileNew` 的最后一步一致；成功路径触发 `aboutToBeCleared`，`project_epoch` +1，旧代数的排队调用立即 `CANCELLED`，本次调用照常 `SUCCEEDED` |
 
 #### project.open
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `path`（绝对 `.qgs`/`.qgz`，大小写不敏感）；`discard_current`（默认 `false`） |
-| 返回 | `file_path`（`resolve()` 后的绝对路径）、`crs_authid`（可能为 `""`）、`layer_count`、`invalid_layer_count` |
-| 业务错误码 | `INVALID_INPUT`（形状/后缀）、`PATH_NOT_ALLOWED`（文件或数据源越界、读前扫描拒绝）、`PROJECT_REPLACE_REQUIRED`、`PROJECT_OPEN_FAILED`（`read()` 为假、嵌套过深、标签过多、成员过多、XML 不合法、成员取不出来） |
-| 行为 | 用 `QgsProject.read()`，不用 `iface.addProject()`（后者会弹框）；读前扫描与读后逐层检查见 §7.2；读成功但有坏图层算成功（`invalid_layer_count > 0`），不谎称为全部可用；四个失败路径与成功路径互不干扰 |
+| 参数 | `path`（StrictStr ≥1，绝对路径，**不判后缀**）；`discard_current`（默认 `false`） |
+| 返回 | `file_path`（调用方给的绝对路径）、`crs_authid`（可能为 `""`）、`layer_count`、`invalid_layer_count` |
+| 业务错误码 | `PATH_NOT_ALLOWED`（不是绝对路径）、`PROJECT_REPLACE_REQUIRED`（与 `create` 同一四道问句，`qgisapp.cpp:6943`）、`PROJECT_OPEN_FAILED`（三条消息分得很清：`read()` 为假说 "the current project was cleared"；嵌套超过 `MAX_PROJECT_DEPTH` 与加密成员说 "it was not opened and the current project was not changed"，因为那两条拒在 `clear()` 之前） |
+| 行为 | 用 `QgsProject.read()`，不用 `iface.addProject()`（后者会弹框）；不判后缀：GUI 的打开对话框收下你打的任何文件名，`read()` 只把 `.qgz` 当压缩包、剩下的交给解析器（`x.qgs~` 备份也是这样打开的）；`read()` **之前**先 `ctx.project.clear()`（GUI 的 `addProject` 先 `closeProject()`），所以 `read()` 失败时眼前这个工程是空的、`file_path` 指向那个读不出来的文件；P3 那两条拒在 `clear()` 之前，不碰当前工程，消息也这么说（见 §7.2）；GUI 的 `openProject(QString)` 还先做 `checkTasksDependOnProject()`（`qgisapp.cpp:6939`），operation 不做这一步：这里的后台任务由引擎的协作式取消处理（换工程会取消旧代数的排队调用与活动后台任务），不在读前弹框；读成功但有坏图层算成功（`invalid_layer_count > 0`） |
 
 #### project.save
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `path`（StrictStr \| null，为空则用工程当前关联文件）；`overwrite`（默认 `false`） |
+| 参数 | `path`（StrictStr \| null，为空则用工程当前关联文件；给了就必须是 `.qgs`/`.qgz`，大小写不敏感）；`overwrite`（默认 `false`） |
 | 返回 | `file_path`、`is_dirty`（写完之后工程的真实状态） |
-| 业务错误码 | `PROJECT_PATH_REQUIRED`、`INVALID_INPUT`、`PATH_NOT_ALLOWED`（父目录不存在/越界/目标是目录）、`TARGET_EXISTS`（含关联文件本身）、`PROJECT_SAVE_FAILED`（文件可能已部分写入，不承诺原子性） |
-| 行为 | 不创建父目录；`write()` 成功会清 dirty，所以返回的是 QGIS 的真实状态，不是写死的 false |
+| 业务错误码 | `PROJECT_PATH_REQUIRED`、`INVALID_INPUT`（后缀不是 `.qgs`/`.qgz`）、`PATH_NOT_ALLOWED`（不是绝对路径）、`TARGET_EXISTS`（**只有 Save As 才查**）、`PROJECT_SAVE_FAILED`（文件可能已部分写入，不承诺原子性；只读、目录不存在、目标是目录都落在这里） |
+| 行为 | 给了 `path` 就是 Save As：GUI 的保存对话框会补后缀并问覆盖，所以 `overwrite` 就是那个答案；不给 `path` 就是 Save，写关联文件、**不问覆盖**（GUI 那时不弹对话框）；不创建父目录；`write()` 成功会清 dirty，所以返回的是 QGIS 的真实状态，不是写死的 false |
 
 #### project.get_info
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无（任何键都 `INVALID_INPUT`） |
-| 返回 | `file_path`（未保存过为 `null`）、`crs_authid`（无 CRS 时为 `""`）、`is_dirty`、`layer_count`、`project_epoch` |
+| 返回 | `file_path`（未保存过为 `null`）、`crs_authid`（无 CRS 时为 `""`）、`is_dirty`、`layer_count`、`title`（工程标题，没设置时是 `""`）、`project_epoch` |
 | 业务错误码 | 无 |
-| 行为 | 不保存、不改工程属性；`project_epoch` 是插件本地的代数（从 0 开始，每次 `aboutToBeCleared` +1），不是 QGIS 的版本号 |
+| 行为 | 不保存、不改工程属性。这六个字段就是 GUI 会显示的工程事实：标题栏的标题、`*` 脏标记与文件名（`title`/`is_dirty`/`file_path`），工程属性里的 CRS，图层树里的图层数；`lastSaveDateTime`、`saveUser` 只存不显示，模板是设置不是工程状态，所以不漏它们；`project_epoch` 是插件本地的代数（从 0 开始，每次 `aboutToBeCleared` +1），不是 QGIS 的版本号 |
 
 #### layer.add
 
@@ -1527,17 +1508,14 @@ Git flow：
 | 路径策略 | 只要求绝对路径，没有根目录白名单 | 操作能读写进程能读写的任何位置；调用方是 agent 时这就是一次能力决定，不是遗漏 |
 | 远程图层 | `layer.add` 接受 `/vsi…` 的绝对字形，也接受 provider 自己能解的其它源 | URL（`https://…`）不算 Windows 绝对路径，因此被拒；要加远程支持是新的设计，不是放宽一条规则 |
 | 工程内的数据源 | 不判：根外路径、目录、不存在的源、远程源都随工程读进来 | 加载不出来的层只让 `invalid_layer_count` 变大 |
-| `project.open` 的读前扫描 | 远端值、超大/过深/标签过多、XML 实体、非 UTF-8、可疑 `.qgz` 成员在 `read()` 前拒绝 | 是尽力而为的清单，不是"QGIS 会取什么"的完备枚举 |
-| 值本身就是 URL 的元数据 | 读前扫描会拒绝 | 这类工程打不开，是统一判据的已知误拒 |
-| 容器格式内部的远程源 | 不检查：只审调用方点名的文件，不审文件内部引用的源（例如本地 `.vrt` 里的 `/vsicurl/`） | 把这类文件当不可信输入时才需要升级这层检查（代码里的 `shortcut:` 注释写明了这个条件） |
-| 布局图片等其它取数落点 | 没有逐项枚举 | 不在承诺内 |
+| `project.open` 的深度守卫 | 只拒两种实测能杀掉进程的输入：``read()`` 会解析的那个文档嵌套超过 `4096` 层、`.qgz` 里有加密成员 | 深度只数归档里第一个 `.qgs`（`read()` 只解析它）；其余形状（远程源、实体、体积、标签数、成员数、压缩方式、CRC）一律不判，交给 `read()`；代价是一个远程源的工程会在主线程上取一次远端 |
+| 未保存工程的判断 | GUI 的四道问句都要查：非 memory 矢量图层的 `isEditable() && isModified()`、带要素的 memory 图层或临时图层、`is_dirty()`、栅格波段的 RAT `isDirty()` | 任一条成立就要 `discard_current=true`；图层数与关联文件名不是条件，一个没改过的工程（哪怕加了图层）照样被换掉 |
+| `project.save` 的覆盖判断 | 只有给了 `path`（Save As）才查 `TARGET_EXISTS` | 写自己的关联文件不需要 `overwrite`，与 GUI 的 Save 一致 |
+| `project.create` 之后的 CRS 与 dirty | `crs_authid` 不给就不动 QGIS 给的 CRS；最后一律 `setDirty(false)` | 与 `QgisApp::fileNew` 的两步一致；`is_dirty` 在新建后是 `false` |
 | 后台结果的口径 | 是快照，不是结束时的实时值 | 期间有人编辑，返回的仍是旧数 |
 | 进度 | 最多每 100 ms 写一次；从不写 100 除成功 | 记录里的 `RUNNING` 可能来自完成路径补写 |
 | 记录保留 | 按条数与 TTL，在访问与写入终态时 prune | 超时记录在被访问前仍占内存；被访问时已经不存在 |
 | 取消的语义 | 协作式；`CANCEL_REQUESTED` 只有任务自己的报告才变 `CANCELLED` | 主线程已开始的操作不可中断 |
-| 未保存工程的判断 | 图层、关联文件、dirty 三者之一即算"有内容"（编辑缓冲只存在于图层上，已被图层数覆盖） | 需要显式 `discard_current=true` |
-| `project.save` 的覆盖判断 | 关联文件本身也算"已存在" | 重复保存同一工程也要 `overwrite=true` |
-| `project.create` 之后的 dirty | `setCrs` 会把工程标脏 | `project.get_info` 可能返回 `is_dirty=true`，这是 QGIS 的事实 |
 | 后台名额的计数口径 | 适配器数的是自己活动表里的任务（`SCHEDULED`/`RUNNING`/`CANCEL_REQUESTED`），引擎里名为 `_ACTIVE_BACKGROUND` 的集合只有前两个 | 两者不同义：限流看适配器，发取消请求看引擎；`FINALIZING` 不占名额 |
 | 依赖版本 | pydantic 只支持 2.x（导入时拒绝其他 major），QGIS 3.44（`metadata.txt`） | 换 pydantic major 或 QGIS 大版本前要重新验证；非 2.x 是加载期 `RuntimeError`，不是运行期错误 |
-| 测得的数字 | 本文档里的耗时、字节、TCP 次数都是在 QGIS 3.44.13 / Windows x64 上测的 | 它们支撑判据，不是承诺；换环境要重测再改阈值 |
+| 测得的数字 | 本文档里的耗时、崩溃码都是在 QGIS 3.44.13 / Windows x64 上测的 | 它们支撑判据（尤其是 §7.2 那两条 P3），不是承诺；换环境要重测再改阈值 |

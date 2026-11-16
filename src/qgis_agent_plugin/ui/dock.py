@@ -34,8 +34,16 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
-from qgis.PyQt.QtCore import QEvent, QLocale, QPointF, QRect, QSize, Qt, QTimer
-from qgis.PyQt.QtGui import (
+from qgis.PyQt.QtCore import (  # pyright: ignore[reportMissingImports]
+    QEvent,
+    QLocale,
+    QPointF,
+    QRect,
+    QSize,
+    Qt,
+    QTimer,
+)
+from qgis.PyQt.QtGui import (  # pyright: ignore[reportMissingImports]
     QDoubleValidator,
     QFont,
     QFontMetrics,
@@ -45,7 +53,7 @@ from qgis.PyQt.QtGui import (
     QPalette,
     QPen,
 )
-from qgis.PyQt.QtWidgets import (
+from qgis.PyQt.QtWidgets import (  # pyright: ignore[reportMissingImports]
     QApplication,
     QCheckBox,
     QComboBox,
@@ -168,21 +176,21 @@ _ERRORS = {
     "UNSUPPORTED_EXECUTION_MODE": ("这个执行方式不受支持。", "这是插件缺陷，看 QGIS 日志。"),
     "EXECUTION_NOT_FOUND": ("这次调用的记录已经不在了。", "重新运行一次。"),
     "INVALID_INPUT": ("参数没有通过校验。", "按上面点名的参数改掉，再运行一次。"),
-    "INVALID_CRS": ("坐标参考系写法不对。", "用 EPSG:4326 这样的写法重试。"),
     "PROJECT_REPLACE_REQUIRED": (
-        "当前工程还有未保存的内容。",
-        "勾上“丢弃当前工程”，或先保存当前工程。",
+        "当前工程还有未保存的内容："
+        "图层里没提交的编辑、带要素的临时图层、工程本身的改动，或栅格的属性表。",
+        "勾上“丢弃当前工程”，或先在桌面版里保存它们。",
     ),
     "PROJECT_OPEN_FAILED": (
         "工程文件打不开。",
-        "确认文件存在、没有损坏，且没有点名远程数据源。",
+        "确认文件存在、没有损坏。读失败时当前工程已被清空；因嵌套过深或加密成员被拒时它没被动过。",
     ),
     "PROJECT_SAVE_FAILED": ("工程没有写出去。", "确认目标目录存在且可写，再运行一次。"),
     "PROJECT_PATH_REQUIRED": ("没有给出工程文件路径。", "填写 .qgs 或 .qgz 的完整路径，再运行。"),
     "TARGET_EXISTS": ("目标文件已经存在。", "换一个文件名，或勾上“覆盖已有文件”。"),
     "PATH_NOT_ALLOWED": (
-        "这个路径或文件不能用。",
-        "给一条以盘符开头的完整路径；远程数据源、过大的工程与损坏的 XML 也会这样被拒。",
+        "这个路径不能用。",
+        "给一条以盘符开头的完整路径；相对路径也会这样被拒。",
     ),
     "INVALID_LAYER": ("这个图层不能用来做这件事。", "确认图层仍在本工程里，并检查类型与字段。"),
     "LAYER_NOT_FOUND": ("工程里没有这个图层。", "先运行 layer.list，从结果里取 layer_id。"),
