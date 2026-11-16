@@ -994,15 +994,16 @@ def raster_renderer(provider: Any, element: Any) -> Any | None:
 
 
 def renderer_from_document(layer: Any, text: str) -> Any:
-    """把一份渲染器文档变成原生渲染器；读不出来就是 ``INVALID_INPUT``。
+    """把一份渲染器文档变成这门图层能装的原生渲染器；读不出来就是 ``INVALID_INPUT``。
 
-    解析器自己会报行号和列号；读得出来但没有这门图层类型认得的渲染器时，是我们要说的一句。矢量
-    渲染器的重建就是 QGIS 读样式文件时那一次调用。
+    顺序是先解析、再读类型、再建：类型名在文档的根元素上，解析完就有；建那一步会进 QGIS 的注册表
+    去调对应元数据的 ``createRenderer``，所以不在候选清单里的类型必须在建之前拦下（清单里的类型由
+    注册表建，栅格的八个由各自的 ``create`` 建）。
 
-    Turn a renderer document into a native renderer, or ``INVALID_INPUT``.  The parser reports its
-    own line and column; a document that parses but holds no renderer this layer can use is a
-    sentence of ours.  Rebuilding a vector renderer is the same call QGIS makes when it reads a
-    style file.
+    Parse, then read the type, then build: the type name sits on the document's root element and is
+    there as soon as it parses, while building enters QGIS's registry and calls that metadata's
+    ``createRenderer``.  So a type outside the candidate list has to be refused before it is built;
+    the ones inside it are built by the registry (the eight raster types by their own ``create``).
     """
 
     from qgis.core import QgsFeatureRenderer, QgsReadWriteContext  # pyright: ignore[reportMissingImports]
@@ -1013,6 +1014,16 @@ def renderer_from_document(layer: Any, text: str) -> Any:
     if not parsed:
         raise FrameworkError(INVALID_INPUT, f"{message} at line {line} column {column}")
     element = document.documentElement()
+    renderer_type = element.attribute("type")
+    if not renderer_type:
+        raise FrameworkError(INVALID_INPUT, "the document is not a renderer this layer can use")
+    # 拒绝的理由分两半：栅格那边实测有类型会被 QGIS 静默保留（普通栅格上的 singlebandcolordata），
+    # 矢量那边是下拉框按几何筛过、GUI 根本表达不出这个组合。
+    # The refusal has two reasons: on the raster side QGIS was measured to keep the old renderer
+    # silently for one type (singlebandcolordata on an ordinary raster), while the vector combo is
+    # filtered by geometry, so the GUI cannot express that combination at all.
+    if renderer_type not in available_renderer_types(layer):
+        raise FrameworkError(INVALID_INPUT, f"the layer does not offer a {renderer_type} renderer")
     if layer_kind(layer) == "raster":
         renderer = raster_renderer(layer.dataProvider(), element)
     else:
@@ -1073,14 +1084,6 @@ class LayerSetRenderer(
         layer = layer_for_renderer(ctx.project, request.layer_id)
         renderer = renderer_from_document(layer, request.renderer)
         renderer_type = renderer.type()
-        # 只装这门图层类型的下拉框里列出的类型：QGIS 对不列的那些会默不作声地把旧渲染器留下，
-        # 报告成功就成了假话。
-        # Only what this layer type's combo lists: QGIS silently keeps the old renderer for the ones
-        # it does not list, so reporting success would be a lie.
-        if renderer_type not in available_renderer_types(layer):
-            raise FrameworkError(
-                INVALID_INPUT, f"the layer does not offer a {renderer_type} renderer"
-            )
         layer.setRenderer(renderer)
         layer.triggerRepaint()
         ctx.project.setDirty(True)

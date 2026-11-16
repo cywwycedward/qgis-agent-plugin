@@ -18,7 +18,6 @@ import re
 import subprocess
 import sys
 import types
-from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -157,155 +156,6 @@ class FakeRenderer:
         element.appendChild(child)
         self.written.append(child)
 
-    def readXml(self, element: Any) -> None:
-        self.read = element
-
-
-class FakeSymbol:
-    """一次 ``createSimple`` 的产物：只有声明的那些属性。
-
-    What a ``createSimple`` call produced: the declared properties, nothing else.
-    """
-
-    def __init__(self, kind: str, properties: dict[str, Any]) -> None:
-        self.kind = kind
-        self.properties = dict(properties)
-
-
-# 假件的 ``QVariant.Type`` 值。
-# 真实值依次是 1、2、4、10、14。
-# The fake's ``QVariant.Type`` values.
-# The real values are 1, 2, 4, 10, 14.
-VARIANT_STRING = 10
-
-
-class FakeQVariant:
-    """一个值，以及 setter 对它做的那一次转换。
-
-    ``convert`` 照抄实测行为：日期目标收 ISO 日期串，别的都拒。
-    布尔目标收任何字符串，只有 ``'false'``/``'0'``/``''`` 为假。
-    字符串目标把任何值变成它的文本。
-
-    A value and the one conversion the setter asks of it.  ``convert`` mirrors the
-    measured behaviour: a date target takes an ISO date string and refuses everything
-    else, a boolean target takes every string but ``'false'``/``'0'``/``''``, and a
-    string target takes any value as its text.
-    """
-
-    Bool = 1
-    Int = 2
-    LongLong = 4
-    String = VARIANT_STRING
-    Date = 14
-
-    def __init__(self, value: Any) -> None:
-        self.converted: Any = value
-
-    def convert(self, target_type: int) -> bool:
-        value = self.converted
-        if target_type == FakeQVariant.Date:
-            try:
-                self.converted = date.fromisoformat(value) if isinstance(value, str) else None
-            except ValueError:
-                self.converted = None
-            return self.converted is not None
-        if target_type == FakeQVariant.Bool:
-            if isinstance(value, str):
-                self.converted = value.strip().lower() not in {"", "0", "false"}
-                return True
-            if isinstance(value, (bool, int, float)):
-                self.converted = bool(value)
-                return True
-        elif target_type == FakeQVariant.String:
-            # 实测：bool 变 ``'true'``/``'false'``。
-            # 整数浮点丢掉 ``.0``。
-            # A bool becomes ``'true'``/``'false'``.
-            # A whole float loses its ``.0``.
-            if isinstance(value, bool):
-                self.converted = "true" if value else "false"
-            elif isinstance(value, float) and value.is_integer():
-                self.converted = str(int(value))
-            else:
-                self.converted = value if isinstance(value, str) else str(value)
-            return True
-        self.converted = None
-        return False
-
-    def value(self) -> Any:
-        return self.converted
-
-
-class FakeField:
-    """setter 从一个字段上读的东西：是不是数值，以及它的 QVariant 类型。
-
-    What the setter reads of a field: its numeric kind and its QVariant type.
-    """
-
-    def __init__(self, name: str, numeric: bool = True, field_type: int = VARIANT_STRING) -> None:
-        self.name = name
-        self.numeric = numeric
-        self.field_type = field_type
-
-    def isNumeric(self) -> bool:
-        return self.numeric
-
-    def type(self) -> int:
-        return self.field_type
-
-
-class FakeFields:
-    def __init__(self, fields: list[Any]) -> None:
-        self.items = list(fields)
-
-    def indexFromName(self, name: str) -> int:
-        for index, field in enumerate(self.items):
-            if field.name == name:
-                return index
-        return -1
-
-    def at(self, index: int) -> Any:
-        return self.items[index]
-
-
-class FakeColor:
-    """``QColor`` 对栅格渲染器来说就是那个字符串。
-
-    ``QColor`` for a raster renderer: the string it was built from.
-    """
-
-    def __init__(self, color: str = "") -> None:
-        self._color = color
-
-    def name(self) -> str:
-        return self._color.lower()
-
-
-class FakeRule:
-    """一条 ``QgsRuleBasedRenderer.Rule``：自己的过滤、符号和子规则。
-
-    One ``QgsRuleBasedRenderer.Rule``: its own filter, symbol and children.
-    """
-
-    def __init__(
-        self,
-        symbol: Any,
-        filterExp: str = "",
-        label: str = "",
-        elseRule: bool = False,
-    ) -> None:
-        self.symbol = symbol
-        self.filter = filterExp
-        self.label = label
-        self.else_rule = elseRule
-        self.active: bool | None = None
-        self.children: list[FakeRule] = []
-
-    def appendChild(self, child: FakeRule) -> None:
-        self.children.append(child)
-
-    def setActive(self, active: bool) -> None:
-        self.active = active
-
 
 class FakeElement:
     """一个元素的标签与属性；假文档序列化时把它写回文本。
@@ -398,6 +248,8 @@ class FakeDocument:
         self.root = node
         return node
 
+    # Qt 的写法就是 ``toString(2)``；这里照它的签名，分析器把它当成 JS 的同名方法。
+    # Qt spells this ``toString(2)``; the analyzer mistakes the name for the JS one.
     def toString(self, indent: int = 0) -> str:
         if self.root is None:
             return self.content
@@ -487,9 +339,6 @@ class FakeLayer:
     def dataProvider(self) -> Any:
         return self.data_provider
 
-    def fields(self) -> FakeFields:
-        return FakeFields(self.field_list)
-
     def setRenderer(self, renderer: Any) -> None:
         self.renderer_sets.append(renderer)
         self.renderer_value = renderer
@@ -534,7 +383,6 @@ class FakeGroup:
 
     def setItemVisibilityChecked(self, visible: bool) -> None:
         # 原生对同值早返回，所以不记录一次空写。
-        # Native returns early on the same value, so a no-op write is not recorded.
         # Native returns early on the same value, so a no-op write is not recorded.
         if self.checked == visible:
             return
@@ -738,7 +586,6 @@ class FakeQgis:
                 return list(holder.raster_renderer_types)
 
         Qgis = types.SimpleNamespace(
-            GeometryType=types.SimpleNamespace(Point=0, Line=1, Polygon=2, Unknown=3, Null=4),
             DataType=types.SimpleNamespace(Byte=1, Float32=6),
             LayerType=types.SimpleNamespace(Vector=0, Raster=1),
             RasterLayerType=types.SimpleNamespace(
@@ -746,15 +593,12 @@ class FakeQgis:
             ),
             SublayerQueryFlag=types.SimpleNamespace(IncludeSystemTables=1),
         )
-        QVariant = FakeQVariant
 
         class FakeRasterProvider:
-            def __init__(self) -> None:
-                self.data_type_bands: list[int] = []
+            """一个栅格提供者：渲染器重建时只把它原样传下去。
 
-            def dataType(self, band: int) -> int:
-                self.data_type_bands.append(band)
-                return holder.raster_data_type
+            A raster provider: the renderer rebuild only passes it through.
+            """
 
         class QgsVectorLayer(FakeLayer):
             def __init__(self, uri: str, name: str, provider: str, layer_id: str | None = None):
@@ -881,7 +725,6 @@ class FakeQgis:
         self.QgsApplication = QgsApplication
         self.QgsRasterRendererRegistry = QgsRasterRendererRegistry
         self.Qgis = Qgis
-        self.QVariant: Any = QVariant
         # 渲染器文档用到的原生类，供测试里的 isinstance 断言用。
         # The native classes the renderer documents use, for the tests' isinstance assertions.
         self.QgsFeatureRenderer: Any = QgsFeatureRenderer
@@ -917,16 +760,12 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> FakeQgis:
         },
     )
     qtxml = fake_module("qgis.PyQt.QtXml", QDomDocument=FakeDocument)
-    qtgui = fake_module("qgis.PyQt.QtGui", QColor=FakeColor)
-    qtcore = fake_module("qgis.PyQt.QtCore", QVariant=fake.QVariant)
-    pyqt = fake_module("qgis.PyQt", QtXml=qtxml, QtGui=qtgui, QtCore=qtcore)
+    pyqt = fake_module("qgis.PyQt", QtXml=qtxml)
     qgis_module = fake_module("qgis", core=core, PyQt=pyqt)
     monkeypatch.setitem(sys.modules, "qgis", qgis_module)
     monkeypatch.setitem(sys.modules, "qgis.core", core)
     monkeypatch.setitem(sys.modules, "qgis.PyQt", pyqt)
     monkeypatch.setitem(sys.modules, "qgis.PyQt.QtXml", qtxml)
-    monkeypatch.setitem(sys.modules, "qgis.PyQt.QtGui", qtgui)
-    monkeypatch.setitem(sys.modules, "qgis.PyQt.QtCore", qtcore)
     return fake
 
 
@@ -1648,30 +1487,26 @@ def test_checking_a_layer_inside_a_hidden_group_checks_the_group(
     assert (result.visible, result.effective_visible) == (True, True)
 
 
-def test_a_checked_node_behind_a_hidden_group_is_still_not_visible(
+def test_a_type_outside_the_combo_is_refused_before_anything_is_built(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """节点已经勾着时，可见性仍未达成；这一次照样写并置脏。
+    """类型名在解析完就在文档根元素上，所以不在清单里时连 ``load`` 都不该进。
 
-    With the node already ticked, the layer is still not visible; this call still writes and
-    marks the project dirty.
+    The type name is on the root element as soon as the document parses, so a type outside the list
+    must not reach ``load`` at all.
     """
 
     project = FakeProject()
-    layer = make_layer(fake_qgis, "grouped")
-    project.layers[layer.id()] = layer
-    group = FakeGroup(checked=False)
-    node = FakeNode(parent=group, layer_id=layer.id(), layer=layer)
-    project.root.nodes[layer.id()] = node
+    layer = style_layer(fake_qgis, project, "roads")
 
-    result = ops.LayerSetVisibility().execute_main(
+    code = refuse(
+        ops.LayerSetRenderer(),
         make_context(project),
-        ops.LayerSetVisibilityParams(layer_id=layer.id(), visible=True),
+        ops.LayerSetRendererParams(layer_id="roads", renderer='<renderer-v2 type="p5NotOffered"/>'),
     )
-    assert (result.visible, result.effective_visible) == (True, True)
-    assert node.sets == []
-    assert group.sets == [True]
-    assert project.dirty == [True]
+    assert code == INVALID_INPUT
+    assert fake_qgis.loaded_documents == []
+    assert layer.renderer_sets == []
 
 
 def test_a_non_spatial_layer_has_no_visibility_to_set(fake_qgis: FakeQgis, data_root: Path) -> None:
@@ -1855,7 +1690,6 @@ def test_a_geometry_less_vector_table_keeps_its_style_reads(
     project = FakeProject()
     layer = style_layer(fake_qgis, project, "table", renderer=None)
     layer.spatial = False
-    layer.geometry = 4  # 对应 Qgis.GeometryType.Null / Qgis.GeometryType.Null
     ctx = make_context(project)
 
     categories = ops.LayerListStyleCategories().execute_main(
@@ -2187,27 +2021,25 @@ def test_get_renderer_reports_the_type_and_the_renderers_own_document(
     assert raster_result.renderer_xml == '<rasterrenderer type="singlebandgray"/>'
 
 
-def test_a_spatial_layer_of_unknown_geometry_still_answers_the_renderer_reads(
+def test_a_layer_beyond_the_plain_geometry_types_still_answers_the_renderer_reads(
     fake_qgis: FakeQgis, data_root: Path
 ) -> None:
-    """几何未知的空间图层有符号页，所以两个读都得给答案。
+    """一个渲染器类型不在任何几何白名单里时，两个读照答：清单与当前类型都从图层自己来。
 
-    A spatial layer with unknown geometry has a symbology page, so both reads answer it.
+    When the renderer type is on no geometry whitelist of ours, both reads still answer: the list
+    and the current type both come from the layer itself.
     """
 
     fake_qgis.vector_renderer_types = ["heatmapRenderer", "singleSymbol"]
     project = FakeProject()
-    layer = style_layer(fake_qgis, project, "unknown", renderer="heatmapRenderer")
-    layer.geometry = 3  # 对应 Qgis.GeometryType.Unknown / Qgis.GeometryType.Unknown
+    layer = style_layer(fake_qgis, project, "odd", renderer="heatmapRenderer")
     ctx = make_context(project)
 
-    renderer = ops.LayerGetRenderer().execute_main(
-        ctx, ops.LayerGetRendererParams(layer_id="unknown")
-    )
+    renderer = ops.LayerGetRenderer().execute_main(ctx, ops.LayerGetRendererParams(layer_id="odd"))
     assert renderer.renderer_type == "heatmapRenderer"
 
     listed = ops.LayerListAvailableRenderers().execute_main(
-        ctx, ops.LayerListAvailableRenderersParams(layer_id="unknown")
+        ctx, ops.LayerListAvailableRenderersParams(layer_id="odd")
     )
     assert listed.renderer_types == ["heatmapRenderer", "singleSymbol"]
     assert fake_qgis.renderer_registry_layers == [layer]

@@ -984,8 +984,10 @@ absolute_path(raw: str) -> Path
 
 `record.error` 的形状是 `{"code": "…", "message": "…", "details": null}`：`details` 存在但
 **恒为 `null`**（`FrameworkError` 只带 code 与 message，没有 details 通路）；`message` 是给人看的
-一句话，堆栈只进本机日志。它不复述路径、不贴异常文本的默认在 §7.6 的个别条目里有例外：GUI 自己
-把那句话拼给用户的地方（加图层时点名源、统计时点名字段、样式导出失败），消息就是 GUI 那一句，
+一句话，堆栈只进本机日志。
+
+`message` 默认不复述路径、不贴异常文本、不带调用方传的值。§7.6 的个别条目是这条规则的例外：GUI
+自己把那句话拼给用户的地方（加图层时点名源、统计时点名字段、样式导出失败），消息就是 GUI 那一句，
 包括它嵌进去的路径与字段名。
 
 | 码 | 何时用 | 谁用 |
@@ -1150,7 +1152,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1） |
 | 返回 | `renderer_types`（下拉框里的名字，按下拉框顺序，不去重不排序） |
 | 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器） |
-| 行为 | 矢量走 `QgsApplication.rendererRegistry().renderersList(layer)`（按几何过滤），栅格走注册表清单再按图层的 `rasterType()` 过滤（普通栅格里没有 `singlebandcolordata`，`SingleBandColorData` 栅格里只有它）；前置条件是符号页存在，即图层有渲染器 |
+| 行为 | 矢量走 `QgsApplication.rendererRegistry().renderersList(layer)`（按几何过滤），栅格走注册表清单再按图层的 `rasterType()` 过滤（普通栅格里没有 `singlebandcolordata`，`SingleBandColorData` 栅格里只有它）；前置条件是符号页存在，即图层有渲染器。栅格那份清单来自新建的 `QgsRasterRendererRegistry()`（3.44 没把应用级那个访问器绑给 Python，见 `shortcut:`），所以第三方注册在 C++ 单例里的栅格渲染器既列不出来、也会被 `layer.set_renderer` 的同一份清单拒——这张表同时是写入的前置条件 |
 
 #### layer.get_renderer
 
@@ -1168,7 +1170,7 @@ absolute_path(raw: str) -> Path
 | 参数 | `layer_id`（≥1）、`renderer`（≥1 的 XML 字符串，形状与 `layer.get_renderer` 的 `renderer_xml` 相同） |
 | 返回 | `layer_id`、`renderer_type`（安装后的类型名） |
 | 业务错误码 | `INVALID_INPUT`（XML 解析失败——消息是解析器那句带行列号的话；解析出来了但没有这门图层类型认得的渲染器；类型不在这门图层的候选清单里）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（未预期异常，由引擎兜底） |
-| 行为 | 整份渲染器先建好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式，旧渲染器还在；矢量用 `QgsFeatureRenderer.load()`（QGIS 读样式文件时同一次调用），栅格用各类型自己的 `create(element, provider)`（注册表里那个建渲染器的函数，Python 拿不到函数指针所以按类型名写明）；只装候选清单里的类型——不在清单里的 QGIS 会默不作声地保留旧渲染器，报成功就是假话；成功后 `triggerRepaint()` + `setDirty(True)`，与属性对话框的 Apply 两步相同；只有这一个样式 op 是 destructive |
+| 行为 | 整份渲染器先建好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式，旧渲染器还在；矢量用 `QgsFeatureRenderer.load()`（QGIS 读样式文件时同一次调用），栅格用各类型自己的 `create(element, provider)`（注册表里那个建渲染器的函数，Python 拿不到函数指针所以按类型名写明）。只装候选清单里的类型，理由分两半：栅格那边实测有类型会被 QGIS 默不作声地保留（普通栅格上的 `singlebandcolordata`，报告成功就是谎报），矢量那边是下拉框已经按几何筛过、GUI 表达不出那个组合。类型名解析完就在文档根元素上，所以这道检查在建渲染器之前（建那一步会进注册表调对应元数据；清单里的类型照旧建）。成功后 `triggerRepaint()` + `setDirty(True)`，与属性对话框的 Apply 两步相同；只有这一个样式 op 是 destructive |
 
 文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读，所以能装的东西就等于注册表能建的东西（`heatmapRenderer`、第三方注册的矢量渲染器都装得上），没有本地的一份白名单。
 
