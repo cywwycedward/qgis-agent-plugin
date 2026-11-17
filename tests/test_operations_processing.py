@@ -241,13 +241,18 @@ class FakeOutput:
 
 
 class FakeProvider:
-    """``QgsProcessingProvider`` 的替身：只暴露运行前要报的那句告警。
+    """``QgsProcessingProvider`` 的替身：它显示给自己的名字，加运行前要报的那句告警。
 
-    A ``QgsProcessingProvider``: only the warning a run has to report.
+    A ``QgsProcessingProvider``: the name it shows for itself and the warning a run has to
+    report.
     """
 
-    def __init__(self, warning: str = "") -> None:
+    def __init__(self, name: str = "", warning: str = "") -> None:
+        self._name = name
         self._warning = warning
+
+    def name(self) -> str:
+        return self._name
 
     def warningMessage(self) -> str:  # noqa: N802 - the native spelling
         return self._warning
@@ -274,6 +279,7 @@ class FakeAlgorithm:
         parameters_ok: bool = True,
         parameters_message: str = "",
         crs_ok: bool = True,
+        provider_name: str = "",
         provider_warning: str = "",
     ) -> None:
         self.algorithm_id = algorithm_id
@@ -293,7 +299,7 @@ class FakeAlgorithm:
         # ``preprocessParameters`` 交回的 map，在调用方的 map 之后合并。
         # What preprocessParameters hands back, merged after the caller's map.
         self.adds_on_preprocess: dict[str, Any] = {}
-        self._provider = FakeProvider(provider_warning)
+        self._provider = FakeProvider(provider_name, provider_warning)
 
     def id(self) -> str:
         return self.algorithm_id
@@ -544,6 +550,7 @@ def install(
     parameters_ok: bool = True,
     parameters_message: str = "",
     crs_ok: bool = True,
+    provider_name: str = "",
     provider_warning: str = "",
 ) -> FakeAlgorithm:
     algorithm = FakeAlgorithm(
@@ -558,6 +565,7 @@ def install(
         parameters_ok=parameters_ok,
         parameters_message=parameters_message,
         crs_ok=crs_ok,
+        provider_name=provider_name,
         provider_warning=provider_warning,
     )
     fake.registry.algorithms_by_id[algorithm_id] = algorithm
@@ -623,7 +631,7 @@ def test_the_list_parameters_accept_only_an_empty_object() -> None:
 
 def test_an_undeclared_field_is_refused_on_every_model() -> None:
     with pytest.raises(ValidationError):
-        ops.AlgorithmSummary(id="a", name="A", group="G", provider="native")
+        ops.AlgorithmSummary(id="a", name="A", group="G", provider_id="native")
     with pytest.raises(ValidationError):
         ops.AlgorithmDetails(id="a", name="A", short_description="", help="", group="G")
     with pytest.raises(ValidationError):
@@ -644,13 +652,14 @@ def test_an_undeclared_field_is_refused_on_every_model() -> None:
 
 def test_a_summary_only_takes_real_strings() -> None:
     with pytest.raises(ValidationError):
-        ops.AlgorithmSummary(id=1, name="A", group="G")
+        ops.AlgorithmSummary(id=1, name="A", group="G", provider="P")
     with pytest.raises(ValidationError):
-        ops.AlgorithmSummary(id="a", name=None, group="G")
-    assert ops.AlgorithmSummary(id="a", name="A", group="G").model_dump() == {
+        ops.AlgorithmSummary(id="a", name=None, group="G", provider="P")
+    assert ops.AlgorithmSummary(id="a", name="A", group="G", provider="P").model_dump() == {
         "id": "a",
         "name": "A",
         "group": "G",
+        "provider": "P",
     }
 
 
@@ -795,21 +804,52 @@ def test_outputs_are_checked_as_json_too() -> None:
 # --- processing.list_algorithms：列出算法 / listing the algorithms ----------
 
 
-def test_the_list_uses_the_flat_group_name_order(fake_qgis: FakeQgis) -> None:
-    # 分组名先、算法名后；两个键都故意与 id 的顺序相反。
-    # Group name first, algorithm name second; both keys deliberately disagree with id order.
-    install(fake_qgis, algorithm_id="zzz:alpha", name="Zulu", group="Alpha")
-    install(fake_qgis, algorithm_id="native:beta", name="Bravo", group="Alpha")
-    install(fake_qgis, algorithm_id="aaa:gamma", name="Alpha", group="Beta")
+def test_the_list_follows_the_toolbox_tree_order(fake_qgis: FakeQgis) -> None:
+    # 工具箱是 provider → 分组 → 算法三层，每层按名字排；三个键都故意与 id 的顺序相反。
+    # The toolbox is provider, group, algorithm, each level ordered by name; every key is
+    # deliberately the reverse of the id order.
+    install(fake_qgis, algorithm_id="zzz:alpha", name="Zulu", group="Alpha", provider_name="Zed")
+    install(
+        fake_qgis,
+        algorithm_id="native:beta",
+        name="Bravo",
+        group="Alpha",
+        provider_name="QGIS (native c++)",
+    )
+    install(fake_qgis, algorithm_id="aaa:gamma", name="Alpha", group="Beta", provider_name="Aaa")
 
     result = ops.ProcessingListAlgorithms().execute_main(
         make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
     )
-    assert [(summary.id, summary.name, summary.group) for summary in result.algorithms] == [
-        ("native:beta", "Bravo", "Alpha"),
-        ("zzz:alpha", "Zulu", "Alpha"),
-        ("aaa:gamma", "Alpha", "Beta"),
+    assert [(s.provider, s.group, s.name, s.id) for s in result.algorithms] == [
+        ("Aaa", "Beta", "Alpha", "aaa:gamma"),
+        ("QGIS (native c++)", "Alpha", "Bravo", "native:beta"),
+        ("Zed", "Alpha", "Zulu", "zzz:alpha"),
     ]
+
+
+def test_two_providers_offering_the_same_names_stay_in_provider_order(fake_qgis: FakeQgis) -> None:
+    # 真注册表里就有这种同名：同一个分组、同一个算法名同时出现在两个 provider 里。
+    # The real registry has this: one group and one algorithm name in two providers.
+    install(
+        fake_qgis,
+        algorithm_id="native:raster-calculator",
+        name="Raster calculator",
+        group="Raster analysis",
+        provider_name="QGIS (native c++)",
+    )
+    install(
+        fake_qgis,
+        algorithm_id="qgis:raster-calculator",
+        name="Raster calculator",
+        group="Raster analysis",
+        provider_name="QGIS",
+    )
+
+    result = ops.ProcessingListAlgorithms().execute_main(
+        make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
+    )
+    assert [summary.provider for summary in result.algorithms] == ["QGIS", "QGIS (native c++)"]
 
 
 def test_the_list_drops_hidden_and_known_issue_algorithms(fake_qgis: FakeQgis) -> None:
@@ -856,12 +896,25 @@ def test_an_empty_registry_lists_nothing(fake_qgis: FakeQgis) -> None:
 
 
 def test_the_list_result_carries_only_algorithms(fake_qgis: FakeQgis) -> None:
-    install(fake_qgis, algorithm_id="native:buffer", name="Buffer", group="Vector geometry")
+    install(
+        fake_qgis,
+        algorithm_id="native:buffer",
+        name="Buffer",
+        group="Vector geometry",
+        provider_name="QGIS (native c++)",
+    )
     result = ops.ProcessingListAlgorithms().execute_main(
         make_context(FakeProject()), ops.ProcessingListAlgorithmsParams()
     )
     assert result.model_dump() == {
-        "algorithms": [{"id": "native:buffer", "name": "Buffer", "group": "Vector geometry"}]
+        "algorithms": [
+            {
+                "id": "native:buffer",
+                "name": "Buffer",
+                "group": "Vector geometry",
+                "provider": "QGIS (native c++)",
+            }
+        ]
     }
 
 

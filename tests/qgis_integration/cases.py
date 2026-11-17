@@ -2340,21 +2340,30 @@ def p01_list_algorithms(ctx: Context) -> str:
     ids = [summary["id"] for summary in summaries]
 
     expected = sorted(
-        (algorithm.group(), algorithm.displayName(), algorithm.id())
+        (
+            algorithm.provider().name(),
+            algorithm.group(),
+            algorithm.displayName(),
+            algorithm.id(),
+        )
         for algorithm in visible.values()
     )
-    # 列表是扁平投影，按（分组名、算法名、id）排序；工具箱的 provider/分组树不复刻。
-    # The list is a flat projection ordered by (group, display name, id); the toolbox's
-    # provider/group tree is not reproduced.
+    # 列表是扁平投影，但顺序照工具箱那三层（provider → 分组 → 算法）；同一个键出现多次时用 id
+    # 定序。
+    # A flat projection, but ordered as the toolbox's three levels are (provider, group,
+    # algorithm); equal keys are ordered by id.
     equal(
-        [(summary["group"], summary["name"], summary["id"]) for summary in summaries],
+        [
+            (summary["provider"], summary["group"], summary["name"], summary["id"])
+            for summary in summaries
+        ],
         expected,
-        "the flat (group, display name, id) order",
+        "the toolbox (provider, group, display name, id) order",
     )
-    equal(ids, [algorithm_id for _, _, algorithm_id in expected], "the visible ids")
+    equal(ids, [algorithm_id for _, _, _, algorithm_id in expected], "the visible ids")
     equal(len(ids), len(set(ids)), "duplicate ids")
     for summary in summaries:
-        equal(sorted(summary), ["group", "id", "name"], "the fields of one summary")
+        equal(sorted(summary), ["group", "id", "name", "provider"], "the fields of one summary")
     sample = next(summary for summary in summaries if summary["id"] == "native:buffer")
     equal(
         sample["name"],
@@ -2362,6 +2371,11 @@ def p01_list_algorithms(ctx: Context) -> str:
         "a display name from the registry",
     )
     equal(sample["group"], visible["native:buffer"].group(), "a group from the registry")
+    equal(
+        sample["provider"],
+        visible["native:buffer"].provider().name(),
+        "a provider name from the registry",
+    )
     for algorithm_id in PROBE_ALGORITHMS:
         require(
             algorithm_id in ids,
@@ -2370,10 +2384,10 @@ def p01_list_algorithms(ctx: Context) -> str:
     prefixes = {algorithm_id.split(":")[0] for algorithm_id in ids}
     require(len(prefixes) > 1, f"only one provider prefix in the list: {sorted(prefixes)}")
     return (
-        f"{len(ids)} algorithms in the flat (group, display name, id) order -- not the toolbox "
+        f"{len(ids)} algorithms in the toolbox order (provider, group, display name) -- not its "
         f"tree -- exactly the live registry minus the {len(hidden)} carrying HideFromToolbox or "
         f"KnownIssues ({', '.join(sorted(hidden)[:3])}…), over {len(prefixes)} provider prefixes "
-        f"({', '.join(sorted(prefixes))}), three fields each"
+        f"({', '.join(sorted(prefixes))}), four fields each"
     )
 
 

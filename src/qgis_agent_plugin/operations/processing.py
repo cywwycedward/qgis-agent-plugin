@@ -1,59 +1,24 @@
 """三个 ``processing.*`` 操作。
 
-三者都在主线程跑：QGIS 的 processing 框架直接操作工程和它持有的图层，一次运行会把结果图层交给
-那个工程，所以它挪不到后台线程。
+三者都在主线程跑：Processing 直接操作工程与它持有的图层，一次运行还会把结果图层交给那个工程。
 
-``list_algorithms`` 是注册表的扁平投影：``QgsProcessingRegistry.algorithms()`` 减去工具箱挡掉的
-算法（``HideFromToolbox`` 总是挡，``KnownIssues`` 只在 ``SHOW_ALGORITHMS_KNOWN_ISSUES`` 关着时挡），
-按分组名、算法名、id 排序；工具箱的 provider/分组树不复刻。
-
-``get_algorithm_info`` 读一条算法自己的定义：``algorithmHelp()`` 印的那几个字段，隐藏参数跳过，
-枚举参数带它自己的选项列表。
-
-``run_algorithm`` 运行之前问的问题与参数面板相同，而且每个问题都问 QGIS 自己的函数：按 id 取实例，
-补上控件会交出的值（缺席的可见参数拿 ``defaultValueForGui()``，缺席的输出参数是临时输出，可选且不
-默认创建的输出保持缺席），逐个参数问 ``checkValueIsAcceptable``、对每个有值的输出问
-``isSupportedOutputValue``，过一遍 ``preprocessParameters``，问参数 CRS 不一致时的确认，最后问
-``checkParameterValues``；任一条不通过就是 ``INVALID_INPUT``，消息是 QGIS 对同一个问题说的那一句。
-通过之后，``qgis.processing.runAndLoadResults()`` 跑它并把结果图层加载进当前工程——磁盘输出因此
-进工程，图层名、样式与结果分组都由 QGIS 自己的后处理决定。算法抛出的异常由
-``FrameworkError(INTERNAL_ERROR, 异常原文（空则类型名）)`` 报出，那一批消息另有一份进本地日志。
-没声明的参数键由 QGIS 忽略，路径或远程 URI 也由 QGIS 解析。
-
-本模块守着的边界是 JSON：``parameters`` 是一棵有限的 JSON 树；``outputs`` 里只放有无损 JSON 形式的
-值，NaN、无穷、bytes 或 QGIS/Qt 对象在这里就被拒，而不是 ``str()`` 一下。
+没有一条判据是本模块自己的：要列什么、挡什么、问什么、按什么顺序问、拒绝时说什么，全部取自
+Processing 的源码（注册表与工具箱的过滤、``algorithmHelp()``、参数面板的
+``createProcessingParameters`` 与 ``AlgorithmDialog.runAlgorithm``）。本模块只拥有两件事：GUI 交
+给用户的那些话原样交给调用方（``messages`` 与失败记录），以及 ``parameters``/``outputs`` 必须是
+有限 JSON 树这一条边界。
 
 QGIS 在使用它的方法内部 import，所以本模块在裸解释器里也能加载，契约不依赖运行中的 QGIS。
 
-All three operations run on the main thread: QGIS's processing framework works on the
-project and the layers it holds, and a run hands result layers to that project, so it
-cannot move to a worker.
+All three run on the main thread: Processing works on the project and the layers it holds, and a
+run hands its result layers to that project.
 
-``list_algorithms`` is a flat projection of the registry: ``QgsProcessingRegistry.algorithms()``
-minus what the toolbox hides (``HideFromToolbox`` always, ``KnownIssues`` unless
-``SHOW_ALGORITHMS_KNOWN_ISSUES`` is on), ordered by group name, algorithm name and id; the
-toolbox's provider/group tree is not reproduced.
-
-``get_algorithm_info`` reads one algorithm's own definition: the fields ``algorithmHelp()``
-prints, a hidden parameter skipped, an enum parameter carrying its own option list.
-
-``run_algorithm`` asks before a run what the parameter panel asks, and every question goes
-through QGIS's own function: resolve the algorithm by id, fill in the values a widget would
-carry (a missing visible parameter takes ``defaultValueForGui()``, a missing output is a
-temporary output, an optional output not created by default stays absent), ask every
-parameter's ``checkValueIsAcceptable``, ask ``isSupportedOutputValue`` for every output that has
-a value, run ``preprocessParameters``, ask the CRS-mismatch confirmation, and finally ask
-``checkParameterValues``.  Any refusal is ``INVALID_INPUT`` carrying the sentence QGIS uses for
-that same question.  Only then does ``qgis.processing.runAndLoadResults()`` run it and load the
-result layers into the current project -- a disk output reaches the project that way -- with the
-layer names, styles and results group QGIS's own post-processing gives them.  An exception the
-algorithm raises is reported as ``FrameworkError(INTERNAL_ERROR, the exception's text, or its
-type name when that is empty)``, and the run's messages keep a second copy in the local log.  An
-undeclared parameter key is QGIS's to ignore, a path or a remote URI is QGIS's to resolve.
-
-The boundary this module owns is JSON: ``parameters`` is a finite JSON tree and ``outputs``
-holds only values that have a lossless JSON form; a NaN, an infinity, bytes or a QGIS/Qt object
-is refused here rather than ``str()``-ed.
+Not one criterion here is this module's own: what to list, what to hide, what to ask, in which
+order, and what to say when refusing all come from Processing's source (the registry and the
+toolbox's filters, ``algorithmHelp()``, the parameter panel's ``createProcessingParameters`` and
+``AlgorithmDialog.runAlgorithm``).  This module owns two things only: the sentences the GUI hands
+to the user are handed to the caller unchanged (``messages`` and the failed record), and the
+boundary that ``parameters`` and ``outputs`` are finite JSON trees.
 
 QGIS is imported inside the methods that use it, so this module loads in a bare interpreter and
 its contracts stay testable without a running QGIS.
@@ -148,9 +113,10 @@ def _require_json(value: Any) -> Any:
 
 
 class AlgorithmSummary(BaseModel):
-    """一个已注册算法，说成调用方能够据此行动的样子。
+    """工具箱里的一行：provider、分组、算法各取它显示给自己的那个名字。
 
-    One registered algorithm, in the terms the caller can act on.
+    One row of the toolbox: the provider, the group and the algorithm, each under the name it
+    shows for itself.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -158,6 +124,7 @@ class AlgorithmSummary(BaseModel):
     id: StrictStr
     name: StrictStr
     group: StrictStr
+    provider: StrictStr
 
 
 class AlgorithmDetails(BaseModel):
@@ -293,10 +260,12 @@ def algorithm_summary(algorithm: Any) -> AlgorithmSummary:
     The list's one summary shape: what the registry says about an algorithm.
     """
 
+    provider = algorithm.provider()
     return AlgorithmSummary(
         id=algorithm.id(),
         name=algorithm.displayName(),
         group=algorithm.group(),
+        provider="" if provider is None else provider.name(),
     )
 
 
@@ -384,28 +353,30 @@ def _config_flag(key: str, default: bool) -> bool:
 def _values_with_defaults(algorithm: Any, parameters: dict[str, Any]) -> dict[str, Any]:
     """参数面板会交出的那张表：缺席的参数补上控件自己的默认值。
 
-    面板给每个可见参数建控件，控件一出生就带着 ``defaultValueForGui()``（没有 GUI 设置时就是
-    参数自己的默认值）；提交时它把每个控件的值都放进 map，包括那些没被碰过的。所以这里对缺席的
-    非输出参数也放同一个值——QGIS 自己的 ``checkParameterValues`` 对缺键的 enum 并不回落到默认
-    值，只靠“QGIS 会解析缺席”是不够的。没有默认值的保持缺席（面板那边是空控件，两边都会拒）。
-    输出参数照旧：没有默认值就是临时输出，可选且不默认创建的保持缺席（面板的“跳过输出”）；
-    调用方给 ``None`` 也是跳过输出，那个键在交给 QGIS 之前就被去掉。
+    面板给每个可见参数建控件：非输出控件一出生就是 ``defaultValueForGui()``（没有 GUI 设置时就是
+    参数自己的默认值），输出控件在没有默认值时是临时输出（可选且不默认创建的那类留空，即跳过）。
+    提交时它把每个控件的值都放进 map，包括那些没被碰过的，所以这里对缺席的非输出参数也放同一个
+    值——QGIS 自己的 ``checkParameterValues`` 对缺键的 enum 并不回落到默认值，只靠“QGIS 会解析
+    缺席”是不够的。没有默认值的保持缺席（面板那边是空控件，两边都会拒）。输出参数照旧：没有默认
+    值就是临时输出，可选且不默认创建的保持缺席（面板的“跳过输出”）；调用方给 ``None`` 也是跳过
+    输出，那个键在交给 QGIS 之前就被去掉。
     隐藏参数面板从不发送，这里也不补。补进来的默认值可能是 QGIS 对象（控件本来就是），它们只往
     QGIS 走，不会出现在结果里。
 
-    The map the parameter panel hands over: missing parameters get the widget's own default.
-    The panel creates a widget per visible parameter, the widget starts at
-    ``defaultValueForGui()`` (the parameter's own default when no GUI setting overrides it), and
-    the panel submits every widget's value, touched or not.  So a missing non-destination
-    parameter is filled with that same value here -- QGIS's own ``checkParameterValues`` does not
-    fall back to the default for an enum whose key is missing, so relying on "QGIS resolves a
-    missing value" is only half the story.  A parameter with no default stays absent (the panel's
-    widget is empty and both sides refuse it).  Destinations keep their rule: no default means a
-    temporary output, and an optional destination that is not created by default stays absent
-    (the panel's "skip output"); an explicit ``None`` is that same skip, and the key is dropped
-    before QGIS sees it.  Hidden parameters are never sent by the panel and are not filled here
-    either.  A filled default may be a QGIS object (the widget's value is), and it only travels to
-    QGIS; it never appears in the result.
+    The map the parameter panel hands over: missing parameters get the widget's own default.  The
+    panel creates a widget per visible parameter: a non-destination widget starts at
+    ``defaultValueForGui()`` (the parameter's own default when no GUI setting overrides it), and a
+    destination widget without a default starts at the temporary output (the optional ones not
+    created by default start empty, which is a skip).  The panel submits every widget's value,
+    touched or not, so a missing non-destination parameter is filled with that same value here --
+    QGIS's own ``checkParameterValues`` does not fall back to the default for an enum whose key is
+    missing, so relying on "QGIS resolves a missing value" is only half the story.  A parameter
+    with no default stays absent (the panel's widget is empty and both sides refuse it).
+    Destinations keep their rule: no default means a temporary output, and an optional destination
+    that is not created by default stays absent (the panel's "skip output"); an explicit ``None``
+    is that same skip, and the key is dropped before QGIS sees it.  Hidden parameters are never
+    sent by the panel and are not filled here either.  A filled default may be a QGIS object (the
+    widget's value is), and it only travels to QGIS; it never appears in the result.
     """
 
     from qgis.core import (  # pyright: ignore[reportMissingImports]
@@ -531,9 +502,16 @@ class ProcessingListAlgorithms(
             for algorithm in QgsApplication.processingRegistry().algorithms()
             if not int(algorithm.flags()) & excluded
         ]
-        # 按分组名、算法名、id 排；这是列表自己的扁平键。
-        # Ordered by group name, algorithm name and id: the list's own flat key.
-        algorithms.sort(key=lambda summary: (summary.group, summary.name, summary.id))
+        # 工具箱是三层树（provider → 分组 → 算法），每层按名字排；扁平列表照它的遍历顺序摊开，
+        # 同名的用 id 定序。
+        # shortcut: 这里按码点比较，工具箱用 locale 排序，需要与 Qt 逐字一致时换成 QCollator。
+        # English: code-point comparison here, locale collation in the toolbox, switch to QCollator
+        # when byte-identical order with Qt matters.
+        # The toolbox is a three-level tree (provider, group, algorithm) with each level ordered by
+        # name; the flat list follows that traversal and orders equal names by id.
+        algorithms.sort(
+            key=lambda summary: (summary.provider, summary.group, summary.name, summary.id)
+        )
         return ProcessingListAlgorithmsResult(algorithms=algorithms)
 
 
