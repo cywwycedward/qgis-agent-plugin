@@ -1,4 +1,12 @@
-"""The dock's colours, type sizes and stylesheet, derived from the application palette.
+"""坞窗的颜色、字号和样式表，全部从应用调色板推出来。
+
+这是坞窗唯一的配色来源，而且这里也没有一个字面量：每个色调都是一个 ``QPalette`` 角色、该角色
+调过明度后的版本，或两个角色的混合。语义色（ok / warn / danger）保留含义，明度由调色板定；
+每一对文字都被推到过 WCAG 底线，所以坞窗在 QGIS 的浅色和深色主题上都读得清，换主题不需要
+第二份样式表。
+
+Qt 故意在函数内部 import。``ui/dock.py`` 是唯一允许在模块级 import Qt 的模块；这个即使被直接
+import，也不会进入裸解释器的 import 图。
 
 This is the dock's only colour authority, and even here nothing is a literal: every
 tone is a ``QPalette`` role, that role moved in lightness, or two roles mixed.  The
@@ -18,10 +26,12 @@ from dataclasses import dataclass
 from string import Template
 from typing import Any
 
+# WCAG 2.1 的两个底线：正文与次要文字，然后是大字号和状态胶囊。
 # WCAG 2.1 floors: body and secondary text, then large text and the status capsule.
 BODY = 4.5
 LARGE = 3.0
 
+# 状态胶囊说的话；``empty`` 是注册表里什么都没有。
 # What the status capsule says.  ``empty`` is the registry with nothing in it.
 STATE_LABELS = {
     "empty": "无操作",
@@ -32,10 +42,12 @@ STATE_LABELS = {
     "cancelled": "已取消",
 }
 
-# The hue of each semantic tone, in degrees.  The hue carries the meaning; the
-# palette decides the lightness, which is what makes a dark theme work.
+# 每个语义色调的色相，单位是度。色相带着含义，明度由调色板定，这才让深色主题成立。
+# The hue of each semantic tone, in degrees.  The hue carries the meaning; the palette
+# decides the lightness, which is what makes a dark theme work.
 _HUES = {"ok": 145.0, "warn": 38.0, "danger": 358.0}
 
+# 整个坞窗的样式；``$tokens`` 由 Theme 填写，花括号留给 Qt。
 # The whole dock's styling.  ``$tokens`` are filled from a Theme; braces stay Qt's.
 _SHEET = Template(
     """
@@ -46,6 +58,9 @@ QLabel { color: $text; font-size: $bodypt; }
 QLabel#meta { color: $muted; font-family: "$mono"; font-size: $smallpt; }
 QLabel#summary { color: $muted; font-size: $bodypt; }
 QLabel#fieldLabel { color: $muted; font-size: $bodypt; }
+QLabel#metaLabel { color: $muted; font-size: $smallpt; }
+QLabel#metaValue { color: $text; font-family: "$mono"; font-size: $smallpt; }
+QLabel#recordHint { color: $muted; font-size: $bodypt; }
 QLabel#resultSummary { color: $muted; font-family: "$mono"; font-size: $smallpt; }
 QLabel#emptyTitle { color: $text; font-size: $titlept; font-weight: 600; }
 QLabel#emptyBody { color: $muted; font-size: $bodypt; }
@@ -107,7 +122,8 @@ QProgressBar#progress {
 }
 QProgressBar#progress::chunk { background: $accent; border-radius: 2px; }
 
-QScrollArea#params, QScrollArea#params > QWidget > QWidget {
+QScrollArea#params, QScrollArea#params > QWidget > QWidget,
+QScrollArea#metaArea, QScrollArea#metaArea > QWidget > QWidget {
     background: transparent; border: none;
 }
 QScrollBar:vertical { background: transparent; width: 10px; margin: 0; }
@@ -121,12 +137,12 @@ QScrollBar::handle:horizontal:hover { background: $muted; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 
-QPlainTextEdit#result {
+QPlainTextEdit#result, QPlainTextEdit#raw {
     background: $field; color: $text; border: 1px solid $border; border-radius: 4px;
     font-family: "$mono"; font-size: $smallpt; padding: 8px 10px;
     selection-background-color: $accent; selection-color: $on_accent;
 }
-QPlainTextEdit#result:focus { border-color: $accent; }
+QPlainTextEdit#result:focus, QPlainTextEdit#raw:focus { border-color: $accent; }
 
 QToolTip { background: $field; color: $text; border: 1px solid $border; padding: 4px 6px; }
 """
@@ -134,7 +150,10 @@ QToolTip { background: $field; color: $text; border: 1px solid $border; padding:
 
 
 def relative_luminance(color: Any) -> float:
-    """WCAG 2.1 relative luminance of an opaque QColor."""
+    """不透明 QColor 的 WCAG 2.1 相对亮度。
+
+    WCAG 2.1 relative luminance of an opaque QColor.
+    """
 
     def channel(value: int) -> float:
         linear = value / 255
@@ -148,20 +167,25 @@ def relative_luminance(color: Any) -> float:
 
 
 def contrast(first: Any, second: Any) -> float:
-    """WCAG 2.1 contrast ratio between two opaque QColors."""
+    """两个不透明 QColor 之间的 WCAG 2.1 对比度。
+
+    WCAG 2.1 contrast ratio between two opaque QColors.
+    """
 
     high, low = sorted((relative_luminance(first), relative_luminance(second)), reverse=True)
     return (high + 0.05) / (low + 0.05)
 
 
 def readable(color: Any, background: Any, floor: float = BODY) -> Any:
-    """``color`` moved away from ``background`` until it clears ``floor``.
+    """把 ``color`` 从 ``background`` 推开，直到它过 ``floor``。
+
+    只有明度在动，所以语义色相仍然认得出：浅色主题要同一个红的深版，深色主题要浅版。
 
     Only lightness moves, so a semantic hue stays recognisable: a light theme needs
     the darker version of the same red, a dark theme the lighter one.
     """
 
-    from qgis.PyQt.QtGui import QColor
+    from qgis.PyQt.QtGui import QColor  # pyright: ignore[reportMissingImports]
 
     result = QColor(color)
     toward_dark = relative_luminance(background) > 0.18
@@ -173,9 +197,12 @@ def readable(color: Any, background: Any, floor: float = BODY) -> Any:
 
 
 def mix(base: Any, tint: Any, ratio: float) -> Any:
-    """``base`` blended ``ratio`` of the way to ``tint`` -- how a surface gets a tone."""
+    """``base`` 向 ``tint`` 混合 ``ratio`` 那么多——表面就是这样染上色调的。
 
-    from qgis.PyQt.QtGui import QColor
+    ``base`` blended ``ratio`` of the way to ``tint`` -- how a surface gets a tone.
+    """
+
+    from qgis.PyQt.QtGui import QColor  # pyright: ignore[reportMissingImports]
 
     return QColor(
         round(base.red() * (1 - ratio) + tint.red() * ratio),
@@ -185,14 +212,17 @@ def mix(base: Any, tint: Any, ratio: float) -> Any:
 
 
 def accent_for(text: Any, accent: Any) -> Any:
-    """``accent`` moved until the palette's own highlighted text reads on it.
+    """把 ``accent`` 推到调色板自己的高亮文字能在上面读清。
+
+    浅色主题的高亮色常常太浅，白色文字过不了 4.5:1。移动按钮背景能保住平台本来的配对；改去调暗
+    文字，会把每个主按钮的文字变成接近黑色。
 
     A light theme's highlight is often too light for white text at 4.5:1.  Moving
     the button's background keeps the pairing the platform intended; darkening the
     label instead would turn every primary button's text near-black.
     """
 
-    from qgis.PyQt.QtGui import QColor
+    from qgis.PyQt.QtGui import QColor  # pyright: ignore[reportMissingImports]
 
     result = QColor(accent)
     toward_dark = relative_luminance(text) > 0.5
@@ -205,7 +235,10 @@ def accent_for(text: Any, accent: Any) -> Any:
 
 @dataclass(frozen=True)
 class Theme:
-    """One palette's worth of colour and type; built by :func:`build`."""
+    """一个调色板对应的颜色与字号；由 :func:`build` 建出来。
+
+    One palette's worth of colour and type; built by :func:`build`.
+    """
 
     surface: Any
     field: Any
@@ -227,7 +260,10 @@ class Theme:
     title: int
 
     def capsule(self, state: str) -> tuple[Any, Any]:
-        """Foreground and background for the status capsule of one state."""
+        """一个状态胶囊的前景色和背景色。
+
+        Foreground and background for the status capsule of one state.
+        """
 
         tone = {
             "running": self.accent,
@@ -242,7 +278,10 @@ class Theme:
         return readable(tone, background), background
 
     def banner(self) -> tuple[Any, Any, Any, Any]:
-        """The error panel: its background, then the three colours measured on it."""
+        """错误面板：它的背景色，然后是量在它上面的三种颜色。
+
+        The error panel: its background, then the three colours measured on it.
+        """
 
         background = mix(self.surface, self.danger, 0.10)
         return (
@@ -253,7 +292,11 @@ class Theme:
         )
 
     def pairs(self) -> dict[str, tuple[Any, Any, float]]:
-        """Every text-on-background pair the QSS paints, with its floor.
+        """QSS 画出来的每一对「文字在背景上」，连同它的底线。
+
+        这里只列样式表规则真的设过的颜色；Qt 在样式表背后画的那两处——行编辑提示和记录占位
+        符——是在 ``test_ui_dock`` 里按渲染出来的像素量的，因为断言一个 Qt 根本不用的调色板
+        角色什么都证明不了。
 
         Only colours a stylesheet rule sets appear here; the two places Qt paints
         behind the stylesheet's back -- the line-edit hint and the record
@@ -284,7 +327,10 @@ class Theme:
         return pairs
 
     def stylesheet(self) -> str:
-        """The dock's QSS, with every colour taken from this theme."""
+        """坞窗的 QSS，每个颜色都取自已主题。
+
+        The dock's QSS, with every colour taken from this theme.
+        """
 
         background, text, muted, code = self.banner()
         tokens = {
@@ -312,10 +358,17 @@ class Theme:
 
 
 def build(palette: Any) -> Theme:
-    """The dock's theme for ``palette`` -- normally ``QApplication.palette()``."""
+    """``palette`` 对应的坞窗主题——通常就是 ``QApplication.palette()``。
 
-    from qgis.PyQt.QtGui import QColor, QFontDatabase, QPalette
-    from qgis.PyQt.QtWidgets import QApplication
+    The dock's theme for ``palette`` -- normally ``QApplication.palette()``.
+    """
+
+    from qgis.PyQt.QtGui import (  # pyright: ignore[reportMissingImports]
+        QColor,
+        QFontDatabase,
+        QPalette,
+    )
+    from qgis.PyQt.QtWidgets import QApplication  # pyright: ignore[reportMissingImports]
 
     surface = QColor(palette.color(QPalette.Window))
     field = QColor(palette.color(QPalette.Base))
@@ -324,9 +377,11 @@ def build(palette: Any) -> Theme:
     accent = readable(palette.color(QPalette.Highlight), surface, LARGE)
     on_accent = QColor(palette.color(QPalette.HighlightedText))
     accent = accent_for(on_accent, accent)
-    # The two button states step away from the label colour, so their contrast can
-    # only rise.  (Moving the fill *towards* the text is what put the light theme's
-    # hover fill at 4.31:1 while the resting fill sat at 5.39.)
+    # 两个按钮状态背离标签颜色，所以对比度只会升不会降。（把填充推向文字，正是浅色主题 hover
+    # 填充落到 4.31:1、静止填充停在 5.39 的原因。）
+    # The two button states step away from the label colour, so their contrast can only
+    # rise.  (Moving the fill *towards* the text is what put the light theme's hover fill
+    # at 4.31:1 while the resting fill sat at 5.39.)
     toward_dark = relative_luminance(on_accent) > 0.5
     accent_hover = accent.darker(112) if toward_dark else accent.lighter(112)
     accent_pressed = accent.darker(125) if toward_dark else accent.lighter(125)

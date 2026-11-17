@@ -1,14 +1,18 @@
-"""The execution protocol: one strategy per operation, and the stages it needs."""
+"""执行协议：一个操作只声明一种执行策略，并实现那种策略要求的阶段。
+
+The execution protocol: an operation declares exactly one execution strategy and
+implements the stages that strategy requires.
+"""
 
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, fields
 
-import pytest
-from pydantic import BaseModel
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import (  # pyright: ignore[reportMissingImports]
     BackgroundOperationMixin,
     BaseCommand,
     BaseOperation,
@@ -20,19 +24,33 @@ from qgis_agent_plugin.core.contracts import (
     TaskControl,
     validate_operation,
 )
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     INVALID_OPERATION_DEFINITION,
     FrameworkError,
     Params,
 )
 
 
+class LooseParams(BaseModel):
+    """一个普通 pydantic 模型：它不拒绝没声明的键，所以任何操作都不能拿它当输入。
+
+    A plain model: it does not reject an undeclared key, so no operation may take it as
+    its input.
+    """
+
+
 class NoParams(Params):
-    """An operation with no parameters still refuses an unknown key."""
+    """参数为空的输入模型：多给一个没声明的键照样被拒织。
+
+    An operation with no parameters still refuses a key it does not declare.
+    """
 
 
 class EmptyResult(BaseModel):
-    """An operation with no result fields."""
+    """没有结果字段的输出模型，下面每个操作的契约都拿它当产出。
+
+    An output model with no result fields, which every operation below returns.
+    """
 
 
 class MainQuery(BaseQuery[NoParams, EmptyResult], MainThreadOperationMixin[NoParams, EmptyResult]):
@@ -150,7 +168,7 @@ def refusal(operation: object) -> FrameworkError:
     return caught.value
 
 
-def test_enum_values_follow_the_prd() -> None:
+def test_enum_values_are_the_expected_ones() -> None:
     assert OperationKind.COMMAND == "command"
     assert OperationKind.QUERY == "query"
     assert ExecutionStrategy.MAIN_THREAD == "main_thread"
@@ -216,6 +234,12 @@ def test_a_non_model_input_is_refused() -> None:
     operation = MainQuery()
     operation.input_model = dict  # type: ignore
     refusal(operation)
+
+
+def test_an_input_model_that_is_not_params_is_refused() -> None:
+    operation = MainQuery()
+    operation.input_model = LooseParams  # type: ignore[assignment]
+    assert "Params" in refusal(operation).message
 
 
 def test_a_non_boolean_destructive_flag_is_refused() -> None:

@@ -6,6 +6,10 @@ testpaths = ["tests"]
 # The plugin is not installed anywhere; the tests load it from the source tree,
 # the way an installed plugin is laid out.
 pythonpath = ["src"]
+# Tests that assert a repo-wide rule instead of a behaviour; `npm run check` runs only these.
+markers = [
+    "conformance: a whole-repo rule (comments, imports, docs, registration surface), run after every change",
+]
 
 [tool.ruff]
 line-length = 100
@@ -26,3 +30,9 @@ select = [
 # already there), ANN, and ARG (Qt slot signatures carry arguments they must not
 # use).  RUF is left out until its ambiguous-character rules can be ignored:
 # RUF001/2/3 report full-width Chinese punctuation as ambiguous.
+
+[tool.ruff.format]
+# The guide is the review baseline, not repository code: implementers are forbidden
+# to touch it, and its python snippets are not ruff-formatted.  Exclude it from the
+# format check only; lint on it already passes.
+exclude = ["docs/qgis_3.44_plugin_develop_guide.md"]

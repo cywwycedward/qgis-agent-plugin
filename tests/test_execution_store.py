@@ -1,16 +1,23 @@
-"""The record store: snapshots, the PRD 8.2 state machine, and retention (AT-24)."""
+"""记录存储：每次读都给出独立快照、迁移只走一个状态机、终结记录会过期。
+
+Every read hands back an independent snapshot, transitions follow one state machine, and
+finished records expire on their own TTL.
+"""
 
 from __future__ import annotations
 
 import re
 
-import pytest
-from pydantic import ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import ExecutionStrategy
-from qgis_agent_plugin.core.execution_store import TERMINAL_STATUSES, ExecutionStore
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import ExecutionStrategy  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.execution_store import (  # pyright: ignore[reportMissingImports]
+    TERMINAL_STATUSES,
+    ExecutionStore,
+)
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     EXECUTION_NOT_FOUND,
     INTERNAL_ERROR,
     ErrorDetail,
@@ -31,7 +38,9 @@ SUCCEEDED = ExecutionStatus.SUCCEEDED
 FAILED = ExecutionStatus.FAILED
 CANCELLED = ExecutionStatus.CANCELLED
 
-# PRD 8.2, read as a list of edges.
+# 状态机按边列举：每对 (起始, 目标) 是一条允许的迁移
+# the state machine written as a list of edges: each (start, target) pair is one allowed
+# transition
 LEGAL = [
     (QUEUED, RUNNING),
     (QUEUED, PREPARING),
@@ -80,7 +89,10 @@ ILLEGAL = [
 
 
 class Clock:
-    """A monotonic clock the test moves by hand, so the TTL is measurable."""
+    """手工推进的单调时钟，这样 TTL 才可度量。
+
+    A monotonic clock the test moves by hand, so the TTL can be measured.
+    """
 
     def __init__(self) -> None:
         self.now = 0.0
@@ -120,7 +132,10 @@ def succeeded(execution_id: str) -> ExecutionRecord:
 
 
 def move(store: ExecutionStore, execution_id: str, status: ExecutionStatus) -> ExecutionRecord:
-    """Transition with whatever fields the target status requires."""
+    """按目标状态补齐它必需的字段后再迁移。
+
+    Transition with whatever fields the target status requires.
+    """
 
     if status is SUCCEEDED:
         return store.transition(execution_id, status, result={"value": "ok"}, progress=100)
@@ -157,7 +172,7 @@ def test_an_unknown_id_is_not_found() -> None:
 
 
 @pytest.mark.parametrize(("start", "target"), LEGAL)
-def test_every_transition_the_prd_lists_is_accepted(
+def test_every_declared_transition_is_accepted(
     start: ExecutionStatus, target: ExecutionStatus
 ) -> None:
     store = ExecutionStore(Settings())
@@ -166,7 +181,7 @@ def test_every_transition_the_prd_lists_is_accepted(
 
 
 @pytest.mark.parametrize(("start", "target"), ILLEGAL)
-def test_a_transition_the_prd_does_not_list_is_a_defect(
+def test_an_undeclared_transition_is_a_defect(
     start: ExecutionStatus, target: ExecutionStatus
 ) -> None:
     store = ExecutionStore(Settings())
@@ -272,7 +287,9 @@ def test_reading_a_finished_record_past_its_ttl_is_not_found() -> None:
     store = ExecutionStore(Settings(terminal_ttl_seconds=1800), clock=clock)
     store.create(succeeded("old"))
 
-    # Only the clock moves, and get is the first read: no earlier call may expire it.
+    # 只有时钟在走，``get`` 是第一次读取，所以没有更早的调用能把它清掉
+    # only the clock moves, and ``get`` is the first read, so no earlier call may have expired
+    # it
     clock.advance(1800)
     with pytest.raises(FrameworkError) as caught:
         store.get("old")
@@ -298,7 +315,7 @@ def test_the_finish_log_carries_the_duration_and_the_error_code(
     with caplog.at_level("INFO"):
         store.create(make_record(RUNNING))
         move(store, "x", FAILED)
-    # Both the birth and the transition are recorded (PRD 11.3).
+    # 创建与迁移都留痕 / both the birth and the transition are recorded
     assert "execution x test.echo main_thread RUNNING" in caplog.text
     assert re.search(r"-> FAILED \(\d+\.\d{3}s, INTERNAL_ERROR\)", caplog.text)
 

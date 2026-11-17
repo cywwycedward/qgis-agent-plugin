@@ -72,16 +72,17 @@ record.model_dump_json(indent=2)
     "file_path": null,
     "crs_authid": "",
     "is_dirty": false,
-    "layer_count": 0,
-    "project_epoch": 0
+    "layer_count": 1,
+    "title": ""
   },
   "error": null
 }
 ```
 
-`crs_authid` 是工程自己的 CRS，空工程可能是 `""`；`project_epoch` 是插件本地的代数，不是
-QGIS 的工程版本号。**控制面通过之后**，`run_sync` 返回终态（`SUCCEEDED` 或 `FAILED`）；控制面失败
-（未知 Operation、非主线程、引擎已关闭、对后台 Operation 调用）直接抛 `FrameworkError`，不建记录。
+`crs_authid` 是工程自己的 CRS，空工程可能是 `""`；记录里的 `project_epoch` 是插件本地的代数，
+不是 QGIS 的工程版本号，`get_info` 的结果里没有它。**控制面通过之后**，`run_sync` 返回终态
+（`SUCCEEDED` 或 `FAILED`）；控制面失败（未知 Operation、非主线程、引擎已关闭、对后台 Operation
+调用）直接抛 `FrameworkError`，不建记录。
 
 ## 3. 参数写错的样子
 
@@ -130,8 +131,10 @@ layer.get_info     -> {"layer_id": "Cities_5945552f_...", ..., "provider": "ogr"
                        "visible": true, "effective_visible": true}
 ```
 
-`provider` 由 `kind` 决定（vector→`ogr`，raster→`gdal`），调用方不能指定。图层的 `layer_id`
-由 QGIS 生成，带随机后缀，所以上面只保证前缀一致。
+`provider` 由 `kind` 决定（vector→`ogr`，raster→`gdal`），调用方不能指定。源里有好几个子图层
+（多表 GeoPackage、多变量 NetCDF）时必须用 `sub_layer` 点名一个；清单里只有一条时用它自己的 URI。
+`layer.list` 的顺序是图例从上到下，工程里有而树里没有的图层接在后面。图层的 `layer_id` 由 QGIS
+生成，带随机后缀，所以上面只保证前缀一致。
 
 ## 5. 可见性
 
@@ -144,13 +147,16 @@ engine.run_sync("layer.set_visibility", {"layer_id": layer_id, "visible": True})
 已实测（headless）：
 
 ```text
-{"visible": true,  "effective_visible": true,  "changed": false}   # 已经是 true：没动
-{"visible": false, "effective_visible": false, "changed": true }   # 隐藏
-{"visible": true,  "effective_visible": true,  "changed": true }   # 再显示
+{"visible": true,  "effective_visible": true }   # 已经是 true：没动，也没置脏
+{"visible": false, "effective_visible": false}   # 隐藏，工程变脏
+{"visible": true,  "effective_visible": true }   # 再显示，工程变脏
 ```
 
-`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性；父组被隐藏时
-会出现 `visible=true, effective_visible=false`（单测覆盖，本文件未实测该组合）。
+`visible` 是节点自己的勾选状态，`effective_visible` 是连父级组一起算的实际可见性。打勾还会把祖先
+分组一起勾上（图例的勾选框就是这么做的：对一个叶子节点打勾会连父组一起勾，否则勾了也看不见），
+所以 `set_visibility(true)` 之后两者都是 `true`；取消只写这一个节点，父组保持原样。真正的写入会
+把工程置脏（图例的勾选就是这么做的），同值重写不会。属性表这类非空间图层在图例里没有勾选框，
+它的 `visible` 是 `null`，`set_visibility` 报 `INVALID_LAYER`。
 
 ## 6. 后台求和（唯一的 background Operation）
 
@@ -166,9 +172,15 @@ engine.get(submitted.execution_id).status  # 下一轮事件循环后
 submit -> QUEUED
 observed statuses (polling): QUEUED -> SCHEDULED -> SUCCEEDED    # RUNNING 落在两次采样之间
 result: {"layer_id": "Cities_...", "field_name": "pop", "count": 3,
-         "skipped_null": 1, "total": 225.0, "snapshot_project_epoch": 0}
+         "skipped_null": 1, "total": 225.0, "selected_only": false,
+         "snapshot_project_epoch": 0}
 progress: 100.0
 ```
+
+选择集只在 `selected_only=true` 时用：那是 Processing 面板上要用户勾的开关，默认不勾，有选择集
+而没勾时算法照样算整层。结果里的 `selected_only` 如实回报这次用了哪一种。实测（选中 2 个城市、
+`pop > 50`）：`selected_only=true` → `count=2`、`total=160.0`；不传这个开关的同一调用是整层
+`count=3`、`total=200.0`。
 
 几条实测到的事实：
 
@@ -185,8 +197,8 @@ progress: 100.0
   丢掉，记录就是 `PREPARING 0 → SCHEDULED 0 → RUNNING 0 → FINALIZING 0 → SUCCEEDED 100`（实测）：
   这里的 `RUNNING` 来自完成路径补写，不是进度报告。
 - 9000 要素的同一调用：`count=9000`、`total=40495500.0`。
-- 超过 `max_snapshot_features`（默认 10000）：10001 个要素 → `FAILED`
-  `SNAPSHOT_LIMIT_EXCEEDED`，不做静默截断。
+- 要素数没有上限（Processing 的算法也不设）：拷列成本实测 10 万要素 0.11 s / 800 KB、
+  100 万要素 3.14 s / 8 MB。
 - 在 Console 里不要忙等：打完下一行代码就是一次事件循环，`get` 即可；等任务真正跑完再 `get`
   才会看到终态。
 
@@ -223,7 +235,7 @@ engine.get(running_id).status  # 等任务自己报告，才变 'CANCELLED'
 
 **未实测（本文件）**：正在 `RUNNING` 的 `QgsTask` 的 `CANCEL_REQUESTED -> CANCELLED` 这一段。
 4 要素/9000 要素的求和在毫秒级结束，构造不出稳定的取消窗口；这条路径由 `tests/test_qgs_task.py` 的
-单测覆盖。语义见 `docs/ERRORS.md` §4。
+单测覆盖。六格取消矩阵见 `docs/agents/DEVELOP.md` §6.8。
 
 `cancel` 对主线程正在执行的调用、以及 `FINALIZING` 的记录，返回 `accepted=false`
 与 `reason="NOT_INTERRUPTIBLE"` / `"FINALIZING"`。
@@ -233,65 +245,131 @@ engine.get(running_id).status  # 等任务自己报告，才变 'CANCELLED'
 ```python
 engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})
 engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz"})  # 第二次
-engine.run_sync("project.open", {"path": r"C:\temp\projects\missing.qgz", "discard_current": True})
-engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz", "discard_current": True})
+engine.run_sync("project.save", {"path": r"C:\temp\projects\demo.qgz", "overwrite": True})
+engine.run_sync("project.save", {})  # Save：自己的关联文件
+engine.run_sync("project.open", {"path": r"C:\temp\projects\missing.qgz"})
+engine.run_sync("project.open", {"path": r"C:\temp\projects\broken.qgz"})
 engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz"})
 ```
 
-已实测（headless，`allowed_project_roots` 指向 `C:\temp\projects`）：
+已实测（headless 真 QGIS，`demo.qgz` 里一个带要素的 memory 图层）：
 
 ```text
-save #1   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "is_dirty": false}
-save #2   -> FAILED     TARGET_EXISTS | the target file exists; pass overwrite=true to replace it
-open 缺失 -> FAILED     PATH_NOT_ALLOWED | path is not an allowed local file
-open 损坏 -> FAILED     PROJECT_OPEN_FAILED | the project file could not be read; the current project may have changed
-open 不 discard -> FAILED  PROJECT_REPLACE_REQUIRED | ... pass discard_current=true to replace it
+save #1      -> SUCCEEDED  {"file_path": "...\\demo.qgz"}
+save #2      -> FAILED     TARGET_EXISTS | the target file exists; pass overwrite=true to replace it
+save #3      -> SUCCEEDED  {"file_path": "...\\demo.qgz"}          # overwrite=true
+save assoc   -> SUCCEEDED  {"file_path": "...\\demo.qgz"}          # 不给 path
+create       -> SUCCEEDED  {"crs_authid": "", "layer_count": 0}
+open 缺失    -> FAILED     PROJECT_OPEN_FAILED | Unable to unzip file '.../missing.qgz'
+               之后工程里 0 个图层
+open 损坏    -> FAILED     PROJECT_OPEN_FAILED | Unable to unzip file '.../broken.qgz'
+open demo    -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
+                           "invalid_layer_count": 0}
+open 已脏    -> FAILED     PROJECT_REPLACE_REQUIRED | the current project holds unsaved changes;
+                           pass discard_current=true to replace it
+open + discard -> SUCCEEDED {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
+                             "invalid_layer_count": 0}
+get_info     -> SUCCEEDED  {"file_path": ".../demo.qgz", "crs_authid": "", "is_dirty": false,
+                            "layer_count": 1, "title": ""}
 ```
 
-“缺失文件”归 `PATH_NOT_ALLOWED` 而不是 `PROJECT_OPEN_FAILED`：路径策略在读之前就要求文件存在。
-`PROJECT_OPEN_FAILED` 的 `message` 明说当前工程可能已经改变——不承诺回滚。
+三个判据：
+
+- **覆盖**只由 Save As 问：给了 `path` 且目标已存在才要 `overwrite=true`（覆盖确认本来由保存对话框
+  问）。不给 `path` 的 Save 写工程自己的关联文件，不问覆盖（`save assoc` 就是第二次写同一个文件）。
+- **替换**：有没保存下来的东西（带 provider 的非 memory 矢量图层有没提交的编辑、带要素的 memory
+  图层或临时图层、工程 `isDirty()`、栅格波段的属性表脏了）就要 `discard_current=true`。上面 `demo`
+  里那个 memory 图层带要素，所以头几次 open 都被它挡住，`create` 之后才干净；一个有图层但没改过的
+  工程不需要它。另一条拒绝是“有任务还在依赖当前工程的图层”，它**不由 `discard_current` 回答**：
+  消息里列出那些任务，调用方 `cancel` 掉再来。
+- **失败文本是 QGIS 自己那句**：`read()`/`write()` 返回假时消息就是 `QgsProject.error()`，例如
+  `open 缺失` 的 `Unable to unzip file '<path>'`（后缀是 `.qgz` 就按压缩包处理，文件不在也走这条），
+  坏 `.qgs` 则是 `Project file read error in file <path>: …`。`read()` **之前**被拒的两种防死形状
+  （嵌套超过 4096 层、`.qgz` 里的加密成员）没碰当前工程，消息写的是 "it was not opened and the
+  current project was not changed"。读失败之后工程是空的（`addProject` 也是先关掉再读）。
+
+另外四条实测行为：
+
+- **后缀**：保存只收保存对话框能给的那两种名字（`.qgs`/`.qgz`，大小写不敏感），别的后缀在入参
+  就拒（`INVALID_INPUT`）；打开不判后缀，`x.qgs~` 备份与手改名的 `.txt` 工程都打得开（`open` 只把
+  `.qgz` 当压缩包）。
+- **不可写**：关联文件存在但不可写时在写之前就拒，`save read-only -> FAILED PROJECT_SAVE_FAILED |
+  The project file is not writable.`，文件一个字节没变。
+- **坏图层**：数据源不在了的工程照样打开，`invalid_layer_count` 说出那几个
+  （`{"...", "layer_count": 2, "invalid_layer_count": 1}`），工程事后 `is_dirty` 是 `false`：
+  读取期间置脏被挡住。
+- **Save 写视图**：不给 `path` 时把 `iface.mapCanvas()` 的范围与旋转写进工程的默认视图；给了
+  `path`（Save As）不写——这一点没有单独跑成样例（headless 下画布是替身），由单测覆盖。
 
 ```python
-engine.run_sync("project.open", {"path": r"C:\temp\projects\demo.qgz", "discard_current": True})
-engine.run_sync("project.create", {"crs_authid": "epsg:3857", "discard_current": True})
+engine.run_sync("project.create", {})  # 与 QGIS 的 New Project 一样：CRS 来自设置与默认模板
+engine.run_sync("project.get_info", {})
 ```
 
-已实测（headless 真 QGIS；`project.create` 是“已实测（GUI 未跑）”：headless 里没有 `iface.newProject()`，
-用等价替身“`QgsProject.instance().clear()` + 返回 `True`”；`project.open` 不经过 `iface`）。
-`demo.qgz` 里是一个图层，数据源在 `C:\temp\data`：
+已实测（headless；`iface.newProject(promptToSaveFlag=False)` 用等价替身“`QgsProject.instance().clear()`
++ 返回 `True`”，所以那份样例里 CRS 是空的）：
 
 ```text
-两键都配（allowed_project_roots=C:\temp\projects，allowed_data_roots=C:\temp\data）
-open demo.qgz   -> SUCCEEDED  {"file_path": "...\\demo.qgz", "crs_authid": "", "layer_count": 1,
-                               "invalid_layer_count": 0}   ；lifecycle epoch 0 -> 1，记录 epoch 仍是 0
-
-只配 allowed_project_roots，allowed_data_roots 留空
-open demo.qgz   -> FAILED     PATH_NOT_ALLOWED | 1 layer data source(s) are outside
-                               allowed_data_roots; they were removed and the project was replaced
-                  之后：fileName() 已是 ...\demo.qgz，mapLayers() 为空，isDirty() = false
-
-create          -> SUCCEEDED  {"crs_authid": "EPSG:3857", "file_path": null, "layer_count": 0}
-                               ；lifecycle epoch 1 -> 2，记录 epoch 仍是 1
-create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dirty": true,
-                        "layer_count": 0, "project_epoch": 2}
+create   -> SUCCEEDED  {"crs_authid": "", "layer_count": 0}
+get_info -> SUCCEEDED  {"file_path": null, "crs_authid": "", "is_dirty": false, "layer_count": 0,
+                        "title": ""}
 ```
-
-第二段是旧版文档没写的那一半：`project.open` 要两个键（工程文件用 `allowed_project_roots`，
-工程里每一层的数据源用 `allowed_data_roots`），而且这一步失败**不回滚**——工程文件已经
-`read()` 进去了，只留下“去掉越界层之后的剩货”，`message` 也这么写。
 
 三条要注意的事：
 
 - 替换工程会让 `project_epoch` 加 1（旧代数的排队调用因此 `CANCELLED`），但**记录里保存的是接受调用
-  时的那一代**，所以刚打开完的记录写着 `project_epoch: 0`，下一次调用才是 `1`、`2`。
-- `crs_authid` 为 `""` 不是错误：`QgsProject` 没有设 CRS 时就是这个值；`layer_count` 是打开的工程
-  里实际注册的图层数。
-- `create` 之后 `is_dirty` 是 `true`：新建工程设了 CRS 就会变脏，不代表没建成功。
+  时的那一代**。上面那份样例脚本没有接 `aboutToBeCleared`，所以 `project_epoch` 一直是 0；插件装配
+  好之后每换一次工程才加 1。
+- `crs_authid` 为 `""` 不是错误：`QgsProject` 没有 CRS 时就是这个值。替身没有 QGIS 的设置，真 GUI
+  里新工程的 CRS 是 `projections/defaultProjectCrs`（默认 `EPSG:4326`）或默认模板里的那个。
+- `create` 之后 `is_dirty` 是 `false`：换工程时置脏被挡住，`fileNew` 最后一步也是 `setDirty(false)`。
 
-四个失败路径照旧有效（`open` 缺失文件归 `PATH_NOT_ALLOWED`、损坏文件 `PROJECT_OPEN_FAILED`、
-不传 `discard_current` 是 `PROJECT_REPLACE_REQUIRED`，`create` 的无效 CRS 是 `INVALID_CRS`）。
+两处与 GUI 的偏差，调用方要自己知道：
 
-## 9. 常见错误速览
+- `QgisApp::fileSave` 还查“磁盘上的文件在这次加载/上次保存之后被外部改过吗”，这里不查：那个时间戳
+  是 QGIS Desktop 窗口自己记的，`QgsProject` 里没有对应值。
+- 两个“问不问”的设置（`qgis/askToSaveProjectChanges`、`qgis/askToSaveMemoryLayers`）不读：问句在这里
+  就是 `discard_current`。
+
+工程点名的数据源不由插件审：在任何目录、不存在、甚至写成远程，工程照样打开，加载不出来的层
+只让 `invalid_layer_count` 变大。`read()` 之前只剩两条防死检查（嵌套超过 4096 层、`.qgz` 里有加密
+成员），见 `docs/agents/DEVELOP.md` §7.2。
+
+## 9. 样式与渲染器
+
+分类、QML 与渲染器都是同一门课：读到的就是 QGIS 自己写出来的那一份，写回去的是同一个字符串。
+
+```python
+engine.run_sync("layer.list_style_categories", {"layer_id": layer_id}).result
+engine.run_sync("layer.get_qml", {"layer_id": layer_id, "categories": ["Symbology"]}).result
+read = engine.run_sync("layer.get_renderer", {"layer_id": layer_id}).result
+engine.run_sync(
+    "layer.set_renderer",
+    {"layer_id": layer_id, "renderer": read["renderer_xml"]},
+).result
+```
+
+已实测（headless，1 个点图层与 1 个三波段栅格）：
+
+```text
+layer.list_style_categories -> ["LayerConfiguration", "Symbology", "Symbology3D", "Labeling",
+                                ... 18 个，栅格是 9 个（没有 Labeling）]
+layer.get_qml(Symbology)    -> <!DOCTYPE qgis ...> 开头的一段 XML，根元素 styleCategories="Symbology"
+layer.get_renderer (矢量)   -> {"renderer_type": "singleSymbol", "renderer_xml": 2685 字节}
+layer.get_renderer (栅格)   -> {"renderer_type": "multibandcolor", "renderer_xml": 898 字节}
+layer.set_renderer(把上面那份喂回去) -> {"renderer_type": "singleSymbol"} / {"renderer_type": "multibandcolor"}
+```
+
+`renderer_xml` 是那个渲染器自己的文档：矢量是 `renderer-v2` 元素，栅格是 `rasterrenderer` 元素；
+把它喂回 `layer.set_renderer` 就是同一个渲染器。能装什么由 QGIS 的注册表按图层类型给的清单决定，
+这里不维护另一张表：`heatmapRenderer` 只在列它的图层类型上装得上，**清单之外的类型一律拒**。两个
+理由不一样：栅格那边实测有类型会被 QGIS 默不作声地保留（普通栅格上的 `singlebandcolordata`，
+报告成功就成了谎报）；矢量那边是下拉框已经按几何筛过，GUI 根本表达不出那个组合。
+
+分类是一个位标记，重复的名字就是一个位，不拒；默认不点名就是全部位，空列表是一个都不导出。
+`layer.get_qml` 不写文件，返回的就是字符串。
+
+## 10. 常见错误速览
 
 已实测（headless），一条一行：
 
@@ -300,26 +378,42 @@ create 之后 get_info -> {"file_path": null, "crs_authid": "EPSG:3857", "is_dir
 | `run_sync("no.such", {})` | 抛 `FrameworkError: OPERATION_NOT_FOUND` |
 | `get("no-such-id")` | 抛 `FrameworkError: EXECUTION_NOT_FOUND` |
 | 在工作线程里 `engine.run_sync(...)` / `engine.get(...)` | 抛 `FrameworkError: WRONG_THREAD` |
-| `layer.add` 传 `add_to_legend="true"` | `FAILED` `INVALID_INPUT` at `add_to_legend` |
-| `layer.add` 的路径不在 `allowed_data_roots` 内 | `FAILED` `PATH_NOT_ALLOWED` |
 | `layer.add` 指向一个不是数据的文件 | `FAILED` `INVALID_LAYER` |
-| `layer.add(kind="raster", sub_layer="x", ...)` | `FAILED` `INVALID_INPUT` at `<root>` |
+| `layer.add` 的 `sub_layer` 不在 provider 的清单里（矢量或栅格） | `FAILED` `INVALID_LAYER` |
+| `layer.add` 一个多表 GeoPackage 而没点名 `sub_layer` | `FAILED` `INVALID_LAYER`，消息里列出可选的名字 |
+| `layer.add` 一个不像栅格的文件（`kind="raster"`） | `FAILED` `INVALID_LAYER`，消息是 `"<path> is not a supported raster data source"` |
 | `layer.get_info` 传不存在的 ID | `FAILED` `LAYER_NOT_FOUND` |
-| `layer.set_visibility` 对一个 `add_to_legend=false` 的图层 | `FAILED` `LAYER_NOT_IN_TREE` |
+| `layer.set_visibility` 对一个不在图层树里的图层（加载来的工程可以这样） | `FAILED` `LAYER_NOT_IN_TREE` |
+| `layer.set_visibility` 对一张属性表 | `FAILED` `INVALID_LAYER`（图例里没有勾选框） |
 | `layer.sum_numeric_field` 对文本字段 | `FAILED` `INVALID_FIELD_TYPE` |
+| `layer.set_renderer` 的文档不是合法 XML | `FAILED` `INVALID_INPUT`，消息是解析器那句带行列号的话 |
+| `layer.set_renderer` 的文档里类型不在这门图层的候选清单里 | `FAILED` `INVALID_INPUT`，旧渲染器不动 |
 | `project.save` 不给路径且工程无关联文件 | `FAILED` `PROJECT_PATH_REQUIRED` |
-| `project.create` 传 `crs_authid="NOT:A_CRS"` | `FAILED` `INVALID_CRS`（当前工程未被替换） |
-| `project.create` 在有内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
+| `project.create` / `project.open` 在有未保存内容的工程上不传 `discard_current` | `FAILED` `PROJECT_REPLACE_REQUIRED` |
+| `project.create` / `project.open` 在有任务依赖当前工程图层的时候 | `FAILED` `PROJECT_REPLACE_REQUIRED`，消息是 QGIS 那句 `Active Tasks` 告警加任务描述 |
+| `project.save` 给了 `path` 且文件已存在、不传 `overwrite` | `FAILED` `TARGET_EXISTS`；不给 `path` 写关联文件不问覆盖 |
+| `project.save` 的关联文件被改成只读 | `FAILED` `PROJECT_SAVE_FAILED`，消息 `The project file is not writable.` |
 | 连发 34 个 `submit("project.get_info", {})`（不推事件循环） | 前 32 个 `QUEUED`，第 33、34 个 `FAILED` `TOO_MANY_EXECUTIONS` |
-| 全新安装（允许目录为空）调 `layer.add` / `project.save` | `FAILED` `PATH_NOT_ALLOWED` |
+| `layer.add` / `project.save` 传相对路径 | `FAILED` `PATH_NOT_ALLOWED`（绝对路径不再被任何白名单拒） |
 
-## 10. 未实测清单
+## 11. 未实测清单
 
 | 样例 | 为什么没跑 |
 | --- | --- |
 | `iface.agent_engine` / `iface.agent_registry` 本身 | 需要 QGIS Desktop 的 `iface`；headless 里用同一套类手工装配，`initGui` 的发布逻辑由单测覆盖 |
-| `project.create` 的 `iface.newProject(promptToSaveFlag=False)` 这一步 | 只有 GUI 里有它；headless 里用等价替身（`QgsProject.instance().clear()` + 返回 `True`），其余逻辑已实测 |
+| `project.create` 的 `iface.newProject(promptToSaveFlag=False)` 这一步 | 只有 GUI 里有它；headless 里用等价替身（`QgsProject.instance().clear()` + 返回 `True`），所以那份样例里新工程的 CRS 是空的 |
+| `project.save` 把画布视图写进工程那一步 | headless 没有画布，用固定矩形的替身；真实范围与旋转只有 GUI 里有 |
+| “磁盘上的文件被外部改过”那条判断 | 按设计不做（那个时间戳是 GUI 窗口自己记的），所以没有样例 |
 | 运行中后台任务的 `CANCEL_REQUESTED -> CANCELLED` | 现有后台 Operation 太快，构造不出稳定窗口 |
 | 父级组隐藏时的 `visible=true / effective_visible=false` | 需要 GUI 图层树里的组；单测覆盖，Console 未跑 |
 | 多个后台任务排队（`max_active_background=2` 的 FIFO） | 探针里三次 9000 要素求和都在三轮事件循环内跑完，看不到第三个停在 `QUEUED`；单测覆盖该路径 |
-| 配置键写入（`QgsSettings().setValue(...)`） | 会改用户 `QGIS3.ini`，只验证了读：默认空根、缺失键返回 `None`、越界拒绝 |
+| 配置键写入（`QgsSettings().setValue(...)`） | 会改用户 `QGIS3.ini`，只验证了读：缺失键返回 `None`、小于 1 的计数被拒 |
+
+## 12. `processing.run_algorithm` 的参数实例
+
+运行参数在 [processing-run-algorithm-examples.json](processing-run-algorithm-examples.json)：正常跑通、参数被拒、
+CRS 不一致与取消这几类各有几条，每条带着实测的状态与错误码。`<LAYER_ID>` 之类是占位符，`placeholders`
+一栏说明怎么取；`runner.python_console` 是那段可直接粘进 Console 的壳。
+
+这些参数表不是新写的样例：它们是验收跑的 P04–P20 用过的原样，`measured` 里记着那次跑的汇总。
+

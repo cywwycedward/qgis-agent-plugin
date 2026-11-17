@@ -1,10 +1,15 @@
-"""The QgsTask adapter's bookkeeping, against fakes that keep the same moving parts.
+"""QgsTask 适配器的账目，跑在与真实类有同样活动部件的伪造对象上。
 
-No QGIS and no Qt here: the task manager is a dict plus a signal, the task is a
-plain object, and the event queue is a list the test drains.  What is checked is
-the accounting the real classes force on the adapter -- the two-slot gate, the
-task id the store never keeps, the 100 ms progress window, and a refusal that has
-to end the call instead of leaving it queued (PRD 8.4, 8.5).
+这里没有 QGIS 也没有 Qt：任务管理器是一个字典加一个信号，任务是一个普通对象，事件队列
+是一个由测试抽干的列表。要查的是真实类逼出来的那几本账：两个名额的闸门、存储里从不留下
+的任务 id、100 ms 的进度窗口，以及那个必须让调用当场结束而不是一直排队的拒绝。
+
+The QgsTask adapter's bookkeeping, against fakes that keep the same moving parts. No QGIS
+and no Qt here: the task manager is a dict plus a signal, the task is a plain object, and
+the event queue is a list the test drains. What is checked is the accounting the real
+classes force on the adapter: the two-slot gate, the task id the store never keeps, the
+100 ms progress window, and a refusal that has to end the call instead of leaving it
+queued.
 """
 
 from __future__ import annotations
@@ -49,11 +54,14 @@ SUCCEEDED = ExecutionStatus.SUCCEEDED
 FAILED = ExecutionStatus.FAILED
 CANCELLED = ExecutionStatus.CANCELLED
 
-# --- the fakes ---------------------------------------------------------------
+# --- 伪造对象 / the fakes ------------------------------------------------------
 
 
 class FakeSignal:
-    """A Qt signal reduced to what the adapter uses: connect a slot, emit on it."""
+    """Qt 信号缩到适配器用到的那两步：接一个槽、往它发一次。
+
+    A Qt signal reduced to what the adapter uses: connect a slot, emit on it.
+    """
 
     def __init__(self) -> None:
         self.slots: list[Callable[..., None]] = []
@@ -67,7 +75,10 @@ class FakeSignal:
 
 
 class FakeTaskManager:
-    """``addTask``, ``task(id)`` and ``progressChanged``; nothing else is used."""
+    """``addTask``、``task(id)`` 和 ``progressChanged``，其余不用。
+
+    ``addTask``, ``task(id)`` and ``progressChanged``; nothing else is used.
+    """
 
     def __init__(self) -> None:
         self.progressChanged = FakeSignal()
@@ -87,7 +98,10 @@ class FakeTaskManager:
         return self.tasks.get(task_id)
 
     def report(self, task: FakeTask, progress: float) -> None:
-        """What QGIS does for ``setProgress``: relay it as (task id, progress)."""
+        """QGIS 对 ``setProgress`` 做的事：把它转成（任务 id, 进度）。
+
+        What QGIS does for ``setProgress``: relay it as (task id, progress).
+        """
 
         for task_id, known in self.tasks.items():
             if known is task:
@@ -96,7 +110,10 @@ class FakeTaskManager:
 
 
 class FakeTask:
-    """A ``QgsTask`` stand-in: the same callbacks, no threads and no C++."""
+    """``QgsTask`` 的替身：一样的那几个回调，没线程也没 C++。
+
+    A ``QgsTask`` stand-in: the same callbacks, no threads and no C++.
+    """
 
     def __init__(
         self,
@@ -117,7 +134,7 @@ class FakeTask:
         self.dependent_layers: list[Any] = []
         self.runs = 0
 
-    # what the adapter uses
+    # 适配器会用到的 / what the adapter uses
     def cancel(self) -> None:
         self.cancelled = True
 
@@ -134,7 +151,7 @@ class FakeTask:
     def setDependentLayers(self, layers: list[Any]) -> None:  # noqa: N802 - the QGIS name
         self.dependent_layers = list(layers)
 
-    # what QGIS would drive
+    # QGIS 会驱动的那几个 / what QGIS would drive
     def run(self) -> bool:
         self.runs += 1
         return self.run_object.run(_TaskControl(self))
@@ -155,7 +172,10 @@ class FakeClock:
 
 
 class Queue:
-    """The Qt event queue, stood in for by a list the test drains."""
+    """Qt 的事件队列，用一个由测试抽干的列表顶替。
+
+    The Qt event queue, stood in for by a list the test drains.
+    """
 
     def __init__(self) -> None:
         self.callbacks: list[Callable[[], None]] = []
@@ -168,7 +188,7 @@ class Queue:
             self.callbacks.pop(0)()
 
 
-# --- operations used by these tests ------------------------------------------
+# --- 这些用例用到的操作 / operations used by these tests -------------------------
 
 
 class AmountParams(Params):
@@ -183,7 +203,10 @@ class Counting(
     BaseQuery[AmountParams, DoneResult],
     BackgroundOperationMixin[AmountParams, DoneResult, int, int],
 ):
-    """A worker that reports progress in ``steps`` slices and returns the sum."""
+    """把进度分成 ``steps`` 片报出、并返回总和的工人。
+
+    A worker that reports progress in ``steps`` slices and returns the sum.
+    """
 
     name = "test.counting"
     description = "count to the amount it was given"
@@ -221,7 +244,10 @@ class ExplodingPrepare(Counting):
 
 
 class BadDependency(Counting):
-    """An operation whose layer dependency cannot be resolved."""
+    """图层依赖解析不了的那种操作。
+
+    An operation whose layer dependency cannot be resolved.
+    """
 
     name = "test.bad_dependency"
     description = "fail while the task's dependencies are being resolved"
@@ -231,7 +257,10 @@ class BadDependency(Counting):
 
 
 class Layered(Counting):
-    """Declares a layer dependency, the way ``layer.sum_numeric_field`` does."""
+    """声明一个图层依赖，跟 ``layer.sum_numeric_field`` 一样。
+
+    Declares a layer dependency, the way ``layer.sum_numeric_field`` does.
+    """
 
     name = "test.layered"
     description = "an operation whose worker depends on one layer"
@@ -249,7 +278,10 @@ class FakeProject:
 
 
 class Harness:
-    """An engine wired to the real adapter, with fakes behind both Qt seams."""
+    """引擎接在真适配器上，两个 Qt 接缝后面都是伪造对象。
+
+    An engine wired to the real adapter, with fakes behind both Qt seams.
+    """
 
     def __init__(self, *operations: BaseOperation, settings: Settings | None = None) -> None:
         self.registry = OperationRegistry()
@@ -295,10 +327,14 @@ class Harness:
         return record
 
     def run(self, task: FakeTask) -> None:
-        """Run one worker and deliver its completion, like QGIS would.
+        """跑一个工人并交付它的完成，就像 QGIS 会做的那样。
 
-        The completion only posts the drain, so the queue is turned afterwards --
-        exactly as the QGIS event loop would do on its next turn.
+        完成只把「抽队列」这件事投出去，所以队列要在之后才转，正如 QGIS 的事件循环会在它的
+        下一回合做。
+
+        Run one worker and deliver its completion, like QGIS would. The completion only
+        posts the drain, so the queue is turned afterwards, exactly as the QGIS event loop
+        would do on its next turn.
         """
 
         task.finished(task.run())
@@ -321,7 +357,7 @@ def counting() -> Iterator[Counting]:
     operation.fail = False
 
 
-# --- the worker half ---------------------------------------------------------
+# --- 工人这一半 / the worker half ---------------------------------------------
 
 
 def test_a_worker_exception_is_kept_and_never_reaches_the_task(
@@ -340,7 +376,8 @@ def test_a_worker_exception_is_kept_and_never_reaches_the_task(
     with caplog.at_level("ERROR"):
         succeeded = run.run(_TaskControl(Task()))
 
-    # AT-07: the exception is a diagnostic, not a crash in the C++ task framework.
+    # 异常只是一条诊断，不能变成 C++ 任务框架里的崩溃
+    # the exception is a diagnostic, not a crash in the C++ task framework
     assert succeeded is False
     assert isinstance(run.error, RuntimeError)
     assert "execute_worker raised" in caplog.text
@@ -363,11 +400,12 @@ def test_progress_is_clamped_to_the_range_the_protocol_grants() -> None:
     control.set_progress(150)
     control.set_progress(37.5)
 
-    # PRD 6.2: out-of-range values are the adapter's to clamp, not the worker's.
+    # 越界值由适配器夹，不是工人的事
+    # out-of-range values are the adapter's to clamp, not the worker's
     assert task.values == [0.0, 100.0, 37.5]
 
 
-# --- submission --------------------------------------------------------------
+# --- 提交 / submission --------------------------------------------------------
 
 
 def test_a_task_the_manager_refuses_ends_the_call_as_task_submission_failed(
@@ -384,7 +422,7 @@ def test_a_task_the_manager_refuses_ends_the_call_as_task_submission_failed(
     assert settled.error is not None
     assert settled.error.code == TASK_SUBMISSION_FAILED
     assert settled.result is None
-    # AT-14: no dangling execution, and nothing was left owning a task.
+    # 不留悬空的执行，也没人还占着任务 / no dangling execution, and nothing left owning a task
     assert harness.runner._active == {}
     assert counting.seen == ["prepare"]
 
@@ -408,8 +446,9 @@ def test_prepare_runs_on_the_main_thread_before_anything_is_submitted(
     harness = Harness(counting)
     submitted = harness.submit(counting.name, {"amount": 7})
 
-    # PRD 6.5: the snapshot is not built inside ``submit``; one event-loop turn later
-    # the call is PREPARING/SCHEDULED with the worker not yet started.
+    # 快照不在 ``submit`` 里建，一回合后才是 SCHEDULED，此时工人还没起
+    # the snapshot is not built inside ``submit``: one event-loop turn later the call is
+    # SCHEDULED, with the worker not yet started
     assert submitted.status is QUEUED
     assert counting.seen == ["prepare"]
     assert harness.record(submitted).status is SCHEDULED
@@ -425,7 +464,8 @@ def test_the_task_is_a_dependent_of_the_layer_the_operation_names(
 
     harness.submit(operation.name, {"amount": 2})
 
-    # PRD 8.4: QGIS cancels a task whose dependent layer goes away (AT-12).
+    # 适配器把操作点名的图层挂成依赖，QGIS 才能在它消失时取消
+    # the adapter makes the named layer a dependency, which is what lets QGIS cancel
     assert harness.tasks[0].dependent_layers == [harness.project.layers["layer-2"]]
 
 
@@ -437,7 +477,7 @@ def test_an_operation_without_dependencies_declares_none(counting: Counting) -> 
     assert harness.tasks[0].dependent_layers == []
 
 
-# --- the two-slot gate -------------------------------------------------------
+# --- 两个名额的闸门 / the two-slot gate -----------------------------------------
 
 
 def test_a_third_background_call_waits_in_queued_until_a_slot_frees(
@@ -448,7 +488,7 @@ def test_a_third_background_call_waits_in_queued_until_a_slot_frees(
     second = harness.submit(counting.name, {"amount": 2})
     third = harness.submit(counting.name, {"amount": 3})
 
-    # PRD 8.5 / AT-08C: two active, the third stays QUEUED.
+    # 两个在跑，第三个留在 QUEUED / two are active and the third stays QUEUED
     assert harness.record(first).status is SCHEDULED
     assert harness.record(second).status is SCHEDULED
     assert harness.record(third).status is QUEUED
@@ -457,7 +497,7 @@ def test_a_third_background_call_waits_in_queued_until_a_slot_frees(
 
     harness.run(harness.tasks[0])
 
-    # A free slot starts the waiting call in submission order.
+    # 空出的名额按提交顺序启动在等的调用 / a free slot starts the waiting call in submission order
     assert harness.record(third).status is SCHEDULED
     assert counting.seen.count("prepare") == 3
     assert len(harness.tasks) == 3
@@ -470,16 +510,18 @@ def test_a_freed_slot_is_filled_one_event_loop_turn_later(counting: Counting) ->
     waiting = harness.submit(counting.name, {"amount": 3})
     task = harness.tasks[0]
 
-    task.finished(task.run())  # the completion alone; the event queue is not turned yet
+    task.finished(task.run())  # 只交完成，事件队列还没转 / the queue is not turned yet
 
-    # A8 #1: a task submitted from inside another task's finished() callback is one
-    # QGIS 3.44.13 sometimes accepts and never runs, so the adapter may not do it.
+    # 在别处 finished() 回调里提交任务，QGIS 3.44.13 有时收下却永不运行，所以适配器不能这样干
+    # a task submitted from inside another task's finished() callback is one QGIS 3.44.13
+    # sometimes accepts and never runs, so the adapter may not do it
     assert harness.record(waiting).status is QUEUED
     assert len(harness.tasks) == 2
 
     harness.queue.tick()
 
-    # The posted drain reads the slot count and the records again, then starts it.
+    # 投出去的抽队列会重读名额数与记录，然后才启动它
+    # the posted drain reads the slot count and the records again, and only then starts it
     assert harness.record(waiting).status is SCHEDULED
     assert len(harness.tasks) == 3
 
@@ -494,7 +536,7 @@ def test_the_waiting_queue_keeps_submission_order(counting: Counting) -> None:
     harness.run(harness.tasks[1])
 
     assert [harness.record(record).status for record in waiting] == [SCHEDULED, SCHEDULED]
-    # The worker was really started for both, in the order they were submitted.
+    # 两个都真的启动了，且按提交顺序 / both workers really started, in submission order
     assert [task.snapshot for task in harness.tasks] == [1, 2, 3, 4]
     assert harness.record(first).status is SUCCEEDED
     assert harness.record(second).status is SUCCEEDED
@@ -512,8 +554,9 @@ def test_a_waiting_call_cancelled_before_its_turn_is_never_started(
 
     harness.run(harness.tasks[0])
 
-    # PRD 8.5: the engine cancelled the record, so the adapter drops it instead of
-    # preparing a snapshot nobody wants.
+    # 引擎已把记录取消，适配器直接丢掉，不再备快照
+    # the engine cancelled the record, so the adapter drops it instead of preparing a snapshot
+    # nobody wants
     assert harness.record(waiting).status is CANCELLED
     assert len(harness.tasks) == 2
 
@@ -528,10 +571,11 @@ def test_cancelling_a_waiting_call_drops_it_from_the_waiting_queue(
 
     harness.engine.cancel(waiting.execution_id)
 
-    # The engine's QUEUED branch told the adapter, and the adapter dropped the entry
-    # instead of keeping it until some task happened to finish.
+    # 引擎的 QUEUED 分支告诉了适配器，于是它当场丢掉了那一项，而不是留到某项任务凑巧结束
+    # the engine's QUEUED branch told the adapter, so it dropped the entry at once, instead of
+    # keeping it until some task happened to finish
     assert list(harness.runner._waiting) == []
-    assert len(harness.runner._active) == 2  # the two running tasks are untouched
+    assert len(harness.runner._active) == 2  # 两个在跑的任务没被动 / the two live tasks are intact
 
 
 def test_repeated_submit_and_cancel_leaves_nothing_waiting(counting: Counting) -> None:
@@ -543,8 +587,9 @@ def test_repeated_submit_and_cancel_leaves_nothing_waiting(counting: Counting) -
         record = harness.submit(counting.name, {"amount": amount})
         assert harness.engine.cancel(record.execution_id).status is CANCELLED
 
-    # The waiting deque may not grow with the number of cancelled calls: it is not
-    # a history, so nothing is left to clean up when a slot finally frees.
+    # 等待队列不能随取消次数增长：它不是历史，名额空出时没有东西要清理
+    # the waiting deque may not grow with the number of cancelled calls: it is not a history, so
+    # nothing is left to clean up when a slot frees
     assert list(harness.runner._waiting) == []
 
 
@@ -556,10 +601,11 @@ def test_a_dependency_that_raises_on_the_drain_path_still_ends_the_call() -> Non
     waiting = harness.submit(BadDependency.name, {"amount": 3})
     assert harness.record(waiting).status is QUEUED
 
-    harness.run(harness.tasks[0])  # a slot frees, so the waiting call is drained
+    harness.run(harness.tasks[0])  # 名额空出，在等的调用被抽起 / a slot frees and it drains
 
-    # PRD 12.3: a task that cannot even be built may not leave its record in
-    # PREPARING, a state nothing would ever settle again.
+    # 连任务都建不出来的调用，其记录不能留在 PREPARING
+    # a task that cannot even be built may not leave its record in PREPARING, a state nothing
+    # would ever settle again
     record = harness.record(waiting)
     assert record.status is FAILED
     assert record.error is not None
@@ -586,11 +632,13 @@ def test_a_drain_that_breaks_settles_that_call_and_starts_the_next(
     store.transition = refusing  # type: ignore[method-assign]
 
     with caplog.at_level("ERROR"):
-        # The posted drain is a Qt slot of its own, so it needs its own guard (A9).
+        # 投出去的抽队列本身是个 Qt 槽，所以它也要自己的守卫
+        # the posted drain is a Qt slot of its own, so it needs its own guard
         harness.run(harness.tasks[0])
 
-    # The popped call may not be left in QUEUED holding a slot nothing would free,
-    # and the break may not stop the drain from starting what is behind it.
+    # 被弹出的调用不能留在 QUEUED 占着没人释放的名额，也不能让这次失败挡住后面的排队者
+    # the popped call may not be left in QUEUED holding a slot nothing would free, and the break
+    # may not stop the drain from starting what is behind it
     settled = harness.record(broken)
     assert settled.status is FAILED
     assert settled.error is not None
@@ -600,11 +648,14 @@ def test_a_drain_that_breaks_settles_that_call_and_starts_the_next(
     assert "could not start it" in caplog.text
 
 
-# --- the progress window -----------------------------------------------------
+# --- 进度窗口 / the progress window ---------------------------------------------
 
 
 def watch_progress(store: ExecutionStore) -> list[float]:
-    """Record every progress the adapter writes, so a dropped or stale one is visible."""
+    """把适配器写过的每个进度都记下来，漏写或过期的就看得见。
+
+    Record every progress the adapter writes, so a dropped or stale one is visible.
+    """
 
     written: list[float] = []
     original = store.transition
@@ -627,7 +678,8 @@ def test_progress_rewrites_the_record_at_most_once_per_interval(
     execution_id = record.execution_id
     writes = watch_progress(harness.engine._store)
 
-    # Four reports inside the same 100 ms window: one write, three kept back.
+    # 同一个 100 ms 窗口里四次回报，只写一次，三次留着
+    # four reports inside the same 100 ms window: one write, three kept back
     harness.clock.now = 1.0
     for step in (25.0, 50.0, 75.0):
         harness.manager.report(task, step)
@@ -654,13 +706,14 @@ def test_the_last_progress_reported_before_the_end_is_written(
     harness.clock.now = 1.0
     harness.manager.report(task, 40.0)
     harness.clock.now = 1.01
-    harness.manager.report(task, 80.0)  # throttled, kept for the flush
+    harness.manager.report(task, 80.0)  # 被限流，留着待冲刷 / throttled, kept for the flush
     counting.fail = True
     harness.clock.now = 1.02
     harness.run(task)
 
-    # PRD 8.4: the last value is never the one the interval swallows.  The worker
-    # fails, so the record keeps the progress it reached instead of being reset to 100.
+    # 最后一个值不会被间隔吞掉；工人失败，所以记录停在它到达的进度，而不是被改成 100
+    # the last value is never the one the interval swallows; the worker fails, so the record
+    # keeps the progress it reached instead of being reset to 100
     assert writes == [40.0, 80.0]
     record = harness.record(record)
     assert record.status is FAILED
@@ -678,14 +731,15 @@ def test_a_value_kept_back_inside_the_window_never_overwrites_a_newer_one(
     harness.clock.now = 1.0
     harness.manager.report(task, 20.0)
     harness.clock.now = 1.01
-    harness.manager.report(task, 60.0)  # throttled; 20 is the value on record
+    harness.manager.report(task, 60.0)  # 被限流；记录里仍是 20 / throttled: 20 is on record
     harness.clock.now = 1.2
-    harness.manager.report(task, 90.0)  # written, so 60 is stale from here on
+    harness.manager.report(task, 90.0)  # 已写入，60 从此过期 / written, so 60 is stale
     counting.fail = True
     harness.clock.now = 1.21
     harness.run(task)
 
-    # The flush at the end must not resurrect 60: progress may never go backwards.
+    # 收尾冲刷不能让 60 复活，进度不能倒退
+    # the final flush must not resurrect 60: progress may never go backwards
     assert writes == [20.0, 90.0]
     assert harness.record(record).progress == 90
 
@@ -698,7 +752,7 @@ def test_a_progress_report_for_an_unknown_task_is_ignored(counting: Counting) ->
     assert harness.engine._store.ids(set(ExecutionStatus)) == []
 
 
-# --- the completion handler --------------------------------------------------
+# --- 完成处理器 / the completion handler -----------------------------------------
 
 
 def test_a_successful_task_passes_through_running_and_finalizing(counting: Counting) -> None:
@@ -726,31 +780,37 @@ def test_a_task_qgis_cancels_on_its_own_still_ends_cancelled(
     submitted = harness.submit(counting.name, {"amount": 1})
     task = harness.tasks[0]
     if before is SCHEDULED:
-        # The worker must report nothing, or its first report is what moves the record
-        # to RUNNING and the completion never sees the SCHEDULED half of the branch.
+        # 工人必须一次也不报进度，否则第一次回报就把记录推到 RUNNING，完成时就看不到 SCHEDULED
+        # 这一半
+        # the worker must report nothing, or its first report moves the record to RUNNING and
+        # the completion never sees the SCHEDULED half of the branch
         counting.steps = 0
     writes = watch_progress(harness.engine._store)
     if before is RUNNING:
-        harness.manager.report(task, 10.0)  # the first report moves SCHEDULED -> RUNNING
+        harness.manager.report(task, 10.0)  # 第一次回报把 SCHEDULED 推到 RUNNING / first report
     elif before is CANCEL_REQUESTED:
         harness.engine.cancel(submitted.execution_id)
     assert harness.record(submitted).status is before
 
-    # QGIS cancels the task itself (its dependent layer went away); nobody called
-    # engine.cancel, so the record still has to reach a terminal state on its own.
+    # QGIS 自己把任务取消（依赖图层没了）；没人调 engine.cancel，记录仍要靠自己走到终结状态
+    # QGIS cancels the task itself, its dependent layer being gone; nobody called engine.cancel,
+    # so the record still has to reach a terminal state on its own
     task.cancel()
     harness.run(task)
 
-    # Both halves of the cancel branch are pinned here: a SCHEDULED record has no edge
-    # straight to CANCELLED, and a RUNNING one only reaches it through the request.
+    # 取消分支的两半都钉在这里：SCHEDULED 没有直通 CANCELLED 的边，RUNNING 只能经请求走到
+    # both halves of the cancel branch are pinned here: a SCHEDULED record has no edge straight
+    # to CANCELLED, and a RUNNING one only reaches it through the request
     record = harness.record(submitted)
     assert record.status is CANCELLED
     assert record.result is None
     assert record.error is None
     assert record.finished_at is not None
     if before is SCHEDULED:
-        # A report here would move the record off SCHEDULED and quietly stop testing
-        # that half of the branch, so the case proves it saw none.
+        # 这里报一次就会把记录推离
+        # SCHEDULED，那条分支的一半就静默地不再被测，所以这里断言一次都没报
+        # a report here would move the record off SCHEDULED and quietly stop testing that half
+        # of the branch, so the case proves it saw none
         assert writes == []
 
 
@@ -763,13 +823,14 @@ def test_a_cancelled_record_does_not_claim_full_progress(counting: Counting) -> 
     harness.clock.now = 1.0
     harness.manager.report(task, 12.5)
     harness.clock.now = 1.01
-    harness.manager.report(task, 100.0)  # what QGIS reports once run() returns
+    harness.manager.report(task, 100.0)  # run() 返回后 QGIS 报的值 / what QGIS reports after run()
     task.cancel()
     harness.clock.now = 1.02
-    task.finished(True)  # the run itself already returned; only the report is left
+    task.finished(True)  # 运行已返回，只剩这条回报 / only the report is left
 
     record = harness.record(submitted)
-    # PRD 6.6: a record with no result may not read as complete, so no 100 ever lands.
+    # 没有结果的记录不能读作完成，所以 100 永不落地
+    # a record with no result may not read as complete, so no 100 ever lands
     assert record.status is CANCELLED
     assert record.progress == 12.5
     assert writes == [12.5]
@@ -790,10 +851,11 @@ def test_a_completion_that_breaks_still_settles_the_record(counting: Counting) -
 
     store.transition = refusing  # type: ignore[method-assign]
 
-    harness.run(task)  # must not raise into the Qt slot
+    harness.run(task)  # 不能抛进 Qt 槽 / must not raise into the Qt slot
 
-    # PRD 12.3: the task is over, so the record may not stay live even when the
-    # handler itself failed; every non-terminal status has an edge to FAILED.
+    # 任务已经结束，记录就不能还活着，哪怕处理器自己失败了：每个非终结状态都有到 FAILED 的边
+    # the task is over, so the record may not stay live even when the handler itself failed:
+    # every non-terminal status has an edge to FAILED
     record = harness.record(submitted)
     assert record.status is FAILED
     assert record.error is not None
@@ -818,10 +880,11 @@ def test_a_slot_freed_by_a_broken_completion_still_starts_the_next_call(
 
     store.transition = refusing  # type: ignore[method-assign]
 
-    harness.run(harness.tasks[0])  # its own SUCCEEDED write is the failure
+    harness.run(harness.tasks[0])  # 它自己的 SUCCEEDED 写入就是失败点 / the failing write
 
-    # PRD 12.3 / 8.5: the slot is released whether or not the completion went well,
-    # so the call waiting for it starts instead of sitting in QUEUED forever.
+    # 不论完成是否顺利，名额都要释放，于是等它的调用会启动，而不是永远留在 QUEUED
+    # the slot is released whether or not the completion went well, so the call waiting for it
+    # starts instead of sitting in QUEUED forever
     assert harness.record(first).status is FAILED
     assert harness.record(waiting).status is SCHEDULED
 
@@ -853,8 +916,9 @@ def test_shutdown_drops_the_calls_still_waiting_for_a_slot(counting: Counting) -
 
     harness.engine.shutdown()
 
-    # The record is terminal, and the adapter's deque may not keep an entry that
-    # nothing after unload will ever drain.
+    # 记录已终结，适配器的队列不能留下没人抽的项
+    # the record is terminal, and the adapter's deque may not keep an entry that nothing after
+    # unload will ever drain
     assert harness.record(waiting).status is CANCELLED
     assert list(harness.runner._waiting) == []
 
@@ -866,7 +930,8 @@ def test_a_completion_the_runner_does_not_own_is_refused_politely(
     harness.submit(counting.name, {"amount": 1})
     task = harness.tasks[0]
 
-    # Second completion for the same execution: nothing is written, nothing raises.
+    # 同一次执行的第二次完成，不写、不抛
+    # a second completion for the same execution: nothing is written, nothing raises
     harness.run(task)
     harness.run(task)
 
@@ -878,7 +943,8 @@ def test_a_task_that_ends_without_a_result_is_failed(counting: Counting) -> None
     submitted = harness.submit(counting.name, {"amount": 1})
     task = harness.tasks[0]
 
-    # No worker run, no cancel: QGIS terminated a task this adapter did not.
+    # 工人没跑、也没人取消，QGIS 终止了一个适配器没管的任务
+    # no worker run, no cancel: QGIS terminated a task this adapter did not
     task.finished(False)
 
     record = harness.record(submitted)

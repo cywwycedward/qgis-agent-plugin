@@ -1,4 +1,12 @@
-"""What a caller receives, and the error contract the framework speaks.
+"""调用方拿到的东西，以及框架共用的错误契约。
+
+每个字段都是 JSON 安全值：执行记录里永远不放 QGIS 对象，所以它可以直接外传、记日志、逐字段比较。
+记录也不允许被构造成状态机到不了的状态——不可能的组合就是引擎的缺陷，悄悄补齐只会把它藏起来。
+
+``OperationKind`` 与 ``ExecutionStrategy`` 放在这里而不是 ``contracts``：记录把它们声明成字段，
+而协议只是引用它们；定义在 ``contracts`` 会让两个模块互相导入。
+
+What a caller receives, and the error contract the framework speaks.
 
 Every field is a JSON-safe value: an execution record never holds a QGIS object,
 so it can be handed out, logged and compared as it is.  The record also refuses
@@ -15,19 +23,21 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import (
+from pydantic import (  # pyright: ignore[reportMissingImports]
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictStr,
     field_validator,
     model_validator,
 )
 
-# The whole error vocabulary, from PRD 11.2: one more or one less is a defect.
+# 完整的错误词表：多一个或少一个都是缺陷。
+# The whole error vocabulary: one more or one less is a defect.
 OPERATION_NOT_FOUND = "OPERATION_NOT_FOUND"
 INVALID_OPERATION_DEFINITION = "INVALID_OPERATION_DEFINITION"
 DUPLICATE_OPERATION = "DUPLICATE_OPERATION"
@@ -36,7 +46,6 @@ ENGINE_CLOSING = "ENGINE_CLOSING"
 UNSUPPORTED_EXECUTION_MODE = "UNSUPPORTED_EXECUTION_MODE"
 EXECUTION_NOT_FOUND = "EXECUTION_NOT_FOUND"
 INVALID_INPUT = "INVALID_INPUT"
-INVALID_CRS = "INVALID_CRS"
 PROJECT_REPLACE_REQUIRED = "PROJECT_REPLACE_REQUIRED"
 PROJECT_OPEN_FAILED = "PROJECT_OPEN_FAILED"
 PROJECT_SAVE_FAILED = "PROJECT_SAVE_FAILED"
@@ -47,7 +56,6 @@ INVALID_LAYER = "INVALID_LAYER"
 LAYER_NOT_FOUND = "LAYER_NOT_FOUND"
 LAYER_NOT_IN_TREE = "LAYER_NOT_IN_TREE"
 INVALID_FIELD_TYPE = "INVALID_FIELD_TYPE"
-SNAPSHOT_LIMIT_EXCEEDED = "SNAPSHOT_LIMIT_EXCEEDED"
 TOO_MANY_EXECUTIONS = "TOO_MANY_EXECUTIONS"
 TASK_SUBMISSION_FAILED = "TASK_SUBMISSION_FAILED"
 STALE_PROJECT = "STALE_PROJECT"
@@ -64,7 +72,6 @@ ERROR_CODES = frozenset(
         UNSUPPORTED_EXECUTION_MODE,
         EXECUTION_NOT_FOUND,
         INVALID_INPUT,
-        INVALID_CRS,
         PROJECT_REPLACE_REQUIRED,
         PROJECT_OPEN_FAILED,
         PROJECT_SAVE_FAILED,
@@ -75,7 +82,6 @@ ERROR_CODES = frozenset(
         LAYER_NOT_FOUND,
         LAYER_NOT_IN_TREE,
         INVALID_FIELD_TYPE,
-        SNAPSHOT_LIMIT_EXCEEDED,
         TOO_MANY_EXECUTIONS,
         TASK_SUBMISSION_FAILED,
         STALE_PROJECT,
@@ -86,21 +92,30 @@ ERROR_CODES = frozenset(
 
 
 class OperationKind(StrEnum):
-    """The business intent of an operation, not the thread it runs on."""
+    """操作的业务意图，而不是它跑在哪个线程。
+
+    The business intent of an operation, not the thread it runs on.
+    """
 
     COMMAND = "command"
     QUERY = "query"
 
 
 class ExecutionStrategy(StrEnum):
-    """Where the code runs, not whether the caller gets its result asynchronously."""
+    """代码在哪里跑，而不是调用方是否异步拿到结果。
+
+    Where the code runs, not whether the caller gets its result asynchronously.
+    """
 
     MAIN_THREAD = "main_thread"
     BACKGROUND = "background"
 
 
 class ExecutionStatus(StrEnum):
-    """Every state a call can be in (PRD 8.1); the last three are terminal."""
+    """一次调用可能处的每个状态；最后三个是终态。
+
+    Every state a call can be in; the last three are terminal.
+    """
 
     QUEUED = "QUEUED"
     PREPARING = "PREPARING"
@@ -114,7 +129,10 @@ class ExecutionStatus(StrEnum):
 
 
 def utc_now() -> str:
-    """The timestamp format every record field takes: ISO 8601, UTC, with offset."""
+    """每条记录字段采用的时间戳格式：ISO 8601、UTC、带时区偏移。
+
+    The timestamp format every record field takes: ISO 8601, UTC, with offset.
+    """
 
     return datetime.now(UTC).isoformat()
 
@@ -125,11 +143,16 @@ def _require_known_code(code: str) -> None:
 
 
 class FrameworkError(Exception):
-    """A control-plane failure: the call never became an execution.
+    """控制面的失败：这次调用根本没有成为一次执行。
+
+    一次不合法的调用——未知操作、未知 id、错线程、引擎已关闭——抛它而不是产生记录，调用方自己的
+    错因此与「一次真正失败了的执行」区分得开。
+
+    A control-plane failure: the call never became an execution.
 
     An invalid call -- unknown operation, unknown id, wrong thread, closed engine
     -- raises this instead of producing a record, which is how the caller's own
-    mistake stays apart from an execution that failed (PRD 6.5).
+    mistake stays apart from an execution that failed.
     """
 
     def __init__(self, code: str, message: str) -> None:
@@ -140,13 +163,16 @@ class FrameworkError(Exception):
 
 
 class ErrorDetail(BaseModel):
-    """A failure a caller can branch on: a stable code, a short message, safe details."""
+    """调用方可以据此分支的失败：稳定的错误码、短消息、安全的细节。
+
+    A failure a caller can branch on: a stable code, a short message, safe details.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     code: StrictStr
     message: StrictStr
-    details: dict[str, Any] | None = None
+    details: dict[str, JsonValue] | None = None
 
     @field_validator("code")
     @classmethod
@@ -156,18 +182,24 @@ class ErrorDetail(BaseModel):
 
 
 class CancelReceipt(BaseModel):
-    """The answer to a cancel request; ``accepted`` never means already cancelled."""
+    """取消请求的答复；``accepted`` 从不表示已经取消。
+
+    The answer to a cancel request; ``accepted`` never means already cancelled.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     execution_id: StrictStr
     accepted: StrictBool
     status: ExecutionStatus
-    reason: StrictStr | None = None
+    reason: Literal["ALREADY_TERMINAL", "NOT_INTERRUPTIBLE", "FINALIZING"] | None = None
 
 
 class ExecutionRecord(BaseModel):
-    """One call's state, as last written by the main thread (PRD 6.6)."""
+    """一次调用的状态，以主线程最后一次写入为准。
+
+    One call's state, as last written by the main thread.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -213,7 +245,10 @@ class ExecutionRecord(BaseModel):
 
 
 class OperationSpec(BaseModel):
-    """What a caller may ask about an operation without touching its code (PRD 6.3)."""
+    """调用方不碰操作代码就能问到的信息。
+
+    What a caller may ask about an operation without touching its code.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -224,16 +259,40 @@ class OperationSpec(BaseModel):
     destructive: StrictBool
     input_schema: dict[str, Any]
     output_schema: dict[str, Any]
-    pydantic_major: int
 
 
 class Params(BaseModel):
-    """Base for every operation input: an undeclared key is a caller mistake.
+    """每个操作输入的基类：没声明的键就是调用方的错。
+
+    每个输入模型都继承它，规则就不会在操作之间漂移；没有参数的操作拿到一个空模型，它会拒绝任何东西。
+    字段自己选用 ``StrictBool``/``StrictStr``，所以字符串 ``"true"`` 冒充不了布尔值。交给这个模型的
+    操作自己也可能就是造模型的那个调用方，所以实例会重新校验，而不是被直接信任。
+
+    Base for every operation input: an undeclared key is a caller mistake.
 
     Every input model inherits this so the rule cannot drift between operations,
     and an operation with no parameters gets an empty model that rejects
     anything.  Fields opt into ``StrictBool``/``StrictStr`` themselves, so a
-    string ``"true"`` cannot pass for a boolean (PRD 6.1).
+    string ``"true"`` cannot pass for a boolean.  The operation this model is
+    handed to is a caller that may have built the model itself, so an instance is
+    revalidated instead of being taken on trust.
+    """
+
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+
+class Result(BaseModel):
+    """每个操作输出的基类：没声明的键就是插件缺陷。
+
+    结果是产出它的操作构造的，调用方从不构造它，所以模型没声明的键意味着操作报错了——丢掉它等于
+    交给调用方一个谁都没产出过的默认值。每个结果都继承它，规则就不会在操作之间漂移。
+
+    Base for every operation output: an undeclared key is a plugin defect.
+
+    A result is built by the operation that produced it, never by a caller, so a
+    key the model does not declare means the operation reports something wrong --
+    dropping it would hand the caller a default nobody produced.  Every result
+    inherits this so the rule cannot drift between operations.
     """
 
     model_config = ConfigDict(extra="forbid")

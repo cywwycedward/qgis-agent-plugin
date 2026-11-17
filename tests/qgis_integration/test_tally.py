@@ -1,13 +1,16 @@
-"""The run's summary is counted from the verdicts, never from the printed text.
+"""运行的汇总只数结论，绝不数打印出来的文本。
 
-The old implementation counted ``" {verdict} "`` occurrences inside the printed line,
-so the free-form evidence could change the tally.  These tests fail if that comes
-back: the second one is a pass whose evidence contains ``FAIL`` and ``SKIP``.
+汇总不能从打印行里去找字样：那样自由形式的证据就能改掉汇总。这些测试守的就是这一点：第二条是
+一个通过的行，它的证据里带着 ``FAIL`` 和 ``SKIP``。
+
+The run's summary is counted from the verdicts, never from the printed text.  Counting a marker
+inside the printed line lets free-form evidence change the tally, so these tests guard against it:
+the second one is a pass whose evidence contains ``FAIL`` and ``SKIP``.
 """
 
 from __future__ import annotations
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 import tally
 
 
@@ -22,9 +25,12 @@ def test_the_summary_counts_the_structured_verdicts() -> None:
 
 
 def test_a_deceptive_evidence_line_cannot_change_the_tally() -> None:
-    # This row passed; its text says FAIL twice and SKIP once, as real evidence
-    # lines do (an error code, a sentence about a skipped half).  A substring count
-    # would report it as a failure and turn a green run's exit code into 1.
+    # 这行是通过的，它的文本里却两次出现 FAIL、一次 SKIP，真实证据行就是这样（一个错误码、一句
+    # 关于跳过的话）。
+    # This row passed; its text says FAIL twice and SKIP once, as real evidence lines do (an error
+    # code, a sentence about a skipped half).
+    # 数子串会把它算成失败，于是绿色运行的退出码变成 1。
+    # A substring count would report it as a failure and turn a green run's exit code into 1.
     rows = [
         tally.Row(
             "AT-27",

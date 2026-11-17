@@ -1,10 +1,14 @@
-"""The work-root guard: the only code in this delivery that deletes a directory.
+"""工作根目录的守卫：这批代码里唯一会删目录的地方。
 
-PRD 12.1 says a run may only destroy its own test data, so the guard is tested rather
-than trusted.  Each test here fails when one of its four checks is weakened: the
-temporary-directory check, the marker check in ``claim_root``, the marker check in
-``_fresh``, and the runner's ``REFUSING`` exit code.  Nothing here starts a
-``QgsApplication``: the fixture builder only needs the QGIS libraries.
+一次运行只允许毁掉它自己的测试数据，所以这条守卫要被测掉，而不是被信任。四项检查任一项被放松，
+这里就有一条测试会失败：临时目录检查、``claim_root`` 里的标记检查、``_fresh`` 里的标记检查，以及
+运行器的 ``REFUSING`` 退出码。这里不启动 ``QgsApplication``：测试数据的构造只需要 QGIS 的库。
+
+The work-root guard: the only code in this delivery that deletes a directory.  A run may only
+destroy its own test data, so the guard is tested rather than trusted.  Each test here fails
+when one of its four checks is weakened: the temporary-directory check, the marker check in
+``claim_root``, the marker check in ``_fresh``, and the runner's ``REFUSING`` exit code.
+Nothing here starts a ``QgsApplication``: the fixture builder only needs the QGIS libraries.
 """
 
 from __future__ import annotations
@@ -68,7 +72,8 @@ def test_fresh_refuses_a_directory_whose_parent_was_not_claimed(tmp_path: Path) 
 def test_build_replaces_only_the_two_directories_it_owns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # QGIS writes symbology-style.db into the working directory; keep it in the sandbox.
+    # QGIS 会把 symbology-style.db 写进工作目录，所以把工作目录关在沙箱里。
+    # QGIS writes symbology-style.db into the working directory, so keep it in the sandbox.
     monkeypatch.chdir(tmp_path)
     root = fixtures.claim_root(tmp_path / "run", tmp_path)
     sibling = root / "sibling"

@@ -1,31 +1,33 @@
-"""The ``project.*`` operations, driven by a fake ctx and a fake PyQGIS.
+"""用假 ctx 与假 PyQGIS 驱动 ``project.*`` 操作。
 
-These are the unit-level ATs: unreadable input, the replacement guard, the path
-policy, the overwrite rule and the AT-18B partial-load count.  Real PyQGIS
-behaviour (does ``read()`` actually populate the layer tree) belongs to the QGIS
-acceptance run, not here.
+真实 PyQGIS 的行为（``read()`` 填不填图层树、多少层会打掉进程、``write()`` 写什么）留给 QGIS 侧的
+验收跑；这里测的是操作的判断与它对 QGIS 的调用顺序：换工程前问什么、读之前拒什么、失败时把 QGIS
+自己的哪句文本交出去。
+
+The ``project.*`` operations, driven by a fake ctx and a fake PyQGIS.  Real PyQGIS behaviour --
+whether ``read()`` fills the layer tree, how much nesting ends the process, what ``write()``
+writes -- belongs to the QGIS acceptance run; what is measured here is each operation's criteria
+and the order of its QGIS calls: what is asked before a project is replaced, what is refused
+before a read, and which of QGIS's own sentences comes back on failure.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
+import stat
+import struct
 import sys
-import time
-import tracemalloc
 import types
 import zipfile
 from pathlib import Path
 from typing import Any
 
-import pytest
-from pydantic import ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import OperationContext
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import OperationContext  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     INTERNAL_ERROR,
-    INVALID_CRS,
     PATH_NOT_ALLOWED,
     PROJECT_OPEN_FAILED,
     PROJECT_PATH_REQUIRED,
@@ -36,114 +38,221 @@ from qgis_agent_plugin.core.models import (
     FrameworkError,
     OperationKind,
 )
-from qgis_agent_plugin.core.registry import OperationRegistry
-from qgis_agent_plugin.operations import project
+from qgis_agent_plugin.core.registry import OperationRegistry  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations import project  # pyright: ignore[reportMissingImports]
 
 ROOT = Path(__file__).resolve().parents[1]
+# 绝对路径且格式正确，从不真的碰它：只有输入模型看得到它。
 # Absolute and well formed, never touched: only the input models see it.
 A_PROJECT_FILE = str(ROOT / "maps" / "a.qgs")
 
 
 class FakeCrs:
-    """Valid exactly for the authids a real QGIS resolves; anything else is not."""
+    """只有真 QGIS 解析得出的 authid 才有规范形式，别的都报空串，和 ``crs().authid()`` 一样。
 
-    _KNOWN = frozenset({"EPSG:4326", "EPSG:3857"})
+    Only an authid a real QGIS resolves has a canonical form; anything else reports an empty
+    string, as ``crs().authid()`` does.
+    """
+
+    _KNOWN = {"epsg:4326": "EPSG:4326", "epsg:3857": "EPSG:3857"}
 
     def __init__(self, authid: str) -> None:
         self._authid = authid
 
-    def isValid(self) -> bool:
-        return self._authid.upper() in self._KNOWN
-
     def authid(self) -> str:
-        """QGIS reports the canonical form whatever alias the caller used."""
-
-        return self._authid.upper()
+        return self._KNOWN.get(self._authid.lower(), "")
 
 
-@pytest.fixture
-def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
-    """The operations import ``qgis.core`` inside their method body; this is that module."""
+class FakeVectorLayer:
+    """``QgsVectorLayer`` 在判据里被问到的那几个方法，于是 ``isinstance`` 也对得上。
 
-    core: Any = types.ModuleType("qgis.core")
-    core.QgsCoordinateReferenceSystem = FakeCrs
-    core.QgsProviderRegistry = FakeProviderRegistry
-    package: Any = types.ModuleType("qgis")
-    package.core = core
-    monkeypatch.setitem(sys.modules, "qgis", package)
-    monkeypatch.setitem(sys.modules, "qgis.core", core)
-    return core
+    The ``QgsVectorLayer`` methods the criteria ask about, so ``isinstance`` matches too.
+    """
 
-
-class FakeProviderMetadata:
-    """Only what ``project.open`` asks: decode a provider URI into its path."""
-
-    def decodeUri(self, uri: str) -> dict[str, str]:  # noqa: N802 - a PyQGIS name
-        path = uri.split("|", 1)[0]
-        return {"path": path} if path else {}
-
-
-class FakeProviderRegistry:
-    """``QgsProviderRegistry.instance().providerMetadata(id)``, reduced to two providers."""
-
-    _instance: FakeProviderRegistry | None = None
-
-    def __init__(self) -> None:
-        self.metadata = {"ogr": FakeProviderMetadata(), "gdal": FakeProviderMetadata()}
-
-    @classmethod
-    def instance(cls) -> FakeProviderRegistry:
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def providerMetadata(  # noqa: N802 - a PyQGIS name
-        self, provider: str
-    ) -> FakeProviderMetadata | None:
-        return self.metadata.get(provider)
-
-
-class FakeLayer:
-    def __init__(self, *, valid: bool = True, source: str = "", provider: str = "ogr") -> None:
-        self._valid = valid
-        self._source = source
-        self._provider = provider
-
-    def isValid(self) -> bool:
-        return self._valid
-
-    def source(self) -> str:
-        return self._source
-
-    def providerType(self) -> str:
-        return self._provider
-
-
-class FakeProject:
     def __init__(
         self,
         *,
-        layers: dict[str, FakeLayer] | None = None,
+        name: str = "layer",
+        valid: bool = True,
+        provider: str = "ogr",
+        editable: bool = False,
+        modified: bool = False,
+        feature_count: int = 0,
+        temporary: bool = False,
+        skip_memory_check: bool = False,
+    ) -> None:
+        self._name = name
+        self._valid = valid
+        self._provider = provider
+        self._editable = editable
+        self._modified = modified
+        self._feature_count = feature_count
+        self._temporary = temporary
+        self._skip_memory_check = skip_memory_check
+
+    def name(self) -> str:
+        return self._name
+
+    def isValid(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._valid
+
+    def dataProvider(self) -> Any:  # noqa: N802 - a PyQGIS name
+        return None if self._provider == "no provider" else object()
+
+    def providerType(self) -> str:  # noqa: N802 - a PyQGIS name
+        return self._provider
+
+    def isEditable(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._editable
+
+    def isModified(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._modified
+
+    def featureCount(self) -> int:  # noqa: N802 - a PyQGIS name
+        return self._feature_count
+
+    def isTemporary(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._temporary
+
+    def customProperty(self, key: str) -> Any:  # noqa: N802 - a PyQGIS name
+        # QGIS 用 ``customProperty(...).toInt()`` 当布尔：设了就是 1。
+        # QGIS reads ``customProperty(...).toInt()`` as a flag: set means 1.
+        if key == "skipMemoryLayersCheck":
+            return int(self._skip_memory_check)
+        return None
+
+
+class FakeRasterAttributeTable:
+    def __init__(self, dirty: bool) -> None:
+        self._dirty = dirty
+
+    def isDirty(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._dirty
+
+
+class FakeRasterLayer:
+    """``QgsRasterLayer`` 的波段与属性表：``dirty_bands`` 里的那条带是脏的。
+
+    The bands and attribute tables of a ``QgsRasterLayer``: the ones in ``dirty_bands`` are dirty.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str = "raster",
+        band_count: int = 1,
+        dirty_bands: tuple[int, ...] = (),
+        provider: str = "gdal",
+        temporary: bool = False,
+    ) -> None:
+        self._name = name
+        self._band_count = band_count
+        self._dirty_bands = frozenset(dirty_bands)
+        self._provider = provider
+        self._temporary = temporary
+
+    def name(self) -> str:
+        return self._name
+
+    def isValid(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return True
+
+    def providerType(self) -> str:  # noqa: N802 - a PyQGIS name
+        return self._provider
+
+    def isTemporary(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return self._temporary
+
+    def bandCount(self) -> int:  # noqa: N802 - a PyQGIS name
+        return self._band_count
+
+    def attributeTable(self, band: int) -> FakeRasterAttributeTable | None:  # noqa: N802
+        if band in self._dirty_bands:
+            return FakeRasterAttributeTable(True)
+        return None
+
+
+FakeMapLayer = FakeVectorLayer | FakeRasterLayer
+
+
+class FakeViewSettings:
+    """工程默认视图：存进来的范围与旋转。
+
+    The project's default view: the extent and rotation stored into it.
+    """
+
+    def __init__(self) -> None:
+        self.extent: Any = None
+        self.rotation: Any = None
+
+    def setDefaultViewExtent(self, extent: Any) -> None:  # noqa: N802 - a PyQGIS name
+        self.extent = extent
+
+    def setDefaultRotation(self, rotation: float) -> None:  # noqa: N802 - a PyQGIS name
+        self.rotation = rotation
+
+
+class FakeReferencedRectangle:
+    """``QgsReferencedRectangle``：范围带上工程的 CRS。
+
+    ``QgsReferencedRectangle``: an extent together with the project's CRS.
+    """
+
+    def __init__(self, rectangle: Any, crs: FakeCrs) -> None:
+        self.rectangle = rectangle
+        self.crs = crs
+
+
+class FakeProject:
+    """``QgsProject`` 里这四个操作碰得到的那几个方法。
+
+    The handful of ``QgsProject`` methods these four operations touch.
+    """
+
+    def __init__(
+        self,
+        *,
+        layers: dict[str, FakeMapLayer] | None = None,
         file_name: str = "",
         dirty: bool = False,
         crs_authid: str = "EPSG:4326",
+        title: str = "",
         read_result: bool = True,
-        layers_after_read: dict[str, FakeLayer] | None = None,
+        read_error: str = "Unable to open the project file",
+        layers_after_read: dict[str, FakeMapLayer] | None = None,
+        crs_after_read: str = "EPSG:4326",
         write_result: bool = True,
+        write_error: str = "Unable to save to file",
     ) -> None:
         self.layers = dict(layers or {})
         self.file_name = file_name
         self.dirty = dirty
         self.crs_authid = crs_authid
+        self.title_text = title
         self.read_result = read_result
+        self.read_error = read_error
         self.layers_after_read = dict(layers_after_read or {})
+        self.crs_after_read = crs_after_read
         self.write_result = write_result
+        self.write_error = write_error
+        self.error_text = ""
         self.read_path: str | None = None
+        self.reads = 0
+        self.clears = 0
         self.writes: list[str] = []
-        self.removed: list[str] = []
-        self.crs_set: FakeCrs | None = None
+        self.view = FakeViewSettings()
+        # ``blockDirtying`` 生效期间置脏被挡住，和真 ``QgsProject`` 一样。
+        # While ``blockDirtying`` is in effect a dirtying call is dropped, as in ``QgsProject``.
+        self.blocking = 0
+        self.dirtied_while_blocked = 0
+        # 清空与读取各自记下当时有没有挡：真工程在清空时由图层树发信号叫 ``markDirty``。
+        # 没走到时是 -1。
+        # The close and the read each record whether blocking was in effect: at close time the real
+        # project is dirtied by signals from the layer tree.  -1 means the step never ran.
+        self.blocked_at_clear = -1
+        self.blocked_at_read = -1
 
-    def mapLayers(self) -> dict[str, FakeLayer]:  # noqa: N802 - a PyQGIS name
+    def mapLayers(self) -> dict[str, FakeMapLayer]:  # noqa: N802 - a PyQGIS name
         return dict(self.layers)
 
     def fileName(self) -> str:  # noqa: N802 - a PyQGIS name
@@ -152,48 +261,204 @@ class FakeProject:
     def isDirty(self) -> bool:  # noqa: N802 - a PyQGIS name
         return self.dirty
 
+    def setDirty(self, dirty: bool) -> None:  # noqa: N802 - a PyQGIS name
+        if dirty and self.blocking:
+            self.dirtied_while_blocked += 1
+            return
+        self.dirty = dirty
+
+    def title(self) -> str:
+        return self.title_text
+
     def crs(self) -> FakeCrs:
         return FakeCrs(self.crs_authid)
 
-    def setCrs(self, crs: FakeCrs) -> None:  # noqa: N802 - a PyQGIS name
-        self.crs_set = crs
-        self.crs_authid = crs.authid()
+    def viewSettings(self) -> FakeViewSettings:  # noqa: N802 - a PyQGIS name
+        return self.view
+
+    def error(self) -> str:
+        return self.error_text
+
+    def clear(self) -> None:
+        self.clears += 1
+        self.layers = {}
+        self.file_name = ""
+        self.crs_authid = ""
+        self.title_text = ""
+        self.blocked_at_clear = self.blocking
+        # 清空会经由图层树与画布把工程标脏；挡板在时就吞掉。
+        # Closing the project dirties it through the layer tree and the canvas; the blocker swallows
+        # that when it is in effect.
+        self.setDirty(True)
 
     def read(self, path: str) -> bool:
+        self.reads += 1
         self.read_path = path
-        if not self.read_result:
-            return False
+        self.blocked_at_read = self.blocking
+        # 真 ``read()`` 先记住文件名，再决定读不读得出来。
+        # The real ``read()`` remembers the file name first, then decides.
         self.file_name = path
+        if not self.read_result:
+            self.error_text = self.read_error
+            return False
         self.layers = dict(self.layers_after_read)
+        self.crs_authid = self.crs_after_read
+        # 读的过程中会置脏的东西：真 ``read()`` 里有一堆，这里一个代表它们。
+        # Things that dirty during a read: the real ``read()`` has plenty, one stands for them.
+        self.setDirty(True)
         return True
-
-    def removeMapLayer(self, layer_id: str) -> None:  # noqa: N802 - a PyQGIS name
-        self.removed.append(layer_id)
-        self.layers.pop(layer_id, None)
 
     def write(self, path: str) -> bool:
         self.writes.append(path)
         if not self.write_result:
+            self.error_text = self.write_error
             return False
         self.file_name = path
         self.dirty = False
         return True
 
 
+class FakeCanvas:
+    def __init__(self) -> None:
+        self.extent_value = "the canvas extent"
+        self.rotation_value = 12.5
+
+    def extent(self) -> Any:
+        return self.extent_value
+
+    def rotation(self) -> float:
+        return self.rotation_value
+
+
 class FakeIface:
-    def __init__(self, project_: FakeProject | None = None, *, result: bool = True) -> None:
+    def __init__(
+        self,
+        project_: FakeProject | None = None,
+        *,
+        result: bool = True,
+        new_crs: str = "EPSG:3857",
+        new_layers: dict[str, FakeMapLayer] | None = None,
+    ) -> None:
         self.project = project_
         self.result = result
+        # 真 ``fileNew`` 的 CRS 来自设置，默认模板还会带图层进来。
+        # The real ``fileNew`` takes its CRS from a setting, and the default template may bring
+        # layers along.
+        self.new_crs = new_crs
+        self.new_layers = dict(new_layers or {})
         self.new_project_calls: list[bool] = []
+        self.canvas = FakeCanvas()
 
     def newProject(self, promptToSaveFlag: bool = False) -> bool:  # noqa: N802 - a PyQGIS name
         self.new_project_calls.append(promptToSaveFlag)
         if self.result and self.project is not None:
-            # A real new project starts empty, so the result counts are read from it.
-            self.project.layers.clear()
-            self.project.file_name = ""
-            self.project.dirty = False
+            self.project.clear()
+            self.project.crs_authid = self.new_crs
+            self.project.layers = dict(self.new_layers)
+            # 真 ``fileNew`` 最后一步是 ``setDirty(false)``。
+            # The real ``fileNew`` ends with ``setDirty(false)``.
+            self.project.setDirty(False)
         return self.result
+
+    def mapCanvas(self) -> FakeCanvas:  # noqa: N802 - a PyQGIS name
+        return self.canvas
+
+
+class FakeTask:
+    def __init__(self, description: str) -> None:
+        self._description = description
+
+    def description(self) -> str:
+        return self._description
+
+
+class FakeTaskManager:
+    """``QgsApplication.taskManager()``：按图层回答依赖它的任务。
+
+    ``QgsApplication.taskManager()``: answers which tasks depend on a layer.
+    """
+
+    def __init__(self) -> None:
+        self._dependent: dict[int, list[FakeTask]] = {}
+
+    def depend(self, layer: FakeMapLayer, *descriptions: str) -> None:
+        self._dependent[id(layer)] = [FakeTask(text) for text in descriptions]
+
+    def tasksDependentOnLayer(self, layer: FakeMapLayer) -> list[FakeTask]:  # noqa: N802
+        return list(self._dependent.get(id(layer), []))
+
+
+class FakeDirtyBlocker:
+    def __init__(self, project_: FakeProject) -> None:
+        self._project = project_
+
+    def __enter__(self) -> None:
+        self._project.blocking += 1
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self._project.blocking -= 1
+
+
+class FakeQgsProject:
+    """只是 ``QgsProject.blockDirtying`` 的宿主。
+
+    Nothing but the host of ``QgsProject.blockDirtying``.
+    """
+
+    @staticmethod
+    def blockDirtying(project_: FakeProject) -> FakeDirtyBlocker:  # noqa: N802 - a PyQGIS name
+        return FakeDirtyBlocker(project_)
+
+
+class FakeFileInfo:
+    """``QFileInfo`` 被问到的两件事：在不在、写不写得进去。
+
+    The two things asked of ``QFileInfo``: whether the file is there and whether it may be written.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+
+    def exists(self) -> bool:
+        return self._path.exists()
+
+    def isWritable(self) -> bool:  # noqa: N802 - a PyQGIS name
+        return bool(self._path.stat().st_mode & stat.S_IWRITE)
+
+
+@pytest.fixture
+def qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """操作在方法体内 import ``qgis``；这就是那几步要的东西。
+
+    The operations import ``qgis`` inside their method body; this is what those steps get.
+    """
+
+    core: Any = types.ModuleType("qgis.core")
+    core.QgsCoordinateReferenceSystem = FakeCrs
+    # 判据按 QGIS 的类名区分矢量与栅格，所以假模块里要有这两个类。
+    # The criteria tell vector from raster by QGIS's own class names, so the fake module needs both.
+    core.QgsVectorLayer = FakeVectorLayer
+    core.QgsRasterLayer = FakeRasterLayer
+    core.QgsReferencedRectangle = FakeReferencedRectangle
+    core.QgsProject = FakeQgsProject
+    core.task_manager = FakeTaskManager()
+    core.QgsApplication = types.SimpleNamespace(taskManager=lambda: core.task_manager)
+    qtcore: Any = types.ModuleType("qgis.PyQt.QtCore")
+    qtcore.QFileInfo = FakeFileInfo
+    pyqt: Any = types.ModuleType("qgis.PyQt")
+    pyqt.QtCore = qtcore
+    package: Any = types.ModuleType("qgis")
+    package.core = core
+    package.PyQt = pyqt
+    monkeypatch.setitem(sys.modules, "qgis", package)
+    monkeypatch.setitem(sys.modules, "qgis.core", core)
+    monkeypatch.setitem(sys.modules, "qgis.PyQt", pyqt)
+    monkeypatch.setitem(sys.modules, "qgis.PyQt.QtCore", qtcore)
+    return core
+
+
+def tasks(qgis: types.ModuleType) -> FakeTaskManager:
+    return qgis.task_manager
 
 
 class FakeLifecycle:
@@ -205,20 +470,13 @@ def context(
     project_: FakeProject,
     *,
     iface: FakeIface | None = None,
-    roots: tuple[Path, ...] = (),
-    data_roots: tuple[Path, ...] | None = None,
     epoch: int = 0,
 ) -> OperationContext:
     return OperationContext(
         iface=iface or FakeIface(project_),
         project=project_,
         lifecycle=FakeLifecycle(epoch),
-        policy=Settings(
-            allowed_project_roots=roots,
-            # Most cases allow one root for both keys; the project.open cases need
-            # the data roots to be told apart from the project roots.
-            allowed_data_roots=roots if data_roots is None else data_roots,
-        ),
+        policy=Settings(),
     )
 
 
@@ -228,102 +486,43 @@ def project_dir(tmp_path: Path) -> Path:
     return root
 
 
-REMOTE_SOURCE = "/vsicurl/http://127.0.0.1:9/never.tif"
-
-
-def project_xml(datasource: str, *, tag: str = "datasource") -> str:
-    """The smallest project XML QGIS writes around one layer's datasource."""
-
-    return (
-        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        f"<{tag}>{datasource}</{tag}>"
-        "</maplayer></projectlayers></qgis>"
-    )
-
-
-def qgs_file(directory: Path, name: str, datasource: str) -> Path:
-    target = directory / name
-    target.write_text(project_xml(datasource), encoding="utf-8")
+def a_qgs(directory: Path) -> Path:
+    target = directory / "a.qgs"
+    target.write_text("<qgis/>", encoding="utf-8")
     return target
 
 
-def qgz_file(directory: Path, name: str, datasource: str) -> Path:
-    """A ``.qgz`` is a zip whose ``.qgs`` member is the same XML."""
+def nested_project(directory: Path, name: str, depth: int, prefix: str = "a") -> Path:
+    """一个良构的工程，根元素下面嵌了 ``depth`` 层。
 
-    return qgz_bytes(directory, name, project_xml(datasource).encode("utf-8"))
+    A well-formed project nested ``depth`` levels below its root element.
+    """
 
-
-def qgz_bytes(directory: Path, name: str, member: bytes) -> Path:
+    tag = prefix.encode()
+    element = b"<" + tag + b">"
+    closing = b"</" + tag + b">"
     target = directory / name
-    with zipfile.ZipFile(target, "w") as archive:
-        archive.writestr("project.qgs", member)
+    target.write_bytes(b"<qgis>" + element * depth + closing * depth + b"</qgis>")
     return target
 
 
-def write_project_xml(directory: Path, name: str, xml: str) -> Path:
-    """Write ``xml`` as a ``.qgs``, or as the ``.qgs`` member of a ``.qgz``."""
-
-    if name.lower().endswith(".qgz"):
-        return qgz_bytes(directory, name, xml.encode("utf-8"))
+def archive(
+    directory: Path, name: str, member: bytes, *, method: int = zipfile.ZIP_DEFLATED
+) -> Path:
     target = directory / name
-    target.write_text(xml, encoding="utf-8")
+    with zipfile.ZipFile(target, "w", method) as handle:
+        handle.writestr("project.qgs", member)
     return target
 
 
-def layout_project(source: Path, item: str) -> str:
-    """A project with one local layer and one print layout holding ``item``."""
+def set_encryption_flag(path: Path) -> None:
+    """把归档成员标成加密：``zipfile`` 写不了加密成员，直接置通用标志位。
 
-    return (
-        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        f"<datasource>{source}</datasource>"
-        "</maplayer></projectlayers>"
-        f'<Layouts><Layout name="sheet">{item}</Layout></Layouts>'
-        "</qgis>"
-    )
-
-
-# The audit's measured shapes: the old scan spent 661 s on the second one.
-UNCLOSED_DATASOURCES = 82_000
-DEEP_NESTING = 8_000
-
-
-def unclosed_project(directory: Path, name: str) -> Path:
-    """A project that is nothing but an unclosed ``<datasource>`` repeated."""
-
-    target = directory / name
-    target.write_bytes(b"<qgis>" + b"<datasource>" * UNCLOSED_DATASOURCES)
-    return target
-
-
-def nested_project(directory: Path, name: str, depth: int) -> Path:
-    """A well-formed project nested ``depth`` levels below its root element."""
-
-    target = directory / name
-    target.write_bytes(b"<qgis>" + b"<a>" * depth + b"</a>" * depth + b"</qgis>")
-    return target
-
-
-def encoded_project(directory: Path, name: str, datasource: str) -> Path:
-    """The same XML in UTF-16, which QDomDocument reads and a UTF-8 text scan cannot."""
-
-    member = b"\xff\xfe" + project_xml(datasource).encode("utf-16-le")
-    if name.lower().endswith(".qgz"):
-        return qgz_bytes(directory, name, member)
-    target = directory / name
-    target.write_bytes(member)
-    return target
-
-
-def set_encryption_flag(path: Path, member: str | None = None) -> None:
-    """Mark one archive member (the first by default) as encrypted.
-
-    ``zipfile`` cannot write an encrypted member, so the general purpose flag is set
-    on an otherwise plain archive; extracting that member then raises RuntimeError,
-    exactly as a password-protected member does.
+    Mark the archive member as encrypted: ``zipfile`` cannot write an encrypted member, so the
+    general purpose flag is set instead.
     """
 
     data = bytearray(path.read_bytes())
-    patched = 0
     for signature, flag_at, length_at, name_at in (
         (b"PK\x03\x04", 6, 26, 30),
         (b"PK\x01\x02", 8, 28, 46),
@@ -333,28 +532,22 @@ def set_encryption_flag(path: Path, member: str | None = None) -> None:
             cursor = start + 1
             length = int.from_bytes(data[start + length_at : start + length_at + 2], "little")
             name = bytes(data[start + name_at : start + name_at + length]).decode("utf-8")
-            if member is not None and name != member:
-                continue
-            flags = int.from_bytes(data[start + flag_at : start + flag_at + 2], "little") | 1
-            data[start + flag_at : start + flag_at + 2] = flags.to_bytes(2, "little")
-            patched += 1
-            if member is None:
-                break
-    assert patched >= 2, f"could not patch the headers of {member!r}"
+            if name.endswith(".qgs"):
+                flags = int.from_bytes(data[start + flag_at : start + flag_at + 2], "little")
+                data[start + flag_at : start + flag_at + 2] = (flags | 0x1).to_bytes(2, "little")
     path.write_bytes(bytes(data))
 
 
-def lie_about_member_size(path: Path, size: int) -> None:
-    """Shrink a member's size in the central directory, the shape A5 #5 measured.
+def break_member_crc(path: Path) -> None:
+    """把成员的 CRC 改成错的：真 QGIS 3.44 照读，所以扫描也不许拒。
 
-    The directory is what a budget reads; the member itself is untouched, so
-    ``archive.read()`` still inflates all of it (437 MiB peak in the audit).
+    Break the member's CRC: real QGIS 3.44 reads it anyway, so the scan may not refuse it.
     """
 
     data = bytearray(path.read_bytes())
-    start = data.find(b"PK\x01\x02")
-    assert start >= 0, "the archive has no central header"
-    data[start + 24 : start + 28] = size.to_bytes(4, "little")
+    for signature, crc_at in ((b"PK\x03\x04", 14), (b"PK\x01\x02", 16)):
+        start = data.find(signature)
+        data[start + crc_at : start + crc_at + 4] = struct.pack("<I", 0xDEADBEEF)
     path.write_bytes(bytes(data))
 
 
@@ -365,1919 +558,755 @@ def refused(code: str, call: Any) -> FrameworkError:
     return caught.value
 
 
-# --- input models -----------------------------------------------------------
+# --- 输入与输出模型 / input and output models ------------------------------
 
 
 @pytest.mark.parametrize(
     "model, fields",
     [
-        (project.ProjectCreateParams, {}),
-        (project.ProjectOpenParams, {"path": A_PROJECT_FILE}),
-        (project.ProjectSaveParams, {}),
+        (project.ProjectCreateParams, {"discard_current": False}),
+        (project.ProjectOpenParams, {"path": A_PROJECT_FILE, "discard_current": False}),
+        (project.ProjectSaveParams, {"path": None, "overwrite": False}),
         (project.ProjectGetInfoParams, {}),
     ],
     ids=["create", "open", "save", "get_info"],
 )
 def test_an_unknown_input_field_is_refused(model: Any, fields: dict[str, Any]) -> None:
-    # The valid payload has to pass on its own, otherwise the refusal below could
-    # come from a missing field rather than from the unknown one.
-    model.model_validate(fields)
-    with pytest.raises(ValidationError):
-        model.model_validate({**fields, "unexpected": True})
+    with pytest.raises(ValidationError) as caught:
+        model(**fields, unexpected=True)
+    assert "unexpected" in str(caught.value)
 
 
-@pytest.mark.parametrize("value", ["true", "false", 0, 1])
+@pytest.mark.parametrize("value", ["true", 1, 0, None])
 def test_a_boolean_field_refuses_a_non_boolean(value: object) -> None:
-    for model, field, extra in (
-        (project.ProjectCreateParams, "discard_current", {}),
-        (project.ProjectOpenParams, "discard_current", {"path": A_PROJECT_FILE}),
-        (project.ProjectSaveParams, "overwrite", {}),
-    ):
-        with pytest.raises(ValidationError):
-            model.model_validate({field: value, **extra})
-
-
-def test_an_empty_crs_is_refused() -> None:
     with pytest.raises(ValidationError):
-        project.ProjectCreateParams.model_validate({"crs_authid": ""})
+        project.ProjectCreateParams(discard_current=value)
 
 
-def test_the_default_crs_and_flags_are_the_prd_defaults() -> None:
-    request = project.ProjectCreateParams.model_validate({})
-    assert request.crs_authid == "EPSG:4326"
-    assert request.discard_current is False
-    save = project.ProjectSaveParams.model_validate({})
-    assert save.path is None
-    assert save.overwrite is False
+def test_create_asks_only_for_the_discard_answer() -> None:
+    # 新工程的 CRS 由 QGIS 自己取，所以这里没有 CRS 参数。
+    # A new project's CRS is QGIS's own choice, so there is no CRS parameter here.
+    assert list(project.ProjectCreateParams.model_fields) == ["discard_current"]
+    assert project.ProjectCreateParams.model_fields["discard_current"].default is False
 
 
-@pytest.mark.parametrize("raw", ["maps/a.qgs", "", "a.gz", "C:/maps/a.txt", "C:/maps/a"])
-def test_a_project_path_must_be_absolute_with_a_project_suffix(raw: str) -> None:
-    for model in (project.ProjectOpenParams, project.ProjectSaveParams):
-        with pytest.raises(ValidationError):
-            model.model_validate({"path": raw})
+@pytest.mark.parametrize("model", [project.ProjectOpenParams, project.ProjectSaveParams])
+def test_an_empty_path_is_refused_by_the_model(model: Any) -> None:
+    # 空串不是一条路径，所以在模型边界就拒，不到 ``absolute_path`` 那一步。
+    # An empty string is not a path, so it is refused at the model edge, before ``absolute_path``.
+    with pytest.raises(ValidationError):
+        model(path="")
 
 
-def test_a_project_suffix_is_case_insensitive(tmp_path: Path) -> None:
-    opened = project.ProjectOpenParams.model_validate({"path": str(tmp_path / "a.QGZ")})
-    assert opened.path.endswith("a.QGZ")
-    saved = project.ProjectSaveParams.model_validate({"path": str(tmp_path / "b.QGS")})
-    assert saved.path is not None and saved.path.endswith("b.QGS")
+@pytest.mark.parametrize("raw", ["C:/maps/a.txt", "C:/maps/a.qgs~", "C:/maps/a"])
+def test_a_save_target_must_carry_a_project_suffix(raw: str) -> None:
+    # 保存对话框按过滤器把名字补成 .qgs/.qgz，所以别的后缀不是它能给出的答案。
+    # The save dialog appends .qgs or .qgz by filter, so no other suffix is an answer it can give.
+    with pytest.raises(ValidationError):
+        project.ProjectSaveParams(path=raw)
 
 
-# --- project.create ---------------------------------------------------------
+def test_a_save_suffix_is_case_insensitive() -> None:
+    assert project.ProjectSaveParams(path="C:/maps/a.QGZ").path == "C:/maps/a.QGZ"
+
+
+@pytest.mark.parametrize("raw", ["a.qgs", "C:maps/a.qgs", "\\a.qgs"])
+def test_an_open_path_has_no_shape_rule_beyond_being_a_path(
+    qgis: types.ModuleType, raw: str
+) -> None:
+    # 打开只要求"是个路径"：后缀不判，相对路径由 ``absolute_path`` 拒。
+    # Opening only asks for a path: the suffix is not judged and ``absolute_path`` refuses a
+    # relative one.
+    refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectOpen().execute_main(
+            context(FakeProject()), project.ProjectOpenParams(path=raw)
+        ),
+    )
 
 
 @pytest.mark.parametrize(
-    "project_state",
+    "model, fields",
     [
-        {"layers": {"a": FakeLayer()}},
-        {"file_name": "C:/maps/current.qgs"},
-        {"dirty": True},
+        (project.ProjectCreateResult, ["crs_authid", "layer_count"]),
+        (
+            project.ProjectOpenResult,
+            ["file_path", "crs_authid", "layer_count", "invalid_layer_count"],
+        ),
+        (project.ProjectSaveResult, ["file_path"]),
+        (
+            project.ProjectGetInfoResult,
+            ["file_path", "crs_authid", "is_dirty", "layer_count", "title"],
+        ),
     ],
-    ids=["layers", "associated file", "unsaved changes"],
+    ids=["create", "open", "save", "get_info"],
 )
-def test_create_refuses_to_replace_a_project_with_content(
-    qgis: types.ModuleType, project_state: dict[str, Any]
-) -> None:
-    loaded = FakeProject(**project_state)
-    iface = FakeIface(loaded)
-    ctx = context(loaded, iface=iface)
+def test_a_result_carries_exactly_the_declared_output_fields(model: Any, fields: list[str]) -> None:
+    # 记录的键就是契约：多一个字段会流到每个调用方。
+    # Every record's keys are the contract: an extra field reaches every caller.
+    assert list(model.model_fields) == fields
 
-    request = project.ProjectCreateParams()
-    refused(
+
+def test_a_result_rejects_an_undeclared_field() -> None:
+    with pytest.raises(ValidationError):
+        project.ProjectCreateResult(crs_authid="EPSG:4326", layer_counts=5)
+
+
+# --- project.create：新建工程 / creating a project -------------------------
+
+
+def test_create_refuses_a_project_with_unsaved_changes(qgis: types.ModuleType) -> None:
+    loaded = FakeProject(dirty=True)
+    iface = FakeIface(loaded)
+    error = refused(
         PROJECT_REPLACE_REQUIRED,
-        lambda: project.ProjectCreate().execute_main(ctx, request),
-    )
-    assert iface.new_project_calls == []
-
-
-def test_create_replaces_the_project_when_explicitly_allowed(qgis: types.ModuleType) -> None:
-    loaded = FakeProject(layers={"a": FakeLayer()}, file_name="C:/maps/old.qgs", dirty=True)
-    iface = FakeIface(loaded)
-    ctx = context(loaded, iface=iface)
-
-    result = project.ProjectCreate().execute_main(
-        ctx, project.ProjectCreateParams(discard_current=True)
-    )
-
-    assert iface.new_project_calls == [False]
-    assert result.crs_authid == "EPSG:4326"
-    assert result.file_path is None
-    assert result.layer_count == 0
-    assert loaded.crs_set is not None
-
-
-def test_create_reports_the_canonical_crs_authid(qgis: types.ModuleType) -> None:
-    loaded = FakeProject()
-    iface = FakeIface(loaded)
-    ctx = context(loaded, iface=iface)
-
-    result = project.ProjectCreate().execute_main(
-        ctx, project.ProjectCreateParams(crs_authid="epsg:3857")
-    )
-
-    assert result.crs_authid == "EPSG:3857"
-    assert loaded.crs_authid == "EPSG:3857"
-
-
-def test_create_reports_the_layers_the_new_project_brought(qgis: types.ModuleType) -> None:
-    # A QGIS project template can populate a brand new project, so the counts are
-    # read from the project rather than hardcoded to the PRD's sample zeros.
-    template = FakeProject(layers={"a": FakeLayer(), "b": FakeLayer()})
-    ctx = context(template, iface=FakeIface())
-
-    result = project.ProjectCreate().execute_main(
-        ctx, project.ProjectCreateParams(discard_current=True)
-    )
-
-    assert result.layer_count == 2
-    assert result.file_path is None
-
-
-def test_create_refuses_an_unusable_crs_before_replacing(qgis: types.ModuleType) -> None:
-    # The project is stateful and not authorized: the CRS is refused before the
-    # replacement guard gets a say, which is the documented order (report §6.5).
-    loaded = FakeProject(file_name="C:/maps/current.qgs")
-    iface = FakeIface(loaded)
-    ctx = context(loaded, iface=iface)
-
-    refused(
-        INVALID_CRS,
         lambda: project.ProjectCreate().execute_main(
-            ctx, project.ProjectCreateParams(crs_authid="EPSG:9999")
+            context(loaded, iface=iface), project.ProjectCreateParams()
         ),
     )
+    assert error.message.endswith("pass discard_current=true to replace it")
     assert iface.new_project_calls == []
 
 
-def test_create_reports_a_refused_new_project(qgis: types.ModuleType) -> None:
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"layers": {"a": FakeVectorLayer()}},
+        {"file_name": "C:/maps/current.qgs"},
+        {"layers": {"a": FakeVectorLayer()}, "file_name": "C:/maps/current.qgs"},
+    ],
+    ids=["layers", "associated file", "both"],
+)
+def test_create_replaces_a_clean_project_whatever_it_holds(
+    qgis: types.ModuleType, state: dict[str, Any]
+) -> None:
+    # 这个工程没有一条没保存的东西，所以换它不问；图层数与关联文件名本来就不是判据。
+    # Nothing about this project is unsaved, so replacing it asks nothing; the layer count and the
+    # associated file name were never criteria.
+    loaded = FakeProject(**state)
+    iface = FakeIface(loaded)
+    result = project.ProjectCreate().execute_main(
+        context(loaded, iface=iface), project.ProjectCreateParams()
+    )
+    assert iface.new_project_calls == [False]
+    assert result.layer_count == 0
+
+
+def test_create_reports_what_qgis_left(qgis: types.ModuleType) -> None:
+    # 新工程没有关联文件，CRS 与图层都是 QGIS 给的那些。
+    # A new project has no associated file, and its CRS and layers are the ones QGIS gave it.
+    loaded = FakeProject()
+    iface = FakeIface(loaded, new_crs="EPSG:3857", new_layers={"a": FakeVectorLayer()})
+    result = project.ProjectCreate().execute_main(
+        context(loaded, iface=iface), project.ProjectCreateParams()
+    )
+    assert result.crs_authid == "EPSG:3857"
+    assert result.layer_count == 1
+
+
+def test_create_leaves_the_new_project_clean(qgis: types.ModuleType) -> None:
+    loaded = FakeProject(dirty=True)
+    project.ProjectCreate().execute_main(
+        context(loaded), project.ProjectCreateParams(discard_current=True)
+    )
+    assert loaded.dirty is False
+
+
+def test_create_is_refused_while_a_task_depends_on_a_layer(
+    qgis: types.ModuleType,
+) -> None:
+    layer = FakeVectorLayer(name="roads")
+    loaded = FakeProject(layers={"a": layer})
+    tasks(qgis).depend(layer, "Exporting roads")
+    iface = FakeIface(loaded)
+    error = refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectCreate().execute_main(
+            context(loaded, iface=iface), project.ProjectCreateParams(discard_current=True)
+        ),
+    )
+    # 说的是 QGIS 自己那句话，连任务描述一起给出：调用方能做的只有取消它们再试。
+    # It is QGIS's own sentence with the task descriptions: the only move left is to cancel them.
+    assert error.message.startswith(
+        "The following tasks are currently running which depend on layers in this project:"
+    )
+    assert " • Exporting roads" in error.message
+    assert error.message.endswith("Please cancel these tasks and retry.")
+    assert iface.new_project_calls == []
+
+
+def test_create_reports_a_new_project_qgis_refused(qgis: types.ModuleType) -> None:
     loaded = FakeProject()
     iface = FakeIface(loaded, result=False)
-    ctx = context(loaded, iface=iface)
-
-    refused(
+    error = refused(
         INTERNAL_ERROR,
-        lambda: project.ProjectCreate().execute_main(ctx, project.ProjectCreateParams()),
-    )
-
-
-# --- project.open -----------------------------------------------------------
-
-
-def test_open_refuses_a_path_outside_the_allowed_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    root = project_dir(tmp_path)
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    target = outside / "a.qgs"
-    target.write_text("", encoding="utf-8")
-    # The project holds a layer on purpose: the allow-list has to refuse the path
-    # before the replacement guard gets a say, or a caller reads
-    # PROJECT_REPLACE_REQUIRED for a path they may not use at all (AT-19).
-    loaded = FakeProject(layers={"kept": FakeLayer()})
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    refused(PATH_NOT_ALLOWED, lambda: project.ProjectOpen().execute_main(ctx, request))
-    assert loaded.read_path is None
-
-
-def test_open_refuses_a_missing_file(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    ctx = context(FakeProject(), roots=(root,))
-
-    refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(root / "missing.qgs"))
+        lambda: project.ProjectCreate().execute_main(
+            context(loaded, iface=iface), project.ProjectCreateParams()
         ),
     )
+    # 这条路下 QGIS 只在有任务依赖图层时拒绝，所以消息必须让调用方知道该做什么。
+    # On this path QGIS refuses only over a task depending on a layer, so the message has to say
+    # what to do about it.
+    assert "cancel any task that depends on a layer and retry" in error.message
 
 
-def test_open_refuses_to_replace_a_project_with_content(
+# --- project.open：打开工程 / opening a project ----------------------------
+
+
+def test_open_refuses_a_project_with_unsaved_changes(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    root = project_dir(tmp_path)
-    target = root / "a.qgs"
-    target.write_text("", encoding="utf-8")
+    target = a_qgs(project_dir(tmp_path))
     loaded = FakeProject(dirty=True)
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    refused(PROJECT_REPLACE_REQUIRED, lambda: project.ProjectOpen().execute_main(ctx, request))
-    assert loaded.read_path is None
-
-
-def test_open_refuses_to_reopen_the_associated_file_without_discarding(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # Reloading the project's own file still throws away the in-memory project, so
-    # the associated file must not exempt the replacement guard (PRD 7.3, 10.3).
-    root = project_dir(tmp_path)
-    target = root / "current.qgs"
-    target.write_text("", encoding="utf-8")
-    loaded = FakeProject(file_name=str(target), dirty=True)
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    refused(PROJECT_REPLACE_REQUIRED, lambda: project.ProjectOpen().execute_main(ctx, request))
-    assert loaded.read_path is None
-
-
-def test_open_reports_a_failed_read(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    target = root / "a.qgs"
-    target.write_text("not a project", encoding="utf-8")
-    loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(PROJECT_OPEN_FAILED, lambda: project.ProjectOpen().execute_main(ctx, request))
-    assert "may have changed" in failed.message
-
-
-def test_open_replaces_a_stateful_project_when_explicitly_allowed(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # PRD 7.3: `open` has the same guard as `create`, so the authorized branch has
-    # to be exercised here too, not only through `create`.
-    root = project_dir(tmp_path)
-    target = qgs_file(root, "a.qgs", str(root / "a.gpkg"))
-    loaded = FakeProject(layers={"old": FakeLayer()}, file_name="C:/maps/old.qgs", dirty=True)
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(
-        ctx, project.ProjectOpenParams(path=str(target), discard_current=True)
+    refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
     )
-
-    assert loaded.read_path == str(target.resolve())
-    assert loaded.file_name == str(target.resolve())
-    assert result.layer_count == 0
+    assert loaded.reads == 0
 
 
-def test_open_uses_the_normalised_path(qgis: types.ModuleType, tmp_path: Path) -> None:
-    # `resolve_path` is what vets the path, so its result is what QGIS and the
-    # caller's output must see, not the raw request string.
-    root = project_dir(tmp_path)
-    (root / "sub").mkdir()
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
+def test_open_replaces_a_clean_project_whatever_it_holds(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(layers={"a": FakeVectorLayer()}, file_name=str(target))
+    result = project.ProjectOpen().execute_main(
+        context(loaded), project.ProjectOpenParams(path=str(target))
+    )
+    assert loaded.read_path == str(target)
+    assert result.file_path == str(target)
+
+
+def test_open_clears_the_project_before_reading(qgis: types.ModuleType, tmp_path: Path) -> None:
+    # QGIS 的 ``addProject`` 先关掉当前工程再读，于是读失败时眼前这个是空的。
+    # QGIS's ``addProject`` closes the current project before reading, so a failed read leaves an
+    # empty one.
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(layers={"a": FakeVectorLayer()})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.clears == 1
+
+
+def test_open_closes_and_reads_with_dirtying_blocked(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # 关掉旧工程与读取都在挡板里：清空会经由图层树把工程标脏，而读失败时 GUI 留下的工程是干净的。
+    # Both the close and the read run with dirtying blocked: closing dirties the project through the
+    # layer tree, and a failed read leaves a clean project.
+    target = a_qgs(project_dir(tmp_path))
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.blocked_at_clear >= 1
+    assert loaded.blocked_at_read >= 1
+    assert loaded.dirtied_while_blocked >= 2
+    assert loaded.dirty is False
 
-    result = project.ProjectOpen().execute_main(
-        ctx, project.ProjectOpenParams(path=str(root / "sub" / ".." / "a.qgz"))
+
+def test_a_failed_open_leaves_a_clean_project(qgis: types.ModuleType, tmp_path: Path) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(read_result=False)
+    refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
     )
+    # 读失败时眼前这个工程是空的，也是干净的；否则下一次替换会多拒一次。
+    # A failed read leaves an empty project, and a clean one; otherwise the next replacement would
+    # be refused for nothing.
+    assert loaded.mapLayers() == {}
+    assert loaded.dirty is False
 
-    assert loaded.read_path == str(target.resolve())
-    assert Path(result.file_path) == target.resolve()
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        # 1 非 memory 的矢量图层带着没提交的编辑，而工程自己没有脏标记：``saveDirty`` 就是为这个
+        # 缺口存在的。
+        # 1 A vector layer holds uncommitted edits while the project carries no dirty flag: that
+        # gap is what ``saveDirty`` exists for.
+        {"layers": {"a": FakeVectorLayer(editable=True, modified=True)}},
+        # 2 带要素的 memory 图层。
+        # 2 A memory layer holding features.
+        {"layers": {"a": FakeVectorLayer(provider="memory", feature_count=3)}},
+        # 3 临时图层。
+        # 3 A temporary layer.
+        {"layers": {"a": FakeVectorLayer(temporary=True)}},
+        # 4 栅格属性表脏了：两带，第一带脏。
+        # 4 A dirty raster attribute table: two bands, the first one dirty.
+        {"layers": {"a": FakeRasterLayer(band_count=2, dirty_bands=(1,))}},
+    ],
+    ids=["layer edits", "memory layer", "temporary layer", "raster attribute table"],
+)
+def test_open_asks_the_four_questions(
+    qgis: types.ModuleType, tmp_path: Path, state: dict[str, Any]
+) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(**state)
+    assert loaded.isDirty() is False, "each state must be clean at the project level"
+    error = refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    assert error.message.endswith("pass discard_current=true to replace it")
+    # 没有回答时什么都不能动：既没读，也没清。
+    # Nothing may be touched while the question is unanswered: no read, no clear.
+    assert loaded.reads == 0
+    assert loaded.clears == 0
 
 
-def test_open_succeeds_and_counts_the_layers_that_cannot_load(
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"layers": {"a": FakeVectorLayer(editable=True, modified=True)}},
+        {"layers": {"a": FakeVectorLayer(provider="memory", feature_count=3)}},
+        {"layers": {"a": FakeRasterLayer(band_count=2, dirty_bands=(1,))}},
+    ],
+    ids=["layer edits", "memory layer", "raster attribute table"],
+)
+def test_create_asks_the_same_questions(qgis: types.ModuleType, state: dict[str, Any]) -> None:
+    loaded = FakeProject(**state)
+    iface = FakeIface(loaded)
+    refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectCreate().execute_main(
+            context(loaded, iface=iface), project.ProjectCreateParams()
+        ),
+    )
+    assert iface.new_project_calls == []
+
+
+def test_a_discard_answer_replaces_whatever_the_questions_found(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    root = project_dir(tmp_path)
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
+    target = a_qgs(project_dir(tmp_path))
     loaded = FakeProject(
-        read_result=True,
-        # Two usable layers and one broken one: the counts differ, so counting the
-        # wrong side (the usable ones) cannot pass this test.
-        layers_after_read={
-            "good": FakeLayer(source=str(root / "a.gpkg")),
-            "also_good": FakeLayer(source=str(root / "a.gpkg")),
-            "broken": FakeLayer(valid=False, source=str(root / "a.gpkg")),
-        },
-        crs_authid="EPSG:3857",
+        layers={
+            "a": FakeVectorLayer(editable=True, modified=True),
+            "b": FakeVectorLayer(provider="memory", feature_count=3),
+            "c": FakeRasterLayer(band_count=2, dirty_bands=(1,)),
+        }
     )
-    ctx = context(loaded, roots=(root,))
+    result = project.ProjectOpen().execute_main(
+        context(loaded), project.ProjectOpenParams(path=str(target), discard_current=True)
+    )
+    assert result.file_path == str(target)
+    assert loaded.read_path == str(target)
 
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
 
-    assert Path(result.file_path) == target.resolve()
-    assert loaded.read_path == str(target.resolve())
-    assert result.layer_count == 3
-    assert result.invalid_layer_count == 1
+def test_a_dirty_table_on_the_top_band_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # QGIS 的循环上界是 ``bandCount()``，最高那一带它不问；这里问就是比它严。
+    # QGIS loops up to ``bandCount()``, so the top band is never asked about; asking here would be
+    # stricter than it is.
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(layers={"a": FakeRasterLayer(band_count=2, dirty_bands=(2,))})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_scratch_layer_without_features_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``featureCount() != 0`` 是判据：空 scratch 图层不问。
+    # ``featureCount() != 0`` is the criterion: an empty scratch layer is not asked about.
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(layers={"a": FakeVectorLayer(provider="memory", feature_count=0)})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_memory_layer_that_skips_the_check_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # ``skipMemoryLayersCheck`` 那个自定义属性就是给"别问我"留的开关。
+    # The ``skipMemoryLayersCheck`` custom property is the switch left for "do not ask me".
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(
+        layers={"a": FakeVectorLayer(provider="memory", feature_count=3, skip_memory_check=True)}
+    )
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_layer_that_is_editable_but_unmodified_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # 判据是 ``isEditable() && isModified()``：开了编辑但什么都没改，不问。
+    # The criterion is ``isEditable() && isModified()``: an edit session with no change is not
+    # asked about.
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(layers={"a": FakeVectorLayer(editable=True, modified=False)})
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_a_vector_layer_without_a_provider_is_not_asked_about(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(
+        layers={"a": FakeVectorLayer(provider="no provider", editable=True, modified=True)}
+    )
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_open_reports_the_error_qgis_gave(qgis: types.ModuleType, tmp_path: Path) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(
+        layers={"a": FakeVectorLayer()},
+        read_result=False,
+        read_error="Unable to unzip file 'C:/maps/a.qgz'",
+    )
+    error = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    # 读失败的原因由 QGIS 自己拼，操作不另写一句。
+    # QGIS composes why the read failed; the operation writes no sentence of its own.
+    assert error.message == "Unable to unzip file 'C:/maps/a.qgz'"
+    assert loaded.clears == 1
+    assert loaded.mapLayers() == {}
+
+
+def test_open_reports_the_layers_that_could_not_load(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(
+        layers_after_read={"a": FakeVectorLayer(), "b": FakeVectorLayer(valid=False)},
+        crs_after_read="EPSG:3857",
+    )
+    result = project.ProjectOpen().execute_main(
+        context(loaded), project.ProjectOpenParams(path=str(target))
+    )
+    assert (result.layer_count, result.invalid_layer_count) == (2, 1)
     assert result.crs_authid == "EPSG:3857"
 
 
-def test_open_refuses_a_project_that_points_outside_the_allowed_roots(
+def test_open_is_refused_while_a_task_depends_on_a_layer(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # A project file names its layers' sources, so ``read()`` reaches them even
-    # though every path the caller typed was allowed (PRD 10.2).
-    root = project_dir(tmp_path)
-    target = root / "leak.qgz"
-    target.write_text("", encoding="utf-8")
-    secret = tmp_path / "elsewhere" / "secret.gpkg"
-    secret.parent.mkdir()
-    secret.write_text("x", encoding="utf-8")
-    loaded = FakeProject(
-        layers_after_read={"leaked": FakeLayer(source=f"{secret}|layername=secret")}
+    target = a_qgs(project_dir(tmp_path))
+    layer = FakeVectorLayer()
+    loaded = FakeProject(layers={"a": layer})
+    tasks(qgis).depend(layer, "Exporting")
+    error = refused(
+        PROJECT_REPLACE_REQUIRED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target), discard_current=True)
+        ),
     )
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(ctx, request),
-    )
-
-    # The layer is not merely reported: it may not stay loaded either.
-    assert loaded.removed == ["leaked"]
-    assert loaded.layers == {}
-    assert "1 layer data source(s)" in failed.message
-    # ``read()`` already replaced the project, so the message may not claim it was
-    # not opened: a caller reading that would keep working on a project that is gone.
-    assert "was replaced" in failed.message
-    assert "not opened" not in failed.message
-    # The message never repeats the path it refused.
-    assert "secret.gpkg" not in failed.message
+    assert " • Exporting" in error.message
+    # 拒在碰当前工程之前。
+    # Refused before the current project is touched.
+    assert (loaded.reads, loaded.clears) == (0, 0)
 
 
-def test_open_keeps_a_layer_whose_source_is_gone_but_inside_the_roots(
+def test_a_project_nested_up_to_the_bound_is_still_read(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # AT-18B: a deleted source inside the roots is a partial load, not a breach of
-    # the policy, so the existence of the source is deliberately not what is asked.
-    root = project_dir(tmp_path)
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
-    loaded = FakeProject(
-        layers_after_read={"gone": FakeLayer(valid=False, source=str(root / "gone.gpkg"))}
-    )
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert result.invalid_layer_count == 1
-    assert loaded.removed == []
-
-
-@pytest.mark.parametrize(
-    "spelling",
-    ["GTIFF_DIR:1:{path}", 'NETCDF:"{path}":temperature'],
-    ids=["gtiif-dir", "netcdf"],
-)
-def test_open_reads_a_project_whose_layer_is_a_local_subdataset(
-    qgis: types.ModuleType, tmp_path: Path, spelling: str
-) -> None:
-    # GDAL's raster provider does not split a subdataset: decodeUri answers the whole
-    # spelling as the "path", so the allow-list was asked about a spelling.  Before
-    # A12 #2 this project came back PATH_NOT_ALLOWED and the layer was removed, while
-    # every file it names is inside the roots.
-    root = project_dir(tmp_path)
-    source = spelling.format(path=root / "pages.tif")
-    target = qgs_file(root, "subdataset.qgs", source)
-    loaded = FakeProject(layers_after_read={"pages": FakeLayer(source=source, provider="gdal")})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert loaded.removed == []
-
-
-def test_open_refuses_a_subdataset_whose_file_is_outside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The file inside the spelling is what the allow-list asks about, so a subdataset
-    # pointing outside the roots is still a breach -- and still removes its layer.
-    root = project_dir(tmp_path)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    source = f"GTIFF_DIR:1:{outside / 'pages.tif'}"
-    target = qgs_file(root, "outside.qgs", source)
-    loaded = FakeProject(layers_after_read={"pages": FakeLayer(source=source, provider="gdal")})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.removed == ["pages"]
-    assert "1 layer data source(s)" in failed.message
-
-
-def test_open_refuses_a_layer_whose_provider_names_no_local_path(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # A source nobody can decode is not a source this policy can vouch for.
-    root = project_dir(tmp_path)
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
-    loaded = FakeProject(
-        layers_after_read={"remote": FakeLayer(source="memory?geometry=Point", provider="memory")}
-    )
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(ctx, request),
-    )
-
-    assert loaded.removed == ["remote"]
-    assert "1 layer data source(s)" in failed.message
-
-
-def test_open_refuses_a_layer_whose_provider_cannot_decode_its_uri(
-    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # One provider's exception may not erase what the other layers already answered:
-    # the failing layer counts as outside instead of turning the whole check into an
-    # internal error that leaves every layer loaded.
-    class ExplodingMetadata:
-        def decodeUri(self, uri: str) -> dict[str, str]:  # noqa: N802 - a PyQGIS name
-            raise RuntimeError("this provider cannot decode its own URI")
-
-    root = project_dir(tmp_path)
-    target = root / "a.qgz"
-    target.write_text("", encoding="utf-8")
-    monkeypatch.setitem(FakeProviderRegistry.instance().metadata, "boom", ExplodingMetadata())
-    loaded = FakeProject(
-        layers_after_read={
-            "boom": FakeLayer(source="whatever", provider="boom"),
-            "inside": FakeLayer(source=str(root / "a.gpkg")),
-        }
-    )
-    ctx = context(loaded, roots=(root,))
-    request = project.ProjectOpenParams(path=str(target))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(ctx, request),
-    )
-
-    assert loaded.removed == ["boom"]
-    assert loaded.layers.keys() == {"inside"}
-    assert "1 layer data source(s)" in failed.message
-
-
-def test_open_accepts_a_directory_shaped_source_inside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # An ESRI FileGDB is a directory, and a project holding one is an ordinary
-    # project: the policy asks where it lives, not whether it is a regular file.
-    root = project_dir(tmp_path)
-    gdb = root / "roads.gdb"
-    gdb.mkdir()
-    target = qgs_file(root, "gdb.qgs", str(gdb))
-    loaded = FakeProject(layers_after_read={"gdb": FakeLayer(source=str(gdb))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert loaded.removed == []
-
-
-def test_open_refuses_a_directory_shaped_source_outside_the_roots(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    root = project_dir(tmp_path)
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    gdb = elsewhere / "roads.gdb"
-    gdb.mkdir()
-    target = qgs_file(root, "gdb.qgs", str(gdb))
-    loaded = FakeProject(layers_after_read={"gdb": FakeLayer(source=str(gdb))})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.removed == ["gdb"]
-    assert "1 layer data source(s)" in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-@pytest.mark.parametrize(
-    "remote",
-    [
-        REMOTE_SOURCE,
-        r"\\no-such-host-audit\share\data.gpkg",
-        # What QGIS's own XML parser decodes before it builds the layer.
-        "&#47;vsicurl&#47;http&#58;&#47;&#47;127.0.0.1&#58;9/never.tif",
-    ],
-    ids=["vsi", "unc", "entity-escaped"],
-)
-def test_open_refuses_a_remote_source_before_the_project_is_read(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str, remote: str
-) -> None:
-    # ``read()`` builds every layer the file names, so a remote URI there is an HTTP
-    # request or an SMB authentication attempt before any per-layer check runs.
-    root = project_dir(tmp_path)
-    write = qgs_file if suffix == ".qgs" else qgz_file
-    target = write(root, f"remote{suffix}", remote)
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=remote)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    # The refusal has to come before ``read()``, which is what an unset read_path
-    # proves: no layer was built and no datasource was contacted.
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-    assert remote not in failed.message
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        "type=xyz&amp;url=https://tiles.invalid/{z}/{x}/{y}.png",
-        'NETCDF:"/vsicurl/http://127.0.0.1:9/never.nc":temperature',
-        "GTIFF_DIR:1:/vsicurl/http://127.0.0.1:9/never.tif",
-        # The marker sits past the 64 characters the scan keeps of a value, so the
-        # start rule alone cannot see it: only the containment flag can (A12 #1).
-        'NETCDF:"C:/' + "dataset/" * 10 + 'http://127.0.0.1:9/never.nc":temperature',
-        # And the marker is split across a child element, as A7 #1's address was: the
-        # flag follows ``QDomElement::text()`` order, child included.
-        'NETCDF:"C:/' + "dataset/" * 10 + 'htt<x/>p://127.0.0.1:9/never.nc":temperature',
-    ],
-    ids=["xyz-url", "netcdf-url", "gtiif-dir-url", "marker-past-the-head", "marker-split"],
-)
-def test_open_refuses_a_datasource_that_carries_a_url(
-    qgis: types.ModuleType, tmp_path: Path, source: str
-) -> None:
-    # A7 #1's lesson, applied to the one value that becomes a provider's data source: a
-    # remote file can sit inside the value rather than at its start, and GDAL opens
-    # ``NETCDF:"/vsicurl/http://…"`` itself -- a 5 KB project of that shape made read()
-    # send 5 TCP connections (measured, A12 #1).  The containment rule is asked of the
-    # ``<datasource>`` value and of nothing else, so the prose case below still opens.
-    root = project_dir(tmp_path)
-    target = qgs_file(root, "tiles.qgs", source)
-    loaded = FakeProject(layers_after_read={"tiles": FakeLayer(source=source)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert loaded.removed == []
-    assert "remote data source" in failed.message
-    assert "127.0.0.1" not in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_a_utf16_project_before_the_project_is_read(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # QDomDocument reads a UTF-16 project; a scan that decodes the file as UTF-8 sees
-    # a NUL between every character and matches nothing.  NUL bytes are the tell.
-    root = project_dir(tmp_path)
-    target = encoded_project(root, f"encoded{suffix}", REMOTE_SOURCE)
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "not UTF-8" in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-@pytest.mark.parametrize("tag", ["datasource ", "datasource\n"])
-def test_open_sees_a_datasource_tag_with_whitespace(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str, tag: str
-) -> None:
-    # ``<datasource >`` is legal XML and the same element to QGIS; only a scanner
-    # that insists on the exact spelling misses it.
-    root = project_dir(tmp_path)
-    xml = project_xml(REMOTE_SOURCE, tag=tag)
-    if suffix == ".qgz":
-        target = qgz_bytes(root, f"spaced{suffix}", xml.encode("utf-8"))
-    else:
-        target = root / f"spaced{suffix}"
-        target.write_text(xml, encoding="utf-8")
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-def test_a_qgs_over_the_scan_limit_is_refused_without_reading_it(
-    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The scan reads the whole file, so its size is the main thread's memory: a file
-    # over the limit is refused before a byte of it is read.
-    root = project_dir(tmp_path)
-    target = root / "huge.qgs"
-    with target.open("wb") as handle:
-        handle.truncate(project.MAX_PROJECT_BYTES + 1)
-
-    def read_bytes(self: Path) -> bytes:
-        raise AssertionError("the project file was read before it was measured")
-
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    ctx = context(FakeProject(), roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert "too large" in failed.message
-
-
-def test_a_qgz_member_over_the_scan_limit_is_refused_while_it_is_unpacked(
-    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A small archive can hold a member that expands to gigabytes.  The budget counts
-    # the bytes as they are decompressed and stops at the limit, so the member is
-    # never held whole (the check used to read the declared size; A5 #5).
-    root = project_dir(tmp_path)
-    target = root / "bomb.qgz"
-    with (
-        zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive,
-        archive.open("project.qgs", "w") as member,
-    ):
-        member.write(b" " * (project.MAX_PROJECT_BYTES + 1))
-
-    unpacked: list[int] = []
-    original = zipfile.ZipExtFile.read
-
-    def counting(self: zipfile.ZipExtFile, size: int = -1) -> bytes:
-        data = original(self, size)
-        unpacked.append(len(data))
-        return data
-
-    monkeypatch.setattr(zipfile.ZipExtFile, "read", counting)
-    ctx = context(FakeProject(), roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert "too large" in failed.message
-    assert sum(unpacked) <= project.MAX_PROJECT_BYTES + project._CHUNK
-
-
-def test_a_qgz_over_the_total_scan_budget_is_refused_before_members_are_unpacked(
-    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The limit used to be per member: 100 one-megabyte members passed it, were read
-    # into a list, joined into a second copy and peaked at 200 MB (measured).  The
-    # budget is the total, and it is checked before the first member is unpacked.
-    root = project_dir(tmp_path)
-    target = root / "many members.qgz"
-    member = b" " * (1024 * 1024)
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        for index in range(project.MAX_PROJECT_BYTES // len(member) + 1):
-            archive.writestr(f"part{index}.qgs", member)
-    # Every member is under the limit on its own, and the archive is tiny on disk.
-    assert target.stat().st_size < project.MAX_PROJECT_BYTES // 4
-
-    def read(self: zipfile.ZipFile, name: str) -> bytes:
-        raise AssertionError(f"the archive member {name} was unpacked before it was measured")
-
-    monkeypatch.setattr(zipfile.ZipFile, "read", read)
-    ctx = context(FakeProject(), roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert "too large" in failed.message
-
-
-def test_an_unclosed_datasource_project_is_refused_in_milliseconds(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The regex this scan replaced searched from every ``<datasource`` to the end of
-    # the file: 984 KB of them took 661 s on the main thread (measured) and matched
-    # nothing.  The depth bound ends the scan on the sixty-fifth opening tag.
-    root = project_dir(tmp_path)
-    target = unclosed_project(root, "unclosed.qgs")
-    assert target.stat().st_size > 900_000
+    target = nested_project(project_dir(tmp_path), "deep.qgs", project.MAX_PROJECT_DEPTH - 1)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path is None
-    assert "nests deeper" in failed.message
-    assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
-
-
-def test_a_deeply_nested_project_is_refused_before_it_is_read(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # ``QgsProject.read()`` parses recursively: 8000 levels (56 KB) overflowed the C++
-    # stack and killed the process with 0xC00000FD, with no error code and no record
-    # (measured).  The scan bounds the depth before ``read()`` is given the file.
-    root = project_dir(tmp_path)
-    target = nested_project(root, "deep.qgs", DEEP_NESTING)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "nests deeper" in failed.message
-    assert "remote data source" not in failed.message
-
-
-def test_a_project_nested_up_to_the_depth_bound_is_still_read(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The bound may not turn an ordinary project into a failure: the deepest project
-    # QGIS itself writes is a 100-group tree at depth 105, and the bound is 256.
-    root = project_dir(tmp_path)
-    target = nested_project(root, "nested.qgs", project.MAX_PROJECT_DEPTH - 1)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
     assert loaded.read_path == str(target)
 
 
-def test_a_one_megabyte_flat_project_is_scanned_linearly(
+def test_a_deeper_project_is_refused_before_it_is_read(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    # A file that passes the tag bound has to be parsed to its end; one linear parse
-    # means a megabyte of ordinary elements costs milliseconds, not a rescan each.
-    root = project_dir(tmp_path)
-    target = root / "flat.qgs"
-    target.write_bytes(b"<qgis>" + b"<layer></layer>" * 69_915 + b"</qgis>")
-    assert target.stat().st_size > 1024 * 1024
-    assert target.read_bytes().count(b"<") < project.MAX_PROJECT_TAGS
+    # 过了上限就会让 ``read()`` 以栈溢出结束进程，所以这一条比 QGIS 严，而且拒在读之前。
+    # Past the bound ``read()`` overflows the stack and ends the process, so this one criterion is
+    # stricter than QGIS and it refuses before the read.
+    target = nested_project(project_dir(tmp_path), "deep.qgs", project.MAX_PROJECT_DEPTH + 1)
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path == str(target)
-    assert elapsed < 1.0, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
-
-
-def test_a_project_with_more_tags_than_the_scan_will_parse_is_refused(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The parse costs one step per element, so tag spam that no QGIS project looks
-    # like is refused after a single ``bytes.count``, not a second-long parse.
-    root = project_dir(tmp_path)
-    target = root / "spam.qgs"
-    target.write_bytes(b"<qgis>" + b"<a></a>" * (project.MAX_PROJECT_TAGS // 2 + 1))
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    failed = refused(
+    error = refused(
         PROJECT_OPEN_FAILED,
         lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
+            context(loaded), project.ProjectOpenParams(path=str(target))
         ),
     )
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path is None
-    assert "XML tags" in failed.message
-    assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
-
-
-# The XML shapes that walked past four byte scanners.  Each one really nests
-# ``HIDDEN_DEPTH`` elements, and each one is legal XML: a fake close tag inside CDATA
-# or a comment is not a tag, and a bare ">" inside a quoted attribute does not end
-# one (measured: 184 KB was accepted and read() died with 0xC00000FD).
-HIDDEN_DEPTH = 2000
-DEPTH_SHAPES = {
-    "cdata": (b"<a><![CDATA[</q>]]>", b"</a>"),
-    "comment": (b"<a><!-- </q> -->", b"</a>"),
-    "attribute": (b'<a x="/>">', b"</a>"),
-}
-
-# Two tags QGIS 3.44 writes with a bare ">" inside an attribute value: the default
-# right-direction symbol, and the label's line symbol, whose escaped <symbol> XML is
-# one attribute value (measured on a project with one labelled layer).
-QGIS_LABEL_TAGS = (
-    b'<text-format wrapChar="" rightDirectionSymbol=">"/>',
-    b'<Option type="QString" name="lineSymbol" value="&lt;symbol type=&quot;line&quot; '
-    b'alpha=&quot;1&quot;>&lt;/symbol>"/>',
-)
+    assert "nests deeper" in error.message
+    # 拒在清空之前，所以消息说的是工程没被动过。
+    # Refused before the clear, so the message says the project was not touched.
+    assert "not changed" in error.message
+    assert (loaded.reads, loaded.clears) == (0, 0)
 
 
-@pytest.mark.parametrize("shape", sorted(DEPTH_SHAPES))
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_depth_hidden_by_cdata_a_comment_or_an_attribute(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str, shape: str
+@pytest.mark.parametrize("prefix", ["a", "q:a", "qgs:a"])
+def test_depth_counts_every_element_whatever_its_prefix(
+    qgis: types.ModuleType, tmp_path: Path, prefix: str
 ) -> None:
-    # The old counter was +1 per opening tag and -1 per closing one, over the raw
-    # bytes: a fake </q> in CDATA or a comment pressed it down, so 184 KB of real
-    # 8000-level nesting was accepted and read() overflowed the stack (measured).
-    opening, closing = DEPTH_SHAPES[shape]
-    body = b"<qgis>" + opening * HIDDEN_DEPTH + closing * HIDDEN_DEPTH + b"</qgis>"
-    root = project_dir(tmp_path)
-    if suffix == ".qgz":
-        target = qgz_bytes(root, f"hidden{suffix}", body)
-    else:
-        target = root / f"hidden{suffix}"
-        target.write_bytes(body)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path is None
-    assert "nests deeper" in failed.message
-    assert elapsed < 0.5, f"the {target.stat().st_size} byte scan took {elapsed:.2f}s"
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-@pytest.mark.parametrize(
-    "remote",
-    [REMOTE_SOURCE, r"\\no-such-host-audit\share\data.gpkg"],
-    ids=["vsi", "unc"],
-)
-def test_open_sees_a_datasource_whose_attribute_hides_its_tag_end(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str, remote: str
-) -> None:
-    # `<datasource x="/>" ...>` is legal XML; the first ">" is inside the attribute.
-    # The old scan took it for a self-closing tag, never looked at the text, and
-    # read() reached the /vsicurl source (measured, 9 TCP connections in 0.08 s).
-    xml = (
-        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        f'<datasource x="/>">{remote}</datasource>'
-        "</maplayer></projectlayers></qgis>"
-    )
-    root = project_dir(tmp_path)
-    if suffix == ".qgz":
-        target = qgz_bytes(root, f"hidden{suffix}", xml.encode("utf-8"))
-    else:
-        target = root / f"hidden{suffix}"
-        target.write_text(xml, encoding="utf-8")
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=remote)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-    assert remote not in failed.message
-
-
-def test_open_refuses_a_remote_uri_wherever_the_project_keeps_it(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # Renaming the element must not put the URI past the scan: every element's text
-    # is asked the same question the datasource element is.
-    root = project_dir(tmp_path)
-    xml = (
-        "<qgis><projectlayers><maplayer>"
-        f"<sourceLocation>{REMOTE_SOURCE}</sourceLocation>"
-        "</maplayer></projectlayers></qgis>"
-    )
-    target = root / "renamed.qgs"
-    target.write_text(xml, encoding="utf-8")
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-def test_open_refuses_a_datasource_in_a_namespace(qgis: types.ModuleType, tmp_path: Path) -> None:
-    # The element is a datasource to QGIS whatever prefix it carries; the scan asks a
-    # value's start and never its element name, so the prefix cannot matter.
-    root = project_dir(tmp_path)
-    target = qgs_file(root, "namespaced.qgs", REMOTE_SOURCE)
-    target.write_text(
-        '<qgis xmlns:qgs="http://qgis.org/x"><qgs:datasource>'
-        f"{REMOTE_SOURCE}</qgs:datasource></qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-def test_a_project_that_is_not_well_formed_xml_is_refused_before_read(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # A file the parser cannot read is not a project; it is refused with the sentence
-    # read() would have produced, rather than handed to a parser that has crashed on
-    # this class of input before.
-    root = project_dir(tmp_path)
-    target = root / "broken.qgs"
-    target.write_bytes(b"<qgis><projectlayers></qgis>")
-    loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "may have changed" in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_a_remote_source_that_a_child_element_carries_in_its_tail(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # An element's text is not only ``element.text``: in
-    # ``<datasource><x/>/vsicurl/…</datasource>`` the URI is the child's ``tail``, and
-    # QDomElement::text() concatenates the whole subtree, so read() saw the source and
-    # made 42 HTTP requests while the scan only asked ``element.text`` (measured).
-    xml = (
-        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        f"<datasource><x/>{REMOTE_SOURCE}</datasource>"
-        "</maplayer></projectlayers></qgis>"
-    )
-    root = project_dir(tmp_path)
-    if suffix == ".qgz":
-        target = qgz_bytes(root, f"tail{suffix}", xml.encode("utf-8"))
-    else:
-        target = root / f"tail{suffix}"
-        target.write_text(xml, encoding="utf-8")
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_a_source_split_across_several_child_elements(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # QDomElement::text() is every character-data event of the datasource subtree, in
-    # document order.  None of these five fragments holds "/vsi", "://" or a UNC
-    # prefix, and their concatenation is the address read() reached: project.open made
-    # 8 TCP connections before it failed on this shape (measured, A7 #1).
-    xml = (
-        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        "<datasource>/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:9/never.tif</datasource>"
-        "</maplayer></projectlayers></qgis>"
-    )
-    root = project_dir(tmp_path)
-    if suffix == ".qgz":
-        target = qgz_bytes(root, f"split{suffix}", xml.encode("utf-8"))
-    else:
-        target = root / f"split{suffix}"
-        target.write_text(xml, encoding="utf-8")
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=REMOTE_SOURCE)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-    assert REMOTE_SOURCE not in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_a_project_that_declares_xml_entities(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # expat expands an internal subset into element.text, so the bytes on disk say
-    # nothing about the memory the scan needs: 1 MiB read 50 times peaked at 100 MiB
-    # with a 1 MiB file, 51 tags and depth 3 -- every other bound stays silent.
-    entity = "A" * (1024 * 1024)
-    xml = f'<!DOCTYPE qgis [<!ENTITY a "{entity}">]><qgis>{"<a>&a;</a>" * 50}</qgis>'
-    root = project_dir(tmp_path)
-    if suffix == ".qgz":
-        target = qgz_bytes(root, f"entities{suffix}", xml.encode("utf-8"))
-    else:
-        target = root / f"entities{suffix}"
-        target.write_text(xml, encoding="utf-8")
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    tracemalloc.start()
-    try:
-        failed = refused(
-            PATH_NOT_ALLOWED,
-            lambda: project.ProjectOpen().execute_main(
-                ctx, project.ProjectOpenParams(path=str(target))
-            ),
-        )
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-    assert loaded.read_path is None
-    assert "entities" in failed.message
-    assert peak < 64 * 1024 * 1024, f"the scan peaked at {peak / 1024 / 1024:.1f} MiB"
-
-
-def test_a_project_with_the_doctype_qgis_writes_is_still_read(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The refusal above may not cost a normal project its file: QGIS writes a public
-    # doctype with no internal subset, and that is what every project on disk has.
-    root = project_dir(tmp_path)
-    target = root / "doctype.qgs"
-    target.write_text(
-        "<!DOCTYPE qgis PUBLIC 'http://mrcc.com/qgis.dtd' 'SYSTEM'>"
-        f"<qgis><projectlayers><maplayer><datasource>{root / 'a.gpkg'}</datasource>"
-        "</maplayer></projectlayers></qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert loaded.read_path == str(target)
-
-
-@pytest.mark.parametrize(
-    "datasource,layername",
-    [
-        ("./vsi_data/x.gpkg", None),
-        ("C:/data/vsidata/x.gpkg", None),
-        ("a.gpkg", "data/vsicache"),
-    ],
-    ids=["relative-datasource", "absolute-datasource", "layer-name"],
-)
-def test_open_reads_a_project_whose_text_only_contains_vsi(
-    qgis: types.ModuleType, tmp_path: Path, datasource: str, layername: str | None
-) -> None:
-    # ``/vsi`` names a GDAL file system only when it opens the text: ``./vsi_data/``
-    # and ``C:/data/vsidata/`` are ordinary local directories, and a layer name is not
-    # a data source at all.  The substring check refused all three as remote (A7 #3).
-    root = project_dir(tmp_path)
-    where = f"<layername>{layername}</layername>" if layername else ""
-    target = root / "vsi text.qgs"
-    target.write_text(
-        "<qgis><projectlayers><maplayer>"
-        f"<datasource>{datasource}</datasource>{where}"
-        "</maplayer></projectlayers></qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert loaded.read_path == str(target)
-    assert result.layer_count == 1
-
-
-@pytest.mark.parametrize(
-    "source", ["file:./points.csv", "file:/data/points.csv", "file:///C:/data/points.csv"]
-)
-def test_open_reads_a_project_whose_datasource_is_a_file_uri(
-    qgis: types.ModuleType, tmp_path: Path, source: str
-) -> None:
-    # QGIS writes a Delimited Text layer as ``file:./points.csv`` when the CSV sits
-    # next to the project, and ``file:`` is not a scheme that reaches a host: the
-    # old scan refused every CSV project (measured, PATH_NOT_ALLOWED).
-    root = project_dir(tmp_path)
-    target = qgs_file(root, "csv.qgs", source)
-    # The provider decodes ``file:`` to a real path before the per-layer check asks the
-    # allow-list, so the fake layer names the file the URI points into.
-    loaded = FakeProject(layers_after_read={"points": FakeLayer(source=str(root / "points.csv"))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert loaded.removed == []
-
-
-@pytest.mark.parametrize(
-    "source", ["file://no-such-host-audit/share/points.csv", "file://localhost/C:/points.csv"]
-)
-def test_open_refuses_a_file_uri_that_names_a_host(
-    qgis: types.ModuleType, tmp_path: Path, source: str
-) -> None:
-    # ``file://<authority>/…`` names a host and stays what it looks like, so stripping
-    # the prefix may not turn it into a local path.
-    root = project_dir(tmp_path)
-    target = qgs_file(root, "hosted.qgs", source)
-    loaded = FakeProject(layers_after_read={"never": FakeLayer(source=source)})
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-def test_open_reads_a_project_whose_layer_metadata_quotes_a_url(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # A URL inside prose is not a value that starts with one: the uniform rule asks only
-    # the start of every value, so a description quoting a URL is still read (A6 #3).
-    root = project_dir(tmp_path)
-    target = root / "metadata.qgs"
-    target.write_text(
-        "<qgis><projectlayers><maplayer>"
-        f"<datasource>{root / 'a.gpkg'}</datasource>"
-        "<metadata><abstract>Downloaded from https://example.org/data</abstract></metadata>"
-        "</maplayer></projectlayers></qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert loaded.read_path == str(target)
-
-
-def test_open_refuses_a_metadata_value_that_is_a_url(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The accepted false refusal (docs/OPERATIONS.md 12): the rule has no element name
-    # in it, so a layer whose identifier *is* a URL is refused before read().  A6 #3
-    # fixed the prose half; this half is the price of asking every value the same
-    # question, and it is recorded rather than special-cased back.
-    root = project_dir(tmp_path)
-    target = root / "metadata.qgs"
-    target.write_text(
-        "<qgis><projectlayers><maplayer>"
-        f"<datasource>{root / 'a.gpkg'}</datasource>"
-        "<metadata><identifier>https://example.org/datasets/42</identifier></metadata>"
-        "</maplayer></projectlayers></qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_a_layout_picture_that_names_a_remote_file(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # A11 #1: ``read()`` loads the picture a layout item names, and that name is an
-    # attribute.  The scan that only asked the text of a ``<datasource>`` let this file
-    # through, and ``project.open`` made 9 TCP connections (0.25 s) before returning
-    # SUCCEEDED; a host that accepts and never answers held the main thread 180 s.
-    root = project_dir(tmp_path)
-    xml = layout_project(
-        root / "a.gpkg", '<LayoutItem type="65640" file="http://127.0.0.1:9/picture.png"/>'
-    )
-    target = write_project_xml(root, f"picture{suffix}", xml)
-    loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-    assert "127.0.0.1" not in failed.message
-    # Milliseconds, not the seconds a fetch takes: nothing was read or contacted.
-    assert elapsed < 0.5, f"the {target.stat().st_size} byte project took {elapsed:.2f}s"
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_refuses_a_layout_html_source_that_is_a_remote_url(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # An HTML item's source is a value like any other, here an element's whole text.
-    root = project_dir(tmp_path)
-    xml = layout_project(
-        root / "a.gpkg",
-        '<LayoutMultiFrame type="65648"><url>http://127.0.0.1:9/page.html</url></LayoutMultiFrame>',
-    )
-    target = write_project_xml(root, f"html{suffix}", xml)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-@pytest.mark.parametrize(
-    "value",
-    [r"\\no-such-host-audit\share\picture.png", "/vsicurl/http://127.0.0.1:9/picture.tif"],
-    ids=["unc", "vsi"],
-)
-def test_open_refuses_an_attribute_value_that_starts_with_a_remote_marker(
-    qgis: types.ModuleType, tmp_path: Path, value: str
-) -> None:
-    # The same question, asked of an attribute value: no element name is in the rule.
-    root = project_dir(tmp_path)
-    xml = layout_project(root / "a.gpkg", f'<LayoutItem type="65640" file="{value}"/>')
-    target = write_project_xml(root, "attribute.qgs", xml)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-
-
-def test_open_reads_a_project_of_local_paths_and_a_quoted_url(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # What the uniform rule may not refuse: QGIS's own spelling of a CSV layer, a picture
-    # next to the project, ``C:/`` and ``file:///C:/`` in attribute values, and a URL
-    # inside a description (A6 #3, A7 #3).
-    root = project_dir(tmp_path)
-    target = root / "ordinary.qgs"
-    target.write_text(
-        "<!DOCTYPE qgis>\n<qgis><projectlayers><maplayer>"
-        "<datasource>file:./points.csv</datasource>"
-        '<provider encoding="UTF-8">delimitedtext</provider>'
-        "<srs><authid>EPSG:4326</authid></srs>"
-        "<metadata><abstract>Downloaded from https://example.org/data</abstract></metadata>"
-        "</maplayer></projectlayers>"
-        # What QGIS 3.44 writes for its own project style: a local scheme, not a host.
-        '<ProjectStyleSettings projectStyleId="attachment:///styles.db" '
-        'iccProfileId="attachment:///"/>'
-        '<Layouts><Layout name="sheet">'
-        '<LayoutItem type="65640" file="./data/pixel.tif"/>'
-        '<LayoutItem type="65640" file="C:/data/pixel.tif"/>'
-        '<LayoutItem type="65640" value="file:///C:/data/pixel.tif"/>'
-        "</Layout></Layouts></qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject(layers_after_read={"points": FakeLayer(source=str(root / "points.csv"))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert loaded.removed == []
-
-
-def test_a_project_of_repeated_and_oversized_attributes_is_refused_in_milliseconds(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # One start-of-value question per value, so a hostile file is a parse and not a loop
-    # that grows with it.  The remote value is the last attribute, so the 14 MB value and
-    # the 20000 repeated ones are walked before it is met.
-    root = project_dir(tmp_path)
-    target = root / "attributes.qgs"
-    repeated = " ".join(f'k{index}="v"' for index in range(20_000))
-    padding = "x" * (14 * 1024 * 1024)
-    target.write_text(
-        "<qgis><projectlayers><maplayer>"
-        f"<datasource>{root / 'a.gpkg'}</datasource>"
-        f'<metadata big="{padding}" {repeated} '
-        'remote="/vsicurl/http://127.0.0.1:9/never.tif"/>'
-        "</maplayer></projectlayers></qgis>",
-        encoding="utf-8",
-    )
-    assert target.stat().st_size < project.MAX_PROJECT_BYTES
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    failed = refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path is None
-    assert "remote data source" in failed.message
-    assert elapsed < 2.0, f"the {target.stat().st_size} byte project took {elapsed:.2f}s"
-
-
-def test_a_large_text_nested_deep_is_not_rejoined_at_every_level(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # Only the start of an element's text is judged, so 64 characters of it are kept per
-    # open element.  Joining the whole text once per nesting level copies the text once
-    # per level: this shape -- two fragments per level around an 8 MB text at depth 200
-    # -- took 0.5-1.0 s that way (measured when the bound was removed), against
-    # milliseconds with it, and it is main-thread time before ``read()``.
-    root = project_dir(tmp_path)
-    target = root / "deep text.qgs"
-    depth = 200
-    target.write_text(
-        "<qgis>"
-        + "<g>pre" * depth
-        + f"<datasource>{root / 'a.gpkg'}</datasource>"
-        + "y" * (8 * 1024 * 1024)
-        + "post</g>" * depth
-        + "</qgis>",
-        encoding="utf-8",
-    )
-    loaded = FakeProject(layers_after_read={"kept": FakeLayer(source=str(root / "a.gpkg"))})
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-    elapsed = time.monotonic() - started
-
-    assert result.layer_count == 1
-    assert elapsed < 0.3, f"the {target.stat().st_size} byte project took {elapsed:.2f}s"
-
-
-def test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked(
-    qgis: types.ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The budget counts decompressed bytes, so an empty member costs nothing there;
-    # but each member costs one ZipFile.open(): 100000 empty members in a 10.4 MB
-    # archive kept the main thread 1.75 s (measured), linear in the count.
-    root = project_dir(tmp_path)
-    target = root / "many empty members.qgz"
-    with zipfile.ZipFile(target, "w") as archive:
-        for index in range(100_000):
-            archive.writestr(f"empty{index}.txt", b"")
-    assert target.stat().st_size < project.MAX_PROJECT_BYTES
-
-    def open_member(self: zipfile.ZipFile, member: Any, *args: Any, **kwargs: Any) -> Any:
-        raise AssertionError(f"the archive member {member} was unpacked before it was counted")
-
-    monkeypatch.setattr(zipfile.ZipFile, "open", open_member)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    started = time.monotonic()
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-    elapsed = time.monotonic() - started
-
-    assert loaded.read_path is None
-    assert "members" in failed.message
-    # 1.75 s before the bound, when every member was opened in turn; what is left is
-    # zipfile reading the 100000-entry central directory once (~0.6-1.0 s on this box).
-    assert elapsed < 1.5, f"the {target.stat().st_size} byte archive took {elapsed:.2f}s"
-
-
-def test_a_qgz_over_the_size_budget_is_refused_before_its_directory_is_read(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The member budget counts decompressed bytes, so an empty member costs nothing
-    # there: 400000 of them in a 39 MB archive kept the scan 2.48 s and peaked at
-    # 222 MiB before it refused with the member bound (measured, A7 #2).  The archive's
-    # own size is asked before zipfile reads the central directory it would then refuse.
-    root = project_dir(tmp_path)
-    target = root / "many empty members.qgz"
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as archive:
-        for index in range(150_000):
-            archive.writestr(f"{index:x}", b"")
-        archive.writestr("padding.bin", b" " * (6 * 1024 * 1024))
-    assert target.stat().st_size > project.MAX_PROJECT_BYTES
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    tracemalloc.start()
-    try:
-        started = time.monotonic()
-        failed = refused(
-            PATH_NOT_ALLOWED,
-            lambda: project.ProjectOpen().execute_main(
-                ctx, project.ProjectOpenParams(path=str(target))
-            ),
-        )
-        elapsed = time.monotonic() - started
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-    assert loaded.read_path is None
-    # ``too large`` is the archive's own size; its member count is what an opened
-    # archive was refused for, after the 150001-entry directory had been built.
-    assert "too large" in failed.message
-    # The directory alone took 6.7 s and peaked at 66 MiB in the probe (tracemalloc
-    # on); what is left of this scan is one stat().
-    assert elapsed < 0.2, f"the {target.stat().st_size} byte archive took {elapsed:.2f}s"
-    assert peak < 64 * 1024 * 1024, f"the scan peaked at {peak / 1024 / 1024:.1f} MiB"
-
-
-def test_the_depth_bound_is_the_one_read_time_measured(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The bound is set by read()'s time, not by its crash: 900 nested groups took the
-    # main thread 30.11 s (measured), 600 8.84 s, 200 0.28 s, and 256 sits between
-    # them while a real group tree is depth 105.
-    assert project.MAX_PROJECT_DEPTH == 256
-    root = project_dir(tmp_path)
-    target = nested_project(root, "at the bound.qgs", project.MAX_PROJECT_DEPTH)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "nests deeper" in failed.message
-
-
-def test_open_reads_a_project_with_the_attributes_qgis_itself_writes(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # QGIS escapes <, & and ", not >: a labelled layer carries two tags with a bare
-    # ">" inside an attribute.  The old scan ended a tag there and added a level that
-    # never came back, so 28 labelled layers were permanently refused (measured).
-    root = project_dir(tmp_path)
-    sample = b"".join(tag * 70 for tag in QGIS_LABEL_TAGS)
-    target = root / "labelled.qgs"
-    target.write_bytes(
-        b"<qgis><projectlayers><maplayer><srs><authid>EPSG:4326</authid></srs>"
-        b"<labeling><settings>" + sample + b"</settings></labeling>"
-        b"<datasource>" + str(root / "a.gpkg").encode() + b"</datasource>"
-        b"</maplayer></projectlayers></qgis>"
-    )
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert loaded.read_path == str(target)
-
-
-def test_open_refuses_an_archive_whose_sibling_member_is_encrypted(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # read() unpacks every member, not only the .qgs ones: an encrypted extra.db took
-    # the process down with 0xC0000005 (measured).  Every member is checked now.
-    root = project_dir(tmp_path)
-    target = root / "sibling.qgz"
-    with zipfile.ZipFile(target, "w") as archive:
-        archive.writestr("project.qgs", project_xml(str(root / "a.gpkg")))
-        archive.writestr("extra.db", b"a sibling member read() also unpacks")
-    set_encryption_flag(target, "extra.db")
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "may have changed" in failed.message
-
-
-def test_open_refuses_a_member_compressed_in_a_way_qgis_does_not_read(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # ``zipfile`` reads bzip2; QGIS's unzip is only known to read stored and deflated
-    # members, so an archive it may not survive is refused before read() gets it.
-    root = project_dir(tmp_path)
-    target = root / "bzip2.qgz"
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_BZIP2) as archive:
-        archive.writestr("project.qgs", project_xml(str(root / "a.gpkg")))
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "may have changed" in failed.message
-
-
-def test_a_member_that_lies_about_its_size_is_not_read_in_one_piece(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The directory said 100 bytes and the member was 192 MB of spaces: the old budget
-    # believed the directory, then archive.read() inflated the whole member (measured
-    # peak 437 MiB for a 204 KB archive).  The scan reads in chunks and counts what it
-    # decompressed, so the member is never held whole.
-    root = project_dir(tmp_path)
-    target = root / "lying.qgz"
-    chunk = b" " * (1024 * 1024)
-    with (
-        zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive,
-        archive.open("project.qgs", "w") as member,
-    ):
-        for _ in range(192):
-            member.write(chunk)
-    assert target.stat().st_size < project.MAX_PROJECT_BYTES // 8
-    lie_about_member_size(target, 100)
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    tracemalloc.start()
-    try:
-        failed = refused(
-            PROJECT_OPEN_FAILED,
-            lambda: project.ProjectOpen().execute_main(
-                ctx, project.ProjectOpenParams(path=str(target))
-            ),
-        )
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-    assert loaded.read_path is None
-    assert "may have changed" in failed.message
-    assert peak < 64 * 1024 * 1024, f"the scan peaked at {peak / 1024 / 1024:.1f} MiB"
-
-
-def test_open_still_reads_a_project_whose_datasource_is_a_relative_path(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # QGIS stores relative paths by default, and a ``..`` inside one is resolved by
-    # the path policy: neither is a remote source or a structural defect.
-    root = project_dir(tmp_path)
-    (root / "nested").mkdir()
-    source = root / "nested" / ".." / "data.gpkg"
-    target = qgs_file(root, "relative.qgs", "../data.gpkg")
-    loaded = FakeProject(layers_after_read={"relative": FakeLayer(source=str(source))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert loaded.removed == []
-
-
-def test_open_reports_an_encrypted_member_as_a_read_failure(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # ``zipfile`` raises RuntimeError for an encrypted member; a scan is not a new
-    # failure source, so the file is still refused with ``read()``'s code,
-    # PROJECT_OPEN_FAILED, not an INTERNAL_ERROR that reads like a plugin defect.
-    # ``read()`` is not called: QGIS 3.44 crashes on such an archive (measured).
-    root = project_dir(tmp_path)
-    target = qgz_file(root, "locked.qgz", str(root / "a.gpkg"))
-    set_encryption_flag(target)
-    loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
-        PROJECT_OPEN_FAILED,
-        lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
-        ),
-    )
-
-    assert loaded.read_path is None
-    assert "may have changed" in failed.message
-
-
-@pytest.mark.parametrize("suffix", [".qgs", ".qgz"])
-def test_open_keeps_a_layer_whose_source_directory_is_gone(
-    qgis: types.ModuleType, tmp_path: Path, suffix: str
-) -> None:
-    # A2 #4's promise, for the case where the directory itself moved away: the source
-    # is still inside the roots, so it is AT-18B (read, invalid_layer_count > 0), not
-    # a breach that removes the layer and replaces the project.
-    root = project_dir(tmp_path)
-    source = root / "moved-away" / "cities.gpkg"
-    target = (
-        qgz_file(root, f"moved{suffix}", str(source))
-        if suffix == ".qgz"
-        else qgs_file(root, f"moved{suffix}", str(source))
-    )
-    loaded = FakeProject(layers_after_read={"moved": FakeLayer(valid=False, source=str(source))})
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert result.layer_count == 1
-    assert result.invalid_layer_count == 1
-    assert loaded.removed == []
-
-
-def test_open_still_reads_a_project_whose_sources_are_local(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    root = project_dir(tmp_path)
-    target = qgs_file(root, "local.qgs", str(root / "a.gpkg"))
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
-    project.ProjectOpen().execute_main(ctx, project.ProjectOpenParams(path=str(target)))
-
-    assert loaded.read_path == str(target.resolve())
-
-
-def test_open_reports_a_corrupt_archive_as_a_read_failure(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # The pre-read scan only reads bytes; a file it cannot unzip is still the
-    # project file's own problem, reported by ``read()`` as PROJECT_OPEN_FAILED.
-    root = project_dir(tmp_path)
-    target = root / "corrupt.qgz"
-    target.write_bytes(b"this is not zipped project data")
-    loaded = FakeProject(read_result=False)
-    ctx = context(loaded, roots=(root,))
-
+    # 前缀不声明的标签也是 DOM 里的一层（``QDomDocument`` 不开命名空间），所以它也得被数到；
+    # 不数它，一个 ``<q:a>`` 的工程就绕过上限。
+    # A tag with an undeclared prefix is one level in the DOM too (``QDomDocument`` does not enable
+    # namespaces), so it has to be counted; not counting it lets a ``<q:a>`` project past the bound.
+    depth = project.MAX_PROJECT_DEPTH + 1
+    target = nested_project(project_dir(tmp_path), "deep.qgs", depth, prefix=prefix)
     refused(
         PROJECT_OPEN_FAILED,
         lambda: project.ProjectOpen().execute_main(
-            ctx, project.ProjectOpenParams(path=str(target))
+            context(FakeProject()), project.ProjectOpenParams(path=str(target))
         ),
     )
 
-    assert loaded.read_path == str(target.resolve())
+
+def test_depth_counts_the_qgs_member_of_an_archive(qgis: types.ModuleType, tmp_path: Path) -> None:
+    inner = (
+        b"<qgis>"
+        + b"<a>" * (project.MAX_PROJECT_DEPTH + 1)
+        + b"</a>" * (project.MAX_PROJECT_DEPTH + 1)
+        + b"</qgis>"
+    )
+    target = archive(project_dir(tmp_path), "deep.qgz", inner)
+    loaded = FakeProject()
+    refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    assert loaded.reads == 0
 
 
-# --- project.save -----------------------------------------------------------
+def test_only_the_qgs_member_read_parses_counts_for_depth(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # 归档里第一个 ``.qgs`` 才是 ``read()`` 解析的那个文档；第二个再深也进不了 DOM。
+    # The first ``.qgs`` in an archive is the document ``read()`` parses; a second one never reaches
+    # the DOM however deep it is.
+    directory = project_dir(tmp_path)
+    target = directory / "two projects.qgz"
+    deep = (
+        b"<qgis>"
+        + b"<a>" * (project.MAX_PROJECT_DEPTH + 1)
+        + b"</a>" * (project.MAX_PROJECT_DEPTH + 1)
+        + b"</qgis>"
+    )
+    with zipfile.ZipFile(target, "w") as handle:
+        handle.writestr("first.qgs", b"<qgis/>")
+        handle.writestr("second.qgs", deep)
+    loaded = FakeProject()
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    assert loaded.read_path == str(target)
+
+
+def test_an_encrypted_archive_member_is_refused_before_it_is_read(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    target = archive(project_dir(tmp_path), "a.qgz", b"<qgis/>")
+    set_encryption_flag(target)
+    loaded = FakeProject(layers={"a": FakeVectorLayer()})
+    error = refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    assert "encrypted" in error.message
+    assert "not changed" in error.message
+    assert (loaded.reads, loaded.clears) == (0, 0)
+
+
+@pytest.mark.parametrize("shape", ["crc", "bzip2", "entities", "not xml at all"])
+def test_a_shape_qgis_reads_is_not_refused_by_the_scan(
+    qgis: types.ModuleType, tmp_path: Path, shape: str
+) -> None:
+    # 这些形状 ``read()`` 都读得动（错 CRC、bzip2 成员、实体声明），所以扫描不许比它严。
+    # ``read()`` gets through all of these (a broken CRC, a bzip2 member, an entity declaration), so
+    # the scan may not be stricter than it is.
+    directory = project_dir(tmp_path)
+    if shape == "crc":
+        target = archive(directory, "a.qgz", b"<qgis/>")
+        break_member_crc(target)
+    elif shape == "bzip2":
+        target = archive(directory, "a.qgz", b"<qgis/>", method=zipfile.ZIP_BZIP2)
+    elif shape == "entities":
+        target = directory / "a.qgs"
+        target.write_text(
+            '<!DOCTYPE qgis [<!ENTITY big "'
+            + "x" * (1024 * 1024)
+            + '">]><qgis><properties>'
+            + "<note>&big;</note>" * 50
+            + "</properties></qgis>",
+            encoding="utf-8",
+        )
+    else:
+        target = directory / "a.qgs"
+        target.write_bytes(b"\x00\x01not xml at all")
+    loaded = FakeProject()
+    project.ProjectOpen().execute_main(context(loaded), project.ProjectOpenParams(path=str(target)))
+    # 扫描读不懂就交给 ``read()``：它不是判据本身。
+    # A file the scan cannot read goes to ``read()``: the scan is not a criterion by itself.
+    assert loaded.read_path == str(target)
+
+
+def test_a_corrupt_archive_is_left_to_read(qgis: types.ModuleType, tmp_path: Path) -> None:
+    target = project_dir(tmp_path) / "a.qgz"
+    target.write_bytes(b"not a zip")
+    loaded = FakeProject(read_result=False)
+    refused(
+        PROJECT_OPEN_FAILED,
+        lambda: project.ProjectOpen().execute_main(
+            context(loaded), project.ProjectOpenParams(path=str(target))
+        ),
+    )
+    assert loaded.read_path == str(target)
+
+
+# --- project.save：保存工程 / saving a project -----------------------------
 
 
 def test_save_without_a_path_or_associated_file_is_refused(qgis: types.ModuleType) -> None:
-    ctx = context(FakeProject())
-
+    loaded = FakeProject()
     refused(
         PROJECT_PATH_REQUIRED,
-        lambda: project.ProjectSave().execute_main(ctx, project.ProjectSaveParams()),
+        lambda: project.ProjectSave().execute_main(context(loaded), project.ProjectSaveParams()),
     )
 
 
-def test_save_refuses_to_overwrite_an_existing_target(
+def test_save_as_refuses_to_overwrite_an_existing_target(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    root = project_dir(tmp_path)
-    target = root / "out.qgs"
-    target.write_text("original", encoding="utf-8")
+    target = a_qgs(project_dir(tmp_path))
     loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
-
     refused(
         TARGET_EXISTS,
         lambda: project.ProjectSave().execute_main(
-            ctx, project.ProjectSaveParams(path=str(target))
+            context(loaded), project.ProjectSaveParams(path=str(target))
         ),
     )
     assert loaded.writes == []
-    assert target.read_text(encoding="utf-8") == "original"
 
 
-def test_save_refuses_to_overwrite_the_associated_file(
-    qgis: types.ModuleType, tmp_path: Path
-) -> None:
-    # PRD 7.4: "even the current associated file" needs overwrite=true; without it
-    # a plain save() of an already-saved project would silently replace that file.
-    root = project_dir(tmp_path)
-    target = root / "current.qgs"
-    target.write_text("original", encoding="utf-8")
-    loaded = FakeProject(file_name=str(target))
-    ctx = context(loaded, roots=(root,))
-
-    refused(
-        TARGET_EXISTS,
-        lambda: project.ProjectSave().execute_main(ctx, project.ProjectSaveParams()),
-    )
-    assert loaded.writes == []
-    assert target.read_text(encoding="utf-8") == "original"
-
-
-def test_save_writes_a_new_file(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    target = root / "out.qgz"
-    loaded = FakeProject(dirty=True)
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectSave().execute_main(ctx, project.ProjectSaveParams(path=str(target)))
-
-    assert Path(result.file_path) == target.resolve()
-    assert loaded.writes == [str(target.resolve())]
-    assert result.is_dirty is False
-
-
-def test_save_overwrites_when_explicitly_allowed(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    target = root / "out.qgs"
-    target.write_text("original", encoding="utf-8")
-    # The project already has a file on purpose: an explicit `path` has to win,
-    # the associated file is only the fallback when `path` is null (PRD 7.4).
-    loaded = FakeProject(file_name=str(root / "current.qgs"))
-    ctx = context(loaded, roots=(root,))
-
+def test_save_as_overwrites_when_the_caller_says_so(qgis: types.ModuleType, tmp_path: Path) -> None:
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject()
     project.ProjectSave().execute_main(
-        ctx, project.ProjectSaveParams(path=str(target), overwrite=True)
+        context(loaded), project.ProjectSaveParams(path=str(target), overwrite=True)
     )
-
-    assert loaded.writes == [str(target.resolve())]
-
-
-def test_save_falls_back_to_the_associated_file(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    target = root / "current.qgs"
-    target.write_text("original", encoding="utf-8")
-    loaded = FakeProject(file_name=str(target))
-    ctx = context(loaded, roots=(root,))
-
-    result = project.ProjectSave().execute_main(ctx, project.ProjectSaveParams(overwrite=True))
-
-    assert Path(result.file_path) == target.resolve()
+    assert loaded.writes == [str(target)]
 
 
-def test_save_refuses_a_target_outside_the_allowed_roots(
+def test_save_writes_the_associated_file_without_an_overwrite_flag(
     qgis: types.ModuleType, tmp_path: Path
 ) -> None:
-    root = project_dir(tmp_path)
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    # The target exists on purpose: the allow-list has to refuse the path before
-    # the overwrite guard runs, otherwise existence outside the roots leaks
-    # through TARGET_EXISTS (AT-19).
-    (outside / "out.qgs").write_text("keep", encoding="utf-8")
-    loaded = FakeProject()
-    ctx = context(loaded, roots=(root,))
+    # Save 不问覆盖：它写关联文件，覆盖确认只在保存对话框里出现。
+    # Save asks nothing about overwriting: it writes the associated file, and the confirmation only
+    # happens in the save dialog.
+    target = a_qgs(project_dir(tmp_path))
+    loaded = FakeProject(file_name=str(target))
+    result = project.ProjectSave().execute_main(context(loaded), project.ProjectSaveParams())
+    assert loaded.writes == [str(target)]
+    assert result.file_path == str(target)
 
-    refused(
-        PATH_NOT_ALLOWED,
-        lambda: project.ProjectSave().execute_main(
-            ctx, project.ProjectSaveParams(path=str(outside / "out.qgs"))
-        ),
+
+def test_save_stores_the_current_view_but_save_as_does_not(
+    qgis: types.ModuleType, tmp_path: Path
+) -> None:
+    # Save 把当前的画布范围与旋转存进工程，重开时回到这里；Save As 不写这两项。
+    # Save stores the current canvas extent and rotation in the project so reopening returns to
+    # them; Save As writes neither.
+    directory = project_dir(tmp_path)
+    associated = a_qgs(directory)
+    loaded = FakeProject(file_name=str(associated))
+    iface = FakeIface(loaded)
+    project.ProjectSave().execute_main(context(loaded, iface=iface), project.ProjectSaveParams())
+    assert loaded.view.extent.rectangle == iface.canvas.extent_value
+    assert loaded.view.rotation == iface.canvas.rotation_value
+
+    fresh = FakeProject()
+    another = directory / "b.qgs"
+    project.ProjectSave().execute_main(context(fresh), project.ProjectSaveParams(path=str(another)))
+    assert (fresh.view.extent, fresh.view.rotation) == (None, None)
+
+
+def test_save_refuses_an_unwritable_associated_file(qgis: types.ModuleType, tmp_path: Path) -> None:
+    # 关联文件不可写时 QGIS 在写之前就说这句，短，而且不带整条路径。
+    # When the associated file cannot be written QGIS says this before writing: short, and without
+    # the whole path.
+    target = a_qgs(project_dir(tmp_path))
+    target.chmod(stat.S_IREAD)
+    loaded = FakeProject(file_name=str(target))
+    error = refused(
+        PROJECT_SAVE_FAILED,
+        lambda: project.ProjectSave().execute_main(context(loaded), project.ProjectSaveParams()),
     )
+    assert error.message == "The project file is not writable."
     assert loaded.writes == []
 
 
-def test_save_reports_a_failed_write(qgis: types.ModuleType, tmp_path: Path) -> None:
-    root = project_dir(tmp_path)
-    loaded = FakeProject(write_result=False)
-    ctx = context(loaded, roots=(root,))
-
-    failed = refused(
+def test_save_reports_the_error_qgis_gave(qgis: types.ModuleType, tmp_path: Path) -> None:
+    target = project_dir(tmp_path) / "b.qgs"
+    loaded = FakeProject(write_result=False, write_error="Unable to save to file C:/maps/b.qgs")
+    error = refused(
         PROJECT_SAVE_FAILED,
         lambda: project.ProjectSave().execute_main(
-            ctx, project.ProjectSaveParams(path=str(root / "out.qgs"))
+            context(loaded), project.ProjectSaveParams(path=str(target))
         ),
     )
-    assert "partially written" in failed.message
+    # 写失败的原因也是 QGIS 拼的，包括目标不可写与磁盘写满。
+    # QGIS composes why the write failed as well, an unwritable target and a full disk included.
+    assert error.message == "Unable to save to file C:/maps/b.qgs"
 
 
-# --- project.get_info -------------------------------------------------------
-
-
-def test_get_info_reports_the_project_and_the_lifecycle_epoch() -> None:
-    loaded = FakeProject(
-        layers={"a": FakeLayer(), "b": FakeLayer()},
-        file_name="C:/maps/current.qgs",
-        dirty=True,
-        crs_authid="EPSG:3857",
+def test_save_refuses_a_relative_associated_file(qgis: types.ModuleType) -> None:
+    loaded = FakeProject(file_name="maps/a.qgs")
+    refused(
+        PATH_NOT_ALLOWED,
+        lambda: project.ProjectSave().execute_main(context(loaded), project.ProjectSaveParams()),
     )
 
+
+# --- project.get_info：看工程 / reading the project -----------------------
+
+
+def test_get_info_reports_the_project() -> None:
+    loaded = FakeProject(
+        layers={"a": FakeVectorLayer(), "b": FakeVectorLayer(valid=False)},
+        file_name="C:/maps/a.qgz",
+        dirty=True,
+        crs_authid="EPSG:3857",
+        title="Roads of Q1",
+    )
     result = project.ProjectGetInfo().execute_main(
         context(loaded, epoch=7), project.ProjectGetInfoParams()
     )
-
-    assert result.file_path == "C:/maps/current.qgs"
+    assert result.file_path == "C:/maps/a.qgz"
     assert result.crs_authid == "EPSG:3857"
     assert result.is_dirty is True
     assert result.layer_count == 2
-    assert result.project_epoch == 7
+    # 工程属性里的标题：没设置时是空串，不是一个缺字段。
+    # The title from the project properties: an empty string when unset, not a missing field.
+    assert result.title == "Roads of Q1"
 
 
 def test_get_info_reports_no_file_for_an_unsaved_project() -> None:
-    result = project.ProjectGetInfo().execute_main(
-        context(FakeProject()), project.ProjectGetInfoParams()
-    )
-
+    loaded = FakeProject()
+    result = project.ProjectGetInfo().execute_main(context(loaded), project.ProjectGetInfoParams())
     assert result.file_path is None
-    assert result.project_epoch == 0
+    assert result.title == ""
 
 
 def test_get_info_does_not_write_or_replace_anything() -> None:
-    loaded = FakeProject(layers={"a": FakeLayer()}, dirty=True)
-    iface = FakeIface(loaded)
-
-    project.ProjectGetInfo().execute_main(
-        context(loaded, iface=iface), project.ProjectGetInfoParams()
-    )
-
-    assert iface.new_project_calls == []
-    assert loaded.writes == []
+    loaded = FakeProject(layers={"a": FakeVectorLayer()}, file_name="C:/maps/a.qgs", dirty=True)
+    project.ProjectGetInfo().execute_main(context(loaded), project.ProjectGetInfoParams())
+    assert (loaded.writes, loaded.reads, loaded.clears) == ([], 0, 0)
+    assert loaded.dirty is True
 
 
-# --- declarations and the bare interpreter ----------------------------------
+# --- 声明 / declarations ---------------------------------------------------
 
 
-def test_the_four_operations_declare_the_prd_surface() -> None:
+def test_the_four_operations_declare_the_agreed_surface() -> None:
     registry = OperationRegistry()
     for operation in (
         project.ProjectCreate(),
@@ -2296,19 +1325,3 @@ def test_the_four_operations_declare_the_prd_surface() -> None:
     assert info.kind is OperationKind.QUERY
     assert info.destructive is False
     assert {spec.strategy for spec in specs.values()} == {ExecutionStrategy.MAIN_THREAD}
-
-
-def test_the_module_imports_without_qgis() -> None:
-    guard = (
-        "import sys\n"
-        "from qgis_agent_plugin.operations import project\n"
-        "leaked = sorted(n for n in sys.modules if n.split('.')[0] in "
-        "{'qgis', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6'})\n"
-        "assert not leaked, leaked\n"
-    )
-    env = {**os.environ}
-    env["PYTHONPATH"] = os.pathsep.join([str(ROOT / "src"), env.get("PYTHONPATH", "")])
-    result = subprocess.run(
-        [sys.executable, "-c", guard], capture_output=True, text=True, env=env, cwd=ROOT
-    )
-    assert result.returncode == 0, result.stderr

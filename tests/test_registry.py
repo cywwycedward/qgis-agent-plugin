@@ -1,4 +1,8 @@
-"""The registry: one name, one declaration, and specs that cannot be edited."""
+"""注册表：一个名字只对应一个声明，发出去的规格是副本，谁都改不回注册表。
+
+The registry: one name maps to one declaration, and a spec handed out is a copy, so no
+caller can edit the registered surface by holding a reference to it.
+"""
 
 from __future__ import annotations
 
@@ -25,11 +29,17 @@ from qgis_agent_plugin.core.registry import OperationRegistry
 
 
 class NoParams(Params):
-    """An operation with no parameters still refuses an unknown key."""
+    """参数为空的输入模型：多给一个没声明的键照样被拒绝。
+
+    An operation with no parameters still refuses a key it does not declare.
+    """
 
 
 class EmptyResult(BaseModel):
-    """An operation with no result fields."""
+    """没有结果字段的输出模型，与无参数输入配对使用。
+
+    An output model with no result fields, paired with the parameterless input.
+    """
 
 
 class QueryOp(BaseQuery[NoParams, EmptyResult], MainThreadOperationMixin[NoParams, EmptyResult]):
@@ -114,7 +124,6 @@ def test_a_spec_carries_the_declaration_and_the_schemas() -> None:
     assert spec.kind is OperationKind.COMMAND
     assert spec.strategy is ExecutionStrategy.MAIN_THREAD
     assert spec.destructive is True
-    assert spec.pydantic_major == 2
     assert spec.input_schema["additionalProperties"] is False
     assert spec.output_schema["properties"] == {}
 
