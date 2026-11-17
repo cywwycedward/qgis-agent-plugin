@@ -4,7 +4,7 @@ QGIS Agent 插件本体。本文件只做索引与摘要，规范在 `docs/agent
 
 | 文档 | 何时读 | 内容 |
 | --- | --- | --- |
-| `docs/agents/DEVELOP.md` | 动手改代码之前（唯一的开发规范） | 分层与导入规则、代码与注释规范、协议与状态机、十七个 Operation 的契约、错误码、Git、已知边界 |
+| `docs/agents/DEVELOP.md` | 动手改代码之前（唯一的开发规范） | 分层与导入规则、代码与注释规范、行为准则、协议与状态机、十七个 Operation 的契约与判据、错误码、Git、已知边界 |
 | `docs/agents/TEST.md` | 写或跑测试时 | 两层测试、假对象写法、坞窗与裸解释器守卫、验收跑的目录守卫与退出码 |
 | `docs/agents/ENVIRONMENT.md` | 跑任何 Python、装依赖、找路径之前 | 两个解释器各自的职责、依赖现状、uv 的坑、路径与版本 |
 | `docs/agents/DELEGATION.md` | 要把活派给别的 agent 时 | `hc` + `herdr-app`、一个功能的五步、交接文档命名 |

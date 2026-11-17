@@ -450,13 +450,22 @@ GIS 开发者，和不懂中文的下一个 agent；两种人都要一句话看�
 
 1. 先想再写（Think Before Coding）：不确定就说明假设、列出选项，不默默选一个；有更简单的
    做法要主动提；不清楚就停下来问。
-2. 简单优先（Simplicity First）：只写解决问题需要的代码；不做没被要求的抽象、配置与灵活性；
-   200 行能写成 50 行就重写。
-3. 外科式改动（Surgical Changes）：只碰必须碰的行；不顺手"优化"相邻代码；发现无关的死代码
-   只说、不删；自己造成的孤儿 import/变量要清掉。
-4. 目标驱动执行（Goal-Driven Execution）：把任务变成可验证的目标（先写会红的测试，再让它
+2. 简单优先（Simplicity First）：只写解决问题需要的代码。抽象、配置、开关、判断都算代码：
+   没有第二个调用方就不抽象，没人要求的灵活性不写，被调用方答得了的问题不在调用方先答一遍
+   （`QgsProject.read()` 会告诉你文件打不开，就不必在它前面先探一遍）。
+3. 破坏性重构（Breaking Changes）：接口随需求改，旧形状随改随删——旧参数、旧字段、别名、
+   向后兼容分支、只为旧行为存在的测试与迁移代码都不留。调用方就在本仓库里（坞窗、agent、
+   验收脚本），没有要照顾的第三方。
+4. 归位（A+B-B=A）：需求是 A、实现是 A+B 时，改法是把 B 删掉，而不是加一个 C 遮住 B。多数的
+   C 长得像开关：一个布尔参数、一个跳过条件、一条 `if`，行为变成了 A，B 却还留在代码里。
+5. 名字与注释描述代码，不描述需求：`save_target_suffix` 说的是这个字段是什么，
+   `desktop_save_target` 说的是谁提的要求——同一个字段，后者随需求一起过期。注释同理，
+   写法与双语要求见 §5.5。
+6. 外科式改动（Surgical Changes）：只碰这次改动必须碰的行；与它无关的死代码只说、不删；
+   自己造成的孤儿 import/变量要清掉。
+7. 目标驱动执行（Goal-Driven Execution）：把任务变成可验证的目标（先写会红的测试，再让它
    绿）；多步任务先列计划与每步的验证方式。
-5. 改动必须覆盖它的全部落点：调用方、测试、fixture、配置、导出的名字。新增 Operation 时
+8. 改动必须覆盖它的全部落点：调用方、测试、fixture、配置、导出的名字。新增 Operation 时
    `tests/test_package.py` 的数量与名字断言、`metadata.txt` 里的计数、本文档 §1 与 §7.6 的
    表格必须同步改，否则文档与代码开始互相矛盾。
 
@@ -1220,6 +1229,42 @@ absolute_path(raw: str) -> Path
 | `OUTPUT_VALIDATION_FAILED` | Operation 的返回值不合它自己声明的输出模型 |
 | `INTERNAL_ERROR` | 未预期异常；`message` 是下面几种之一：`<异常类型名>: unexpected failure`、`QGIS did not create a new project`、`the task ended without a result`、`the completion of this execution failed`、`<id>: <旧状态> -> <新状态> is not a transition`、`<id>: <状态> is final and cannot change`；`processing.run_algorithm` 的失败是另一种：算法自己报的原文（§7.6），异常文本为空时用它的类型名 |
 
+### 7.8 operation 的判据来自 QGIS 的同一个动作
+
+写或改一个 operation，先在 QGIS 3.44 的源码里找到它对应的那个用户动作（菜单项、按钮、对话框
+背后的函数），再照着写。源码检出在
+`D:\core\workspace\mine\github_mine\gis-compare\project\QGIS`，四个起点：`src/app`（菜单与
+动作）、`src/gui`（对话框、图层树、符号页）、`src/core`（`QgsProject`、`QgsMapLayer`、`QgsStyle`
+这些模型层）、`python/plugins/processing`（Processing 的 Python 半边；它与 `src/analysis`、
+`src/core/processing` 的 C++ 半边在同一个注册表里）。
+
+抄这五样：
+
+| 项 | 抄什么 |
+| --- | --- |
+| 顺序 | 先做什么、后做什么；哪一步失败时，前面几步留下的状态是什么 |
+| 接口与参数 | 用哪个类哪个方法；参数的含义、默认值、可接受范围 |
+| 拒绝条件 | 什么输入被拒，由谁拒——QGIS 自己会拒的，这里就不再先拒一遍 |
+| 拒绝的文本 | 那句话怎么拼出来的：拼进去的图层名、字段名、provider 的抱怨 |
+| 返回值与副作用 | 成功时返回什么；改了哪些可见状态（图层树、脏标记、当前工程、选择、重绘） |
+
+界面上的话走返回值，这是唯一允许的差异：
+
+| GUI 的送达方式 | 这里的送达方式 |
+| --- | --- |
+| `iface.messageBar().pushInfo/pushWarning(...)` | `Result` 里的一个字符串字段 |
+| `QMessageBox.warning/critical(...)` | `FrameworkError(code, message)` 的 `message` |
+| `QgsMessageLog.logMessage(...)` | 同上；日志照写，但那句话必须能作为返回值取到 |
+| 一次动作产生多条消息 | 按现有形状返回成列表（`processing.run_algorithm` 的 `messages` 就是这种） |
+
+调用方是 agent：它读得到返回值，而一个模态窗口它读不到、也关不掉。所以消息进返回值，界面元素
+不进代码。
+
+比 GUI 严的地方只有 §7.2 那两条会让进程直接消失的输入；其余一律交给 QGIS。
+
+**完成判据**：这个 operation 的每条判据都能指到源码里的同一处（文件、函数、那一行判断），或者
+指到“这是我们自己加的”并把它删掉。指不出来的那条不算写完。
+
 ---
 
 ## 8. Operation 开发规范
@@ -1400,6 +1445,7 @@ class LayerSumNumericField(
 - [ ] 输出只含 JSON 安全值；新模型带 `extra="forbid"`。
 - [ ] QGIS/Qt 只在函数体内 import（`ui/dock.py` 除外）。
 - [ ] 路径参数只走 `absolute_path`，不自己做存在性预检。
+- [ ] 判据取自 QGIS 3.44 源码里的同一个用户动作，消息以字符串回到调用方（§7.8）。
 - [ ] 可预期失败用 `FrameworkError` + 既有错误码。
 - [ ] 后台操作：快照纯数据、带 epoch、执行中检查取消、结果无 NaN/Inf。
 - [ ] 新增了模块的话，它已加进 `tests/test_package.py` 的导入列表。
