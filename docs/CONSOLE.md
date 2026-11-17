@@ -408,3 +408,12 @@ layer.set_renderer(把上面那份喂回去) -> {"renderer_type": "singleSymbol"
 | 父级组隐藏时的 `visible=true / effective_visible=false` | 需要 GUI 图层树里的组；单测覆盖，Console 未跑 |
 | 多个后台任务排队（`max_active_background=2` 的 FIFO） | 探针里三次 9000 要素求和都在三轮事件循环内跑完，看不到第三个停在 `QUEUED`；单测覆盖该路径 |
 | 配置键写入（`QgsSettings().setValue(...)`） | 会改用户 `QGIS3.ini`，只验证了读：缺失键返回 `None`、小于 1 的计数被拒 |
+
+## 12. `processing.run_algorithm` 的参数实例
+
+运行参数在 [processing-run-algorithm-examples.json](processing-run-algorithm-examples.json)：正常跑通、参数被拒、
+CRS 不一致与取消这几类各有几条，每条带着实测的状态与错误码。`<LAYER_ID>` 之类是占位符，`placeholders`
+一栏说明怎么取；`runner.python_console` 是那段可直接粘进 Console 的壳。
+
+这些参数表不是新写的样例：它们是验收跑的 P04–P20 用过的原样，`measured` 里记着那次跑的汇总。
+

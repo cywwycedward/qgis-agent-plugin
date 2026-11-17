@@ -1,0 +1,336 @@
+{
+  "operation": "processing.run_algorithm",
+  "measured": {
+    "qgis": "3.44.13-Solothurn",
+    "python": "3.12.13",
+    "pydantic": "2.13.4",
+    "date": "2026-11-17",
+    "acceptance_run": "PASS 90, FAIL 0, SKIP 3 of 93 cases"
+  },
+  "source": "tests/qgis_integration/cases_processing.py 的 P04-P20；每条用例的参数表原样抄在这里",
+  "placeholders": {
+    "<LAYER_ID>": "工程里一个矢量图层的 id，取自 layer.list 的 layers[].layer_id",
+    "<SECOND_LAYER_ID>": "另一个矢量图层 id；与 <LAYER_ID> 相同也能跑",
+    "<FIELD_NAME>": "图层里的一个数值字段名，例如 pop；取法：[f.name() for f in iface.activeLayer().fields()]",
+    "<OUTPUT_GPKG>": "一个绝对路径，例如 C:\\temp\\out.gpkg",
+    "<POINTS_LAYER_ID>": "EPSG:4326 的点图层 id（CRS 用例需要真几何）",
+    "<MASK_LAYER_ID>": "EPSG:32633 的面图层 id，与上面那个 CRS 不同"
+  },
+  "runner": {
+    "note": "Python Console，每行一条；插件已加载时 iface.agent_engine 才存在",
+    "python_console": [
+      "import json",
+      "engine = iface.agent_engine",
+      "",
+      "def try_run(algorithm_id, parameters, **extra):",
+      "    record = engine.run_sync(",
+      "        \"processing.run_algorithm\",",
+      "        {\"algorithm_id\": algorithm_id, \"parameters\": parameters, **extra},",
+      "    )",
+      "    print(record.status, record.error.code if record.error else \"\")",
+      "    if record.error:",
+      "        print(\"  \", record.error.message)",
+      "    else:",
+      "        print(\"  outputs:\", json.dumps(record.result[\"outputs\"], ensure_ascii=False)[:300])",
+      "    return record",
+      "",
+      "# 一个矢量图层当 INPUT",
+      "layer_id = next(",
+      "    layer[\"layer_id\"]",
+      "    for layer in engine.run_sync(\"layer.list\", {}).result[\"layers\"]",
+      "    if layer[\"kind\"] == \"vector\"",
+      ")"
+    ]
+  },
+  "dock": {
+    "fields": "algorithm_id 一栏、parameters 一栏；parameters 是单行输入框，必须一行 JSON，多行粘不进去",
+    "placeholders": "粘贴前把尖括号那几处换掉；<LAYER_ID> 取自同一次会话里 layer.list 的 layers[].layer_id",
+    "not_pasteable": {
+      "E6": "NaN 在 JSON 里表达不了；坞窗发不出去，只能用 Console 的 float(\"nan\")",
+      "X3": "取消要 submit 之后才看得到，不是 parameters 能触发的东西"
+    },
+    "checkbox": "X2 还要在表单里勾上 continue_on_crs_mismatch"
+  },
+  "cases": [
+    {
+      "id": "N1",
+      "group": "normal",
+      "title": "最基本的跑通：内存输出，结果就是工程里的一个图层",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": 1.0,
+        "SEGMENTS": 8,
+        "DISSOLVE": false,
+        "OUTPUT": "memory:"
+      },
+      "expected": {
+        "status": "SUCCEEDED",
+        "outputs": "OUTPUT 是结果图层的 id，图层已在工程里",
+        "messages": "messages 里可能有 QGIS 自己的 info 记录"
+      },
+      "evidence": "P06"
+    },
+    {
+      "id": "N2",
+      "group": "normal",
+      "title": "不给 OUTPUT：补一个临时输出，就是参数面板的默认值",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": 1.0,
+        "SEGMENTS": 8,
+        "DISSOLVE": false
+      },
+      "expected": {
+        "status": "SUCCEEDED",
+        "outputs": "OUTPUT 出现，且结果层 isTemporary() 为真"
+      },
+      "evidence": "P17"
+    },
+    {
+      "id": "N3",
+      "group": "normal",
+      "title": "数组参数：JSON 数组原样交给 QGIS 的 LAYERS",
+      "algorithm_id": "native:mergevectorlayers",
+      "parameters": {
+        "LAYERS": ["<LAYER_ID>", "<SECOND_LAYER_ID>"],
+        "OUTPUT": "memory:"
+      },
+      "expected": {
+        "status": "SUCCEEDED",
+        "outputs": "OUTPUT 是合并后的图层 id，要素数是两个输入之和"
+      },
+      "evidence": "P07"
+    },
+    {
+      "id": "N4",
+      "group": "normal",
+      "title": "标量输出：outputs 里是数字，不是图层",
+      "algorithm_id": "native:basicstatisticsforfields",
+      "parameters": {
+        "INPUT_LAYER": "<LAYER_ID>",
+        "FIELD_NAME": "<FIELD_NAME>"
+      },
+      "expected": {
+        "status": "SUCCEEDED",
+        "outputs": "COUNT / SUM / MEAN / MIN / MAX 五个有限 JSON 数字，另加 OUTPUT 与 OUTPUT_HTML_FILE 两个临时输出"
+      },
+      "needs": ["图层里有一个数值字段，且该字段至少有一个非空值"],
+      "note": "把两个输出都传 null 是「跳过输出」：那两个键不出现，标量照旧",
+      "evidence": "P08"
+    },
+    {
+      "id": "N5",
+      "group": "normal",
+      "title": "写真实文件：QGIS 写完还会把文件读回工程",
+      "algorithm_id": "gdal:convertformat",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "OUTPUT": "<OUTPUT_GPKG>"
+      },
+      "expected": {
+        "status": "SUCCEEDED",
+        "outputs": "OUTPUT 就是 <OUTPUT_GPKG> 这个字符串，文件在磁盘上，工程里多一个同名图层"
+      },
+      "evidence": "P13"
+    },
+    {
+      "id": "N6",
+      "group": "normal",
+      "title": "多写一个参数键不会报错：QGIS 忽略不认识的键",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": 1.0,
+        "OUTPUT": "memory:",
+        "NOT_A_PARAMETER": 1
+      },
+      "expected": {
+        "status": "SUCCEEDED"
+      },
+      "note": "这是「参数错误」里最容易误判的一条：未知键不是失败，也不出现在提示里",
+      "evidence": "P05"
+    },
+    {
+      "id": "E1",
+      "group": "parameter_error",
+      "title": "未知算法 id",
+      "algorithm_id": "no:such",
+      "parameters": {},
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "Error: Algorithm no:such not found\n"
+      },
+      "evidence": "P04"
+    },
+    {
+      "id": "E2",
+      "group": "parameter_error",
+      "title": "必填参数缺席",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "DISTANCE": 1.0,
+        "OUTPUT": "memory:"
+      },
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "Wrong or missing parameter value: Input layer"
+      },
+      "evidence": "P18"
+    },
+    {
+      "id": "E3",
+      "group": "parameter_error",
+      "title": "值的类型不对",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": "1.0",
+        "OUTPUT": "memory:"
+      },
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "Wrong or missing parameter value: Distance"
+      },
+      "evidence": "P18"
+    },
+    {
+      "id": "E4",
+      "group": "parameter_error",
+      "title": "输出后缀不被这个算法接受",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": 1.0,
+        "OUTPUT": "C:\\temp\\out.zzz"
+      },
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "“.zzz” files are not supported as outputs for this algorithm",
+        "side_effect": "一个文件都不写，连 QGIS 自己会补上的 .zzz.gpkg 也没有"
+      },
+      "evidence": "P19"
+    },
+    {
+      "id": "E5",
+      "group": "parameter_error",
+      "title": "提供者不支持内存目的地",
+      "algorithm_id": "gdal:buffervectors",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": 1.0,
+        "OUTPUT": "memory:"
+      },
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "This algorithm only supports disk-based outputs"
+      },
+      "note": "同一句判据在参数面板里也成立：GDAL 提供者只写磁盘",
+      "evidence": "P13"
+    },
+    {
+      "id": "E6",
+      "group": "parameter_error",
+      "title": "值不是有限 JSON（NaN）：在输入边界就被拒，什么都没跑",
+      "algorithm_id": "native:buffer",
+      "parameters": {
+        "INPUT": "<LAYER_ID>",
+        "DISTANCE": "<NaN>",
+        "OUTPUT": "memory:"
+      },
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "输入模型报的那句，点名字段名"
+      },
+      "json_runnable": false,
+      "note": "JSON 表达不了 NaN：控制台写 float(\"nan\") 才发得出去，坞窗的 JSON 输入框发不出来",
+      "evidence": "P10"
+    },
+    {
+      "id": "X1",
+      "group": "exceptional",
+      "title": "参数 CRS 不一致：桌面版会弹「要继续吗」，这里由参数回答，默认是「否」",
+      "algorithm_id": "gdal:clipvectorbypolygon",
+      "parameters": {
+        "INPUT": "<POINTS_LAYER_ID>",
+        "MASK": "<MASK_LAYER_ID>"
+      },
+      "expected": {
+        "status": "FAILED",
+        "error_code": "INVALID_INPUT",
+        "message": "Parameters do not all use the same CRS. This can cause unexpected results.\nDo you want to continue?"
+      },
+      "needs": ["两个 CRS 不同的图层，且都带真几何；工程里没有就先建"],
+      "evidence": "P20"
+    },
+    {
+      "id": "X2",
+      "group": "exceptional",
+      "title": "同一问句，回答「是」",
+      "algorithm_id": "gdal:clipvectorbypolygon",
+      "parameters": {
+        "INPUT": "<POINTS_LAYER_ID>",
+        "MASK": "<MASK_LAYER_ID>"
+      },
+      "extra": {
+        "continue_on_crs_mismatch": true
+      },
+      "expected": {
+        "status": "SUCCEEDED",
+        "outputs": "OUTPUT 是写出的文件路径"
+      },
+      "needs": ["同 X1"],
+      "note": "QGIS 的设置 Processing/Configuration/WARN_UNMATCHING_CRS 关掉时，这个问句不再出现，参数也就无所谓",
+      "evidence": "P20"
+    },
+    {
+      "id": "X3",
+      "group": "exceptional",
+      "title": "取消：这个操作在主线程跑，只有还没开始时取消得掉",
+      "submitted": {
+        "algorithm_id": "native:buffer",
+        "parameters": {
+          "INPUT": "<LAYER_ID>",
+          "DISTANCE": 1.0,
+          "OUTPUT": "memory:"
+        }
+      },
+      "expected": {
+        "submit_status": "QUEUED",
+        "cancel_status": "CANCELLED",
+        "after_started": "cancel 返回 accepted=false，reason=NOT_INTERRUPTIBLE"
+      },
+      "note": "run_sync 期间无法中断，整个界面陪着一起等；跑起来之后的那个回执按代码推导，未实测",
+      "evidence": "P16"
+    }
+  ],
+  "not_measured": [
+    {
+      "topic": "目标盘不可写",
+      "why": "没跑",
+      "expect": "大概率先被输出判据拦成 INVALID_INPUT（像 E5 那样），否则 QGIS 抛错由插件转成 INTERNAL_ERROR"
+    },
+    {
+      "topic": "算法内部抛异常",
+      "why": "没有真实算法能稳定触发；验收用自己的探针提供者钉了这个形状",
+      "expect": "FAILED(INTERNAL_ERROR)，消息是 QGIS 的异常原文"
+    },
+    {
+      "topic": "跑起来之后再取消",
+      "why": "主线程同步执行，拿不到中间态",
+      "expect": "accepted=false，reason=NOT_INTERRUPTIBLE"
+    },
+    {
+      "topic": "参数里的相对路径",
+      "why": "插件对 processing 参数不做路径校验，PATH_NOT_ALLOWED 只属于 layer.* 与 project.* 的路径参数",
+      "expect": "任何字形都原样到达 QGIS，由 QGIS 决定（P12/P13 钉的就是这条）"
+    }
+  ]
+}

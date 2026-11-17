@@ -192,6 +192,7 @@ qgis-agent-plugin/
 ├── docs/                         面向操作者的说明与开发/协作规范
 │   ├── INSTALL.md                安装、配置、排错、卸载
 │   ├── CONSOLE.md                Python Console 的实测样例
+│   ├── processing-run-algorithm-examples.json   processing.run_algorithm 的可跑参数实例
 │   ├── audit/                    生成的审计页面
 │   └── agents/                   规范文档（本目录）
 │       ├── DEVELOP.md            本文档：唯一的开发规范
