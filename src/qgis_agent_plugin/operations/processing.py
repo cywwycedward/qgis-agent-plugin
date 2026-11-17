@@ -464,6 +464,74 @@ def _require_acceptable_run(
         raise FrameworkError(INVALID_INPUT, message)
 
 
+_FEEDBACK_CLASS: Any = None
+
+
+def _new_feedback() -> Any:
+    """一次运行的消息接收器；那个类只构建一次。
+
+    与 ``qgs_task`` 里那个 ``QgsTask`` 子类同一个理由：本模块必须能在裸解释器里导入，所以 QGIS
+    的类只能出现在函数体内。
+
+    The message receiver for one run; its class is built once.
+
+    The same reason as the ``QgsTask`` subclass in ``qgs_task``: this module has to import in a
+    bare interpreter, so a QGIS class may only appear inside a function body.
+    """
+
+    global _FEEDBACK_CLASS
+    if _FEEDBACK_CLASS is None:
+        _FEEDBACK_CLASS = _build_feedback_class()
+    return _FEEDBACK_CLASS()
+
+
+def _build_feedback_class() -> Any:
+    from qgis.core import QgsProcessingFeedback  # pyright: ignore[reportMissingImports]
+
+    class ProcessingRunFeedback(QgsProcessingFeedback):
+        """基类自己的日志，外加每条消息一条记录。
+
+        The base class's own logging, plus one record per message.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[ProcessingMessage] = []
+
+        def _record(self, level: str, text: str, fatal: bool = False) -> None:
+            self.records.append(ProcessingMessage(level=level, text=text, fatal=fatal))
+
+        def pushInfo(self, info: str) -> None:
+            super().pushInfo(info)
+            self._record("info", info)
+
+        def pushDebugInfo(self, info: str) -> None:
+            super().pushDebugInfo(info)
+            self._record("debug", info)
+
+        def pushCommandInfo(self, info: str) -> None:
+            super().pushCommandInfo(info)
+            self._record("command", info)
+
+        def pushConsoleInfo(self, info: str) -> None:
+            super().pushConsoleInfo(info)
+            self._record("console", info)
+
+        def pushFormattedMessage(self, html: str, text: str) -> None:
+            super().pushFormattedMessage(html, text)
+            self._record("formatted", text)
+
+        def pushWarning(self, warning: str) -> None:
+            super().pushWarning(warning)
+            self._record("warning", warning)
+
+        def reportError(self, message: str, fatalError: bool = False) -> None:
+            super().reportError(message, fatalError)
+            self._record("error", message, bool(fatalError))
+
+    return ProcessingRunFeedback
+
+
 class ProcessingListAlgorithms(
     BaseQuery[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
     MainThreadOperationMixin[ProcessingListAlgorithmsParams, ProcessingListAlgorithmsResult],
@@ -593,56 +661,12 @@ class ProcessingRunAlgorithm(
         self, ctx: OperationContext, request: ProcessingRunAlgorithmParams
     ) -> ProcessingRunAlgorithmResult:
         from qgis import processing  # pyright: ignore[reportMissingImports]
-        from qgis.core import (  # pyright: ignore[reportMissingImports]
-            QgsApplication,
-            QgsProcessingFeedback,
-        )
-
-        class ProcessingRunFeedback(QgsProcessingFeedback):
-            """基类自己的日志，外加每条消息一条记录。
-
-            The base class's own logging, plus one record per message.
-            """
-
-            def __init__(self) -> None:
-                super().__init__()
-                self.records: list[ProcessingMessage] = []
-
-            def _record(self, level: str, text: str, fatal: bool = False) -> None:
-                self.records.append(ProcessingMessage(level=level, text=text, fatal=fatal))
-
-            def pushInfo(self, info: str) -> None:
-                super().pushInfo(info)
-                self._record("info", info)
-
-            def pushDebugInfo(self, info: str) -> None:
-                super().pushDebugInfo(info)
-                self._record("debug", info)
-
-            def pushCommandInfo(self, info: str) -> None:
-                super().pushCommandInfo(info)
-                self._record("command", info)
-
-            def pushConsoleInfo(self, info: str) -> None:
-                super().pushConsoleInfo(info)
-                self._record("console", info)
-
-            def pushFormattedMessage(self, html: str, text: str) -> None:
-                super().pushFormattedMessage(html, text)
-                self._record("formatted", text)
-
-            def pushWarning(self, warning: str) -> None:
-                super().pushWarning(warning)
-                self._record("warning", warning)
-
-            def reportError(self, message: str, fatalError: bool = False) -> None:
-                super().reportError(message, fatalError)
-                self._record("error", message, bool(fatalError))
+        from qgis.core import QgsApplication  # pyright: ignore[reportMissingImports]
 
         algorithm = QgsApplication.processingRegistry().createAlgorithmById(request.algorithm_id)
         if algorithm is None:
             raise _run_unknown_algorithm(request.algorithm_id)
-        feedback = ProcessingRunFeedback()
+        feedback = _new_feedback()
         context = processing.createContext(feedback)
         parameters = _values_with_defaults(algorithm, request.parameters)
         _require_acceptable_values(algorithm, parameters, context)

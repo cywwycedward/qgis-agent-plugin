@@ -1536,12 +1536,14 @@ def test_the_three_operations_register_as_main_thread_processing_capabilities() 
     ]
 
 
-def test_the_feedback_is_built_inside_the_run_and_the_message_is_module_level() -> None:
-    """哪些名字出现在模块里就是导入规则：只有“消息”是共享的。
+def test_the_feedback_class_is_built_lazily_and_the_message_is_module_level() -> None:
+    """哪些名字出现在模块里就是导入规则：QGIS 的子类只能由函数造出来。
 
-    Which names the module exports is the import rule: only the message is shared.
+    Which names the module exports is the import rule: a QGIS subclass may only be built by a
+    function, so the module names the builder rather than the subclass.
     """
     assert "ProcessingMessage" in vars(ops)
+    assert callable(ops._new_feedback)
     assert not hasattr(ops, "ProcessingRunFeedback")
 
 
