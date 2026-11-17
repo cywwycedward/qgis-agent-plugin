@@ -148,7 +148,7 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 | 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `570 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
 | 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
 | 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
-| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
+| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、对应族的 `cases_*.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
 | 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `627 passed` |
 | 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
 | 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
@@ -247,7 +247,14 @@ qgis-agent-plugin/
     ├── test_docs.py              [规范组] 文档索引与相对链接：每份规范都被索引、没指向已删文档
     └── qgis_integration/         真实 QGIS 验收跑（非 pytest 用例）
         ├── run_acceptance.py     入口：临时目录、临时 profile、打印逐条结果与汇总
-        ├── cases.py              每条验收用例（返回一行证据，失败抛 AssertionError）
+        ├── cases.py              唯一的对外表面：把六个族的元组按跑的顺序拼成 CASES
+        ├── cases_engine.py       引擎、执行与会话的用例（AT 里的注册、排队、取消、代数、会话）
+        ├── cases_project.py      四项 project.* 的用例（AT 里的换工程、打开、保存、路径）
+        ├── cases_layer.py        图层装载、列表、可见性与字段求和的用例（AT 的一部分）
+        ├── cases_processing.py   三个 processing.* 的用例，以及验收自己注册的提供者（P）
+        ├── cases_qml.py          QML 导出的用例（S）
+        ├── cases_renderer.py     渲染器候选、读写与安装的用例（A、V、R）
+        ├── helpers.py            用例共用的读法：错误码、结果、真实图层、一份 QML
         ├── fixtures.py           用 PyQGIS 现场生成 GeoPackage/GeoTIFF/QGZ/损坏文件等
         ├── harness.py            headless QgsApplication、真实 QgsProject/QgsTaskManager、探针操作
         ├── tally.py              从判定字段统计 PASS/FAIL/SKIP，不从文本里数
@@ -1434,7 +1441,8 @@ class LayerSumNumericField(
 6. 如果是后台操作，`test_qgs_task.py`/`test_background.py` 的假适配器模式可直接复用；补一个
    "换代 → `STALE_PROJECT`" 与一个"取消 → `CANCELLED`"的用例。
 7. `npm run lint`、`npm run test:unit` 全绿。若操作触到真实 PyQGIS 行为，在
-   `tests/qgis_integration/cases.py` 加一条验收用例（用 `fixtures.py` 生成的数据，不碰用户工程）。
+   `tests/qgis_integration/` 里它所属能力族的那个 `cases_*.py` 加一条验收用例（用 `fixtures.py`
+   生成的数据，不碰用户工程），并把函数追加进同族的元组。
 8. `npm run deploy`，重启 QGIS，在坞窗里手工跑一次，确认表单、结果、错误提示都对。
 9. 提交并按 §11 合并；合并后删分支。
 
@@ -1477,8 +1485,8 @@ class LayerSumNumericField(
 - 新操作覆盖成功路径、一个输入校验失败、一个业务失败；有路径参数再加一个相对路径的用例。
 - 后台操作补一条"换代 → `STALE_PROJECT`"与一条"取消 → `CANCELLED`"。
 - 断言落在错误码、字段值、调用次数上；不断言日志文本与私有属性。
-- 触到真实 PyQGIS 行为的部分进 `tests/qgis_integration/cases.py`，用 `fixtures.py` 现场生成数据，
-  不碰用户工程。
+- 触到真实 PyQGIS 行为的部分进 `tests/qgis_integration/` 里对应能力族的 `cases_*.py`，用
+  `fixtures.py` 现场生成数据，不碰用户工程。
 - 新用例先在缺陷存在时确认是红的。
 
 ---

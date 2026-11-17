@@ -104,8 +104,12 @@
   `file:./points.csv` 那种工程写不出来。
 - `initQgis()` 不带 Processing 的 provider，所以 harness 显式注册它们；注册失败时
   `processing.*` 的用例 `Skip` 并说明原因，而不是对着空注册表报错。
-- `CASES` 元组（`cases.py` 末尾）共 93 条，按前缀分六组：`AT*` 48、`P*` 19、`S*` 6、`A*` 7、`V*` 8、
-  `R*` 5；用例函数名跟着 id 走（`at_01_*`、`p13_*`…），所以**不能按 `at_` 前缀数用例**。每条返回
+- `CASES` 共 93 条，按前缀分六组：`AT*` 48、`P*` 19、`S*` 6、`A*` 7、`V*` 8、`R*` 5。`cases.py` 里
+  只有把六族按跑的顺序拼起来的 `CASES`；用例本体在 `cases_engine.py`（AT 的引擎与会话部分）、
+  `cases_project.py`（AT 的工程部分）、`cases_layer.py`（AT 的图层部分）、`cases_processing.py`、
+  `cases_qml.py`、`cases_renderer.py`，共用的读法在 `helpers.py`。所以 `AT*` 这一组横跨三个模块，
+  跑的顺序是：引擎与会话 → 工程 → 图层 → 处理 → 样式 → 渲染器。用例函数名跟着 id 走
+  （`at_01_*`、`p13_*`…），所以**不能按 `at_` 前缀数用例**。每条返回
   一行证据；判定是 `tally.Row` 的字段，**不从打印文本里数 `PASS`/`FAIL`**（证据里出现这些词不改变
   统计）。用例抛 `AssertionError` 是 FAIL，抛 `harness.Skip` 是 SKIP，其它异常同样记 FAIL 并带文件名
   与行号。
