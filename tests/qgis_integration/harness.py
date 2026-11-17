@@ -4,7 +4,7 @@
 ``QgsTaskManager``、一个替身界面，以及几个能把任务按住足够久的探针操作。用例碰到的都是 ``src`` 里
 真实的对象；只有界面和探针是测试替身，每条用例都在证据行里说明这一点。
 
-应用跑在一次性的配置目录里（``QGIS_CUSTOM_CONFIG_PATH``），所以验收写下的七项配置离操作者自己的
+应用跑在一次性的配置目录里（``QGIS_CUSTOM_CONFIG_PATH``），所以验收碰到的任何配置都离操作者自己的
 ``QGIS3.ini`` 很远；工作目录也是那个一次性目录，因为 QGIS 会把 ``symbology-style.db`` 丢在它启动
 时所在的目录。
 
@@ -13,8 +13,8 @@ the real ``QgsProject``, one real ``QgsTaskManager`` per plugin session, a stand
 and a handful of probe operations that hold a task open long enough to look at it.  Everything
 the cases exercise is the real object from ``src``; the interface and the probes are the only
 test doubles, and every case says so in its evidence line.  The application runs inside a
-throwaway profile (``QGIS_CUSTOM_CONFIG_PATH``), so the seven configuration keys the acceptance
-run writes live nowhere near the operator's own ``QGIS3.ini``, and the working directory is the
+throwaway profile (``QGIS_CUSTOM_CONFIG_PATH``), so any settings the acceptance run touches
+live nowhere near the operator's own ``QGIS3.ini``, and the working directory is the
 throwaway one because QGIS drops ``symbology-style.db`` into whatever directory it starts in.
 """
 
@@ -205,25 +205,53 @@ def qt_deleted(obj: Any) -> bool:
     return sip.isdeleted(obj)
 
 
+class CanvasStandIn:
+    """无界面时的画布：一个固定的矩形，没有旋转。
+
+    保存工程时要问画布要范围和旋转，存成工程的默认视图；headless 里没有画布，所以用这个替身，
+    真实值取决于 GUI 里那一次保存看到了什么。
+
+    The canvas when there is no GUI: a fixed rectangle and no rotation.
+
+    Saving a project asks the canvas for its extent and rotation and stores them as the project's
+    default view; headless has no canvas, so this stands in and the real value is whatever a save
+    in the GUI saw.
+    """
+
+    def extent(self) -> Any:
+        from qgis.core import QgsRectangle  # pyright: ignore[reportMissingImports]
+
+        return QgsRectangle(0.0, 0.0, 1.0, 1.0)
+
+    def rotation(self) -> float:
+        return 0.0
+
+
 class FakeIface:
-    """操作真正用到的那一个界面调用：``newProject``。
+    """操作真正用到的那两个界面调用：``newProject`` 与 ``mapCanvas``。
 
     QGIS Desktop 里的实现会清空当前工程并报告是否清空；无界面时这就是它的全部内容。用例测的是调
     用它的那个操作，不是这个替身。``agent_engine`` 与 ``agent_registry`` 由 ``Plugin.initGui``
     挂上去，和真实界面一样。
 
-    The one interface call the operations make: ``newProject``.  QGIS Desktop's own
-    implementation clears the current project and reports whether it did; headless, that is the
+    The two interface calls the operations make: ``newProject`` and ``mapCanvas``.  QGIS Desktop's
+    own implementation clears the current project and reports whether it did; headless, that is the
     whole of it.  A case measures the operation that calls it, not this stand-in.
     ``agent_engine`` and ``agent_registry`` are published on it by ``Plugin.initGui``, exactly as
     on the real one.
     """
 
-    def newProject(self, promptToSaveFlag: bool = False) -> bool:
-        from qgis.core import QgsProject
+    def __init__(self) -> None:
+        self.canvas = CanvasStandIn()
+
+    def newProject(self, promptToSaveFlag: bool = False) -> bool:  # noqa: N802 - a PyQGIS name
+        from qgis.core import QgsProject  # pyright: ignore[reportMissingImports]
 
         QgsProject.instance().clear()
         return True
+
+    def mapCanvas(self) -> CanvasStandIn:  # noqa: N802 - a PyQGIS name
+        return self.canvas
 
 
 # ----------------------------------------------------------------- 探针 / probes
@@ -464,6 +492,7 @@ class SlowSum(LayerSumNumericField):
             count=len(snapshot.values),
             total=sum(snapshot.values),
             skipped_null=snapshot.skipped_null,
+            selected_only=snapshot.selected_only,
             project_epoch=snapshot.project_epoch,
         )
 

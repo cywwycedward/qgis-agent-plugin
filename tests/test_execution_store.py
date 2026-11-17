@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import re
 
-import pytest
-from pydantic import ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.contracts import ExecutionStrategy
-from qgis_agent_plugin.core.execution_store import TERMINAL_STATUSES, ExecutionStore
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.contracts import ExecutionStrategy  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.execution_store import (  # pyright: ignore[reportMissingImports]
+    TERMINAL_STATUSES,
+    ExecutionStore,
+)
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     EXECUTION_NOT_FOUND,
     INTERNAL_ERROR,
     ErrorDetail,
@@ -169,7 +172,7 @@ def test_an_unknown_id_is_not_found() -> None:
 
 
 @pytest.mark.parametrize(("start", "target"), LEGAL)
-def test_every_transition_the_prd_lists_is_accepted(
+def test_every_declared_transition_is_accepted(
     start: ExecutionStatus, target: ExecutionStatus
 ) -> None:
     store = ExecutionStore(Settings())
@@ -178,7 +181,7 @@ def test_every_transition_the_prd_lists_is_accepted(
 
 
 @pytest.mark.parametrize(("start", "target"), ILLEGAL)
-def test_a_transition_the_prd_does_not_list_is_a_defect(
+def test_an_undeclared_transition_is_a_defect(
     start: ExecutionStatus, target: ExecutionStatus
 ) -> None:
     store = ExecutionStore(Settings())

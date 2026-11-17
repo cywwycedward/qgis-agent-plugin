@@ -1,6 +1,6 @@
 # 开发安装
 
-结论：三条命令就能在 QGIS Desktop 3.44 里装上本插件，再用两个配置键打开文件访问。
+结论：三条命令就能在 QGIS Desktop 3.44 里装上本插件，再只用绝对路径。
 
 ```powershell
 cd <repo>; npm run deploy          # 把 src/qgis_agent_plugin 镜像到 QGIS 插件目录
@@ -9,7 +9,7 @@ npm run lint
 ```
 
 装好之后：插件管理器里启用 “QGIS Agent”；Python Console 里用 `iface.agent_engine`
-调用（样例见 `CONSOLE.md`）。**默认两个允许目录都是空的，即默认拒绝一切文件访问**。
+调用（样例见 `CONSOLE.md`）。**路径只要求是绝对的；没有允许目录，也没有路径配置**。
 
 ## 1. 前置条件
 
@@ -100,12 +100,12 @@ submit layer.sum_numeric_field -> QUEUED -> SCHEDULED -> SUCCEEDED
 **路径必须是绝对路径**：相对路径在参数校验处就被拒（`PATH_NOT_ALLOWED`，消息是
 `the path must be an absolute path`）。除此之外插件不管路径——能不能读由 QGIS 与 provider 回答。
 
-## 4. 配置（五项）
+## 4. 配置（四项）
 
-键名一律是 `qgis_agent_plugin/<键名>`（一个 QSettings 组，避免和别的插件撞名）。七个键的语义、
+键名一律是 `qgis_agent_plugin/<键名>`（一个 QSettings 组，避免和别的插件撞名）。四个键的语义、
 默认值与"计数必须 ≥ 1"的规则只有一份，在 `docs/agents/DEVELOP.md` §6.12。这里只说怎么写、怎么生效。
 
-五项都是计数，没有路径配置。改法：
+四项都是计数，没有路径配置。改法：
 
 ```python
 from qgis.core import QgsSettings
@@ -121,8 +121,8 @@ s.setValue("qgis_agent_plugin/max_active_background", 4)
 生效时机：`initGui` 读一次（`plugin.read_settings()`），所以**改完要在插件管理器里禁用再启用**
 （或重启 QGIS）。
 
-五个计数键（`max_active_background`、`max_pending`、`max_terminal_records`、
-`terminal_ttl_seconds`、`max_snapshot_features`）必须 **≥ 1**：写 `0` 或负数、或者写成
+四个计数键（`max_active_background`、`max_pending`、`max_terminal_records`、`terminal_ttl_seconds`）
+必须 **≥ 1**：写 `0` 或负数、或者写成
 `32 (default)` 这类非数字，`initGui` 会直接报一个带键名（非法值时也带原值）的错误，插件
 不加载。故意不夹取：`max_active_background=0` 会让每个后台调用永久 `QUEUED`，这种配置
 失误必须当场暴露。
@@ -136,17 +136,17 @@ layer.add 指向相对路径 -> FAILED PATH_NOT_ALLOWED | the path must be an ab
 layer.add 指向不存在的绝对路径 -> FAILED INVALID_LAYER（QGIS 的答案，不是插件的预检）
 ```
 
-即：没配之前所有文件访问都被拒，这是默认安全姿态，不是配置缺失的 bug。键缺失/为 `None` 时
+即：路径只要绝对就能用，插件不按目录判可达性——那是 ADR 0001 的决定，不是配置缺失。键缺失/为 `None` 时
 `Settings.from_mapping` 保留默认值；字符串形式的数字也会被转成 `int`。
 
 **未实测**：用 `QgsSettings().setValue(...)` 真正写盘并重载插件（会改用户的 `QGIS3.ini`，本条只
-验证了读：默认空根、缺失键返回 `None`、越界值拒绝）。
+验证了读：缺失键返回 `None`、小于 1 的计数被拒）。
 
 ## 5. 开发日常
 
 | 命令 | 作用 | 结果 |
 | --- | --- | --- |
-| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 本机最近一次 1 failed / 774 passed，见下 |
+| `npm run test` | 用 `paths.json` 里的 QGIS python 跑 `pytest -q tests` | 本机最近一次 721 passed，见下 |
 | `npm run test:verbose` | 同上，`-vv tests` | — |
 | `npm run lint` | `ruff check .` | `All checks passed!` |
 | `npm run format` | `ruff format .` | — |
@@ -163,12 +163,11 @@ layer.add 指向不存在的绝对路径 -> FAILED INVALID_LAYER（QGIS 的答�
 
 ```text
 $ npm run test                                                       # QGIS 解释器
-1 failed, 774 passed, 1 warning in 164.65s
+721 passed, 1 warning in 14.41s
 ```
 
-失败的是 `tests/test_operations_project.py::test_a_qgz_with_too_many_members_is_refused_before_any_is_unpacked`：
-它断言 ".qgz 成员太多要在 1.5 s 内被拒"，本机实测 3.39 s。那是性能敏感的时限断言（磁盘/病毒扫描
-快慢决定），不是逻辑错误，也不是这两层测试的问题；调阈值或放宽到有序性断言是测试侧的事。
+这一行就是 fix 之后的一次全绿跑。`569c3e4` 的样例里那条失败来自一条已被删除的用例
+（`.qgz` 成员数上限按 P3 去掉了），这里不再解释它。
 
 ## 6. 排错
 
@@ -179,7 +178,7 @@ $ npm run test                                                       # QGIS 解�
 | Console 里 `iface.agent_engine` 不存在 | 插件没启用，或已卸载 | 启用插件；看 Console/日志里的加载异常 |
 | 报 `PATH_NOT_ALLOWED`，消息是 `the path must be an absolute path` | 路径是相对的，或者是个 URL | 给一条带盘符的完整路径；见 §4 |
 | 插件加载失败，日志里是 `max_active_background must be at least 1` 或 `… must be a whole number` | 某个计数键写成了 0/负数/非数字 | 按报错里的键名改回 ≥ 1 的整数；见 §4 |
-| `layer.set_visibility` 返回 `LAYER_NOT_IN_TREE` | 该图层是 `layer.add(add_to_legend=false)` 加进来的 | 用 `true` 重加，或只做 `layer.get_info` |
+| `layer.set_visibility` 返回 `LAYER_NOT_IN_TREE` | 这个图层不在图层树里（加载来的工程可以这样，`layer.add` 已经造不出这种图层） | 只做 `layer.get_info`；要可见性得先在桌面版里把它放回图例 |
 | `run_sync` 报 `UNSUPPORTED_EXECUTION_MODE` | 对 `layer.sum_numeric_field` 用了 `run_sync` | 用 `submit` + `get` |
 
 ## 7. 卸载

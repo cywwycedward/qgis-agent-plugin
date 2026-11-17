@@ -2,8 +2,8 @@
 
 破坏性用例不能对着用户自己的工程做，所以这里每个文件都是现造的：一个装着三张表的 GeoPackage
 （其中一层带一个有空值的数值字段）、一张栅格、一个合法 QGZ、一个唯一数据源已被删掉的 QGZ、一个坏
-GeoPackage、一个坏 QGZ、“不要覆盖”用例要的那个已存在文件、一个允许目录之外的目录、一个指向外面的
-目录联接、两个数据源写成远程的项目，以及那些让 ``QgsProject.read()`` 崩掉、或者绕过读前扫描的工程
+GeoPackage、一个坏 QGZ、“不要覆盖”用例要的那个已存在文件、一个工程目录之外的目录、一个指向外面的
+目录联接、两个数据源写成远程的项目，以及那些嵌套或加密让 ``QgsProject.read()`` 结束进程的工程
 与归档。``build`` 删掉并重建它自己的目录，所以重跑不需要清理。
 
 删除和重建只允许发生在本脚本自己造出来的根目录里，而且只在系统临时目录之内：``claim_root`` 写下
@@ -17,9 +17,9 @@ The acceptance data, generated with PyQGIS into a throwaway directory.  A destru
 not be pointed at a user's own project, so every file here is generated from scratch: a
 GeoPackage holding three layers (one with a numeric field that has nulls), a raster, a valid
 QGZ, a QGZ whose only data source has been deleted, a corrupt GeoPackage, a corrupt QGZ, a file
-that already exists for the "do not overwrite" case, a directory outside the allowed roots, a
-junction inside them that points out, two projects that name a remote datasource, and the
-projects and archives that made ``QgsProject.read()`` crash or walked past the pre-read scan.
+that already exists for the "do not overwrite" case, a directory outside the fixture tree, a
+junction inside them that points out, a project that names a remote datasource, and the projects
+and archives whose nesting or encryption makes ``QgsProject.read()`` end the process.
 ``build`` deletes and rebuilds its own directory, so a rerun needs no cleanup.
 
 Deleting and rebuilding is only allowed inside a root this script made itself, and only inside
@@ -42,7 +42,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from qgis.core import (
+from qgis.core import (  # pyright: ignore[reportMissingImports]
     QgsFeature,
     QgsProject,
     QgsRasterLayer,
@@ -77,53 +77,33 @@ class UnsafeRoot(Exception):
     """
 
 
-# 数据源写成远程的工程文件：若在读之前没检查，就会各花掉一次连接尝试。端口是关的，主机也不
-# 存在。
-# A project file that names a remote source: one connection attempt each if it is read before it
-# is checked.  The port is closed and the host does not exist.
+# 数据源写成远程的工程文件。端口是关的，所以 ``read()`` 只在它上面试一次连接就被拒绝：
+# operation 不管远程源，拿它来证明这一点不会变慢。
+# A project file that names a remote source.  The port is closed, so ``read()`` fails one
+# connection attempt and moves on: the operation does not judge remote sources, and this proves it
+# without paying a slow network round trip.
 REMOTE_VSICURL = "/vsicurl/http://127.0.0.1:9/never.tif"
-REMOTE_UNC = r"\\no-such-host-audit\share\data.gpkg"
 
-# 端口归用例自己的远程源，所以连接数可以自己数；这份数据源还把标签的结束藏进了一个属性值。
-# A remote source whose port a case owns, so it can count the connections itself: the datasource
-# hides the end of its tag in an attribute value.
-REMOTE_LISTENER = "/vsicurl/http://127.0.0.1:{port}/never.tif"
-
-# 超限工程里一个成员解压后的大小：远超声明的上限，但全是空格，所以磁盘上只有几百 KB。
-# One member of the oversized project expands to this many bytes: far over the limit the scan
-# allows, and only a few hundred KB on disk because it is all spaces.
-BOMB_MEMBER_BYTES = 300 * 1024 * 1024
-
-# ``QgsProject.read()`` 撑不住的形状，也是旧扫描来不及回答的形状：8000 层嵌套让解析器的栈
-# 溢出，深度写成明文、CDATA、注释里、或把标签的结束藏进属性都一样；984 KB 未闭合标签让正则回溯
-# 了 661 s（实测）；十七个 1 MB 成员各自不超上限，加起来超。
-# Shapes ``QgsProject.read()`` cannot survive, and shapes the old scan could not answer in time:
-# 8000 nested elements overflow the parser's stack whether the depth is written plainly, inside
-# CDATA, inside a comment, or with the end of each tag hidden in an attribute; 984 KB of unclosed
-# tags made the regex backtrack for 661 s (measured); and seventeen one-megabyte members are each
-# under the limit but add up past it.
+# ``QgsProject.read()`` 撑不住的形状：8000 层嵌套让解析器的栈溢出，深度写成明文、CDATA、
+# 注释里、或把标签的结束藏进属性都一样。上限是 4096 层，所以 8000 一定被拒。
+# The shape ``QgsProject.read()`` cannot survive: 8000 nested elements overflow the parser's stack
+# whether the depth is written plainly, inside CDATA, inside a comment, or with the end of each tag
+# hidden in an attribute.  The bound is 4096 levels, so 8000 is refused every time.
 DEEP_PROJECT_LEVELS = 8_000
-UNCLOSED_DATASOURCES = 82_000
-BUDGET_MEMBER_BYTES = 1024 * 1024
-BUDGET_MEMBERS = 17
-# 刚不到 16 MB 的扫描预算，却有几百万个标签：一次 ``bytes.count`` 就拒绝，不逐元素解析。
-# Just under the 16 MB scan budget, and millions of tags: refused after one ``bytes.count``, not
-# parsed element by element.
-TAG_SPAM_PAIRS = 2_396_000
-# 工程可能带的图层树层数：200 个分组写出 XML 后深度约 205（实测），必须能打开；扫描的上限
-# 是 256。
-# Layer tree nesting a project may carry: 200 groups are depth ~205 in the written XML
-# (measured) and must open; the scan's limit is 256.
+# 工程可能带的图层树层数：200 个分组写出 XML 后深度约 205（实测），必须能打开。
+# Layer tree nesting a project may carry: 200 groups are depth ~205 in the written XML (measured)
+# and must open.
 NESTED_GROUPS = 200
-# 正常工程可能带的标注图层数：每个标注写两个标签，属性值里有一个裸 ">"，旧扫描把它算成了
-# 嵌套。
+# 正常工程可能带的标注图层数：每个标注写两个标签，属性值里有一个裸 ">"，字节扫描把它算成了
+# 嵌套，解析器不会。
 # Labelled layers a normal project may carry: each label adds two tags whose attribute value holds
-# a bare ">", which the old scan counted as nesting.
+# a bare ">", which a byte scan counted as nesting and a parser does not.
 LABELLED_LAYERS = 30
-# 一个内部子集实体被重复引用：expat 会把它展开进 element.text，所以这份 1 MiB 文件要花掉
-# 50 MiB。QGIS 自己的 doctype 没有子集。
-# One internal-subset entity, repeated: expat expands it into element.text, so this 1 MiB file
-# costs the scan 50 MiB.  QGIS's own doctype has no subset.
+# 一个内部子集实体被重复引用：真 QGIS 3.44 根本不展开它（实测 1 MiB 实体引用 50 次 0.53 s 读完
+# ok=True），所以这份文件现在证明的是：这种工程能打开。
+# One internal-subset entity, repeated: real QGIS 3.44 does not expand it at all (measured: a
+# 1 MiB entity referenced 50 times read in 0.53 s, ok=True), so this file now proves that such a
+# project opens.
 ENTITY_BYTES = 1024 * 1024
 ENTITY_REFERENCES = 50
 
@@ -150,16 +130,9 @@ class Fixtures:
     outside: Path
     leak: Path
     remote_vsicurl: Path
-    remote_unc: Path
-    remote_utf16: Path
-    remote_spaced: Path
     moved_directory: Path
-    oversized: Path
     encrypted: Path
     deep_project: Path
-    unclosed_project: Path
-    many_members: Path
-    tag_spam: Path
     hidden_depth_cdata: Path
     hidden_depth_comment: Path
     hidden_depth_attribute: Path
@@ -205,9 +178,9 @@ def build(root: Path) -> Fixtures:
 
     root = root.resolve()
     data = _fresh(root / "data")
-    # 允许根目录的兄弟目录：这里的路径真的在允许目录之外，但它仍在本运行拥有的目录里。
-    # A sibling of the allowed root, so a path here is genuinely outside the roots the run allows
-    # while still inside a directory this run owns.
+    # 工程目录的兄弟目录：这里的路径真的在工程目录之外，但它仍在本运行拥有的目录里。
+    # A sibling of the project data, so a path here is genuinely outside it while still inside
+    # a directory this run owns.
     outside = _fresh(root / "outside")
 
     cities = data / "cities.gpkg"
@@ -271,64 +244,39 @@ def build(root: Path) -> Fixtures:
     existing_project = data / "existing.qgs"
     existing_project.write_bytes(b"an existing project file whose bytes must not change")
 
-    # 工程在允许目录里，唯一图层却指向外面：工程文件过了路径策略，它的数据源没过。
-    # A project inside the allowed roots whose only layer names a source outside them: the project
-    # file passes the path policy, its data source does not.
+    # 工程在测试目录里，唯一图层却指向外面：路径只要求绝对，所以这个工程照样打开。
+    # A project inside the fixture tree whose only layer names a source outside it: paths only
+    # have to be absolute, so the project opens and that layer loads.
     secret = outside / "secret.gpkg"
     secret.write_bytes(cities.read_bytes())
     leak = data / "leak.qgz"
     _write_project(leak, [(secret, CITIES_LAYER, "leaked")], [])
 
-    # 两个在允许目录里、唯一图层是远程源的工程：检查之前去读它，就要付一次连接。
-    # Two projects inside the allowed roots whose only layer names a remote source: reading either
-    # one before checking it would cost a connection.
+    # 唯一图层是远程源的工程：operation 不看远程源，``read()`` 自己决定。
+    # A project whose only layer names a remote source: the operation does not judge remote
+    # sources, ``read()`` decides.
     remote_vsicurl = data / "remote vsicurl.qgs"
     _write_remote_project(remote_vsicurl, raster, REMOTE_VSICURL)
-    remote_unc = data / "remote unc.qgs"
-    _write_remote_project(remote_unc, raster, REMOTE_UNC)
 
-    # 同一个远程源写成 UTF-8 文本扫描看不见的样子：一次用 UTF-16，一次用 XML 允许的标签内空格。
-    # The same remote source written so that a UTF-8 text scan cannot see it: once in UTF-16, once
-    # with the whitespace XML allows inside the tag.
-    remote_utf16 = data / "remote utf16.qgs"
-    _write_remote_project(remote_utf16, raster, REMOTE_VSICURL)
-    _encode_utf16(remote_utf16)
-    remote_spaced = data / "remote spaced.qgs"
-    _write_remote_project(remote_spaced, raster, REMOTE_VSICURL)
-    _space_datasource_tags(remote_spaced)
-
-    # 唯一数据源在已经被搬走的目录里：路径仍在允许目录之内，只是那儿已经没有文件了。
-    # A project whose only source lives in a directory that was moved away: the path is inside the
-    # allowed roots, only nothing is there any more.
+    # 唯一数据源在已经被搬走的目录里：路径是绝对的，只是那儿已经没有文件了。
+    # A project whose only source lives in a directory that was moved away: the path is absolute,
+    # only nothing is there any more.
     moved_directory = data / "moved directory.qgs"
     _write_project(moved_directory, [(cities, CITIES_LAYER, "moved")], [])
     _rewrite_datasource(moved_directory, str(data / "moved-away" / "cities.gpkg"))
 
-    # 一个磁盘上很小、解开要 300 MB 的工程，另一个的成员带着加密标记。
-    # A project that is tiny on disk but would take 300 MB unpacked, and one whose member is marked
-    # encrypted.
-    oversized = data / "oversized member.qgz"
-    _write_oversized_project(oversized, raster)
+    # 体积不是判据；带加密标志的工程仍要拒，因为那个形状会让进程直接结束（本机实测 0xC0000005）。
+    # Size is not a criterion.  The encrypted one is still refused, because that shape ends the
+    # process outright (measured 0xC0000005).
     encrypted = data / "encrypted member.qgz"
     _write_encrypted_project(encrypted, raster)
 
-    # 一个嵌套远超 QGIS 会写出深度的工程，一个只有同一个未闭合标签，还有一个成员都很小、加起来
-    # 却超预算的归档。
-    # A project nested far past anything QGIS writes, one that is nothing but the same unclosed tag,
-    # and an archive whose small members add up past the budget.
+    # 一个嵌套远超上限的工程。
+    # A project nested far past the bound.
     deep_project = data / "deep project.qgs"
     deep_project.write_bytes(
         b"<qgis>" + b"<a>" * DEEP_PROJECT_LEVELS + b"</a>" * DEEP_PROJECT_LEVELS + b"</qgis>"
     )
-    unclosed_project = data / "unclosed datasources.qgs"
-    unclosed_project.write_bytes(b"<qgis>" + b"<datasource>" * UNCLOSED_DATASOURCES)
-    many_members = data / "many members.qgz"
-    member = b" " * BUDGET_MEMBER_BYTES
-    with zipfile.ZipFile(many_members, "w", zipfile.ZIP_DEFLATED) as archive:
-        for index in range(BUDGET_MEMBERS):
-            archive.writestr(f"part{index}.qgs", member)
-    tag_spam = data / "tag spam.qgs"
-    tag_spam.write_bytes(b"<qgis>" + b"<a></a>" * TAG_SPAM_PAIRS + b"</qgis>")
 
     # 同样 8000 层，写成字节扫描看不见的样子。
     # The same 8000 levels written so that a byte scan cannot see them.
@@ -366,13 +314,13 @@ def build(root: Path) -> Fixtures:
     grouped = data / "grouped.qgs"
     _write_grouped_project(grouped, cities, CITIES_LAYER, NESTED_GROUPS)
 
-    # 一个声明了 XML 实体的文件。旧扫描还拒过两个普通工程——一个 Delimited Text 图层被写成
-    # ``file:./points.csv``，一个图层的元数据里带 URL——那两个由各自的用例去写：QGIS 只在 provider
+    # 一个声明了 XML 实体的文件。另两个普通工程——一个 Delimited Text 图层被写成
+    # ``file:./points.csv``，一个图层的元数据里带 URL——由各自的用例去写：QGIS 只在 provider
     # 加载之后才把 CSV 写成相对路径，而 ``build`` 在应用启动之前跑。
-    # A file that declares an XML entity.  The two ordinary projects the old scan also refused -- a
-    # Delimited Text layer spelled ``file:./points.csv`` and a layer whose metadata carries a URL --
-    # are written by their case instead: QGIS only spells the CSV source relatively once its
-    # providers are loaded, and ``build`` runs before the application starts.
+    # A file that declares an XML entity.  Two other ordinary projects -- a Delimited Text layer
+    # spelled ``file:./points.csv`` and a layer whose metadata carries a URL -- are written by their
+    # case instead: QGIS only spells the CSV source relatively once its providers are loaded, and
+    # ``build`` runs before the application starts.
     entity_project = data / "entity expansion.qgs"
     _write_entity_project(entity_project)
 
@@ -390,16 +338,9 @@ def build(root: Path) -> Fixtures:
         outside=outside,
         leak=leak,
         remote_vsicurl=remote_vsicurl,
-        remote_unc=remote_unc,
-        remote_utf16=remote_utf16,
-        remote_spaced=remote_spaced,
         moved_directory=moved_directory,
-        oversized=oversized,
         encrypted=encrypted,
         deep_project=deep_project,
-        unclosed_project=unclosed_project,
-        many_members=many_members,
-        tag_spam=tag_spam,
         hidden_depth_cdata=hidden_depth_cdata,
         hidden_depth_comment=hidden_depth_comment,
         hidden_depth_attribute=hidden_depth_attribute,
@@ -471,7 +412,7 @@ def _write_raster(path: Path, bands: int = 1) -> None:
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
-        from osgeo import gdal, osr
+        from osgeo import gdal, osr  # pyright: ignore[reportMissingImports]
 
     driver = gdal.GetDriverByName("GTiff")
     dataset = driver.Create(str(path), 8, 8, bands, gdal.GDT_Byte)
@@ -530,79 +471,18 @@ def _rewrite_datasource(path: Path, source: str) -> None:
     _replace_first_datasource(path, f"<datasource>{source}</datasource>")
 
 
-def write_attribute_remote(path: Path, local_raster: Path, port: int) -> None:
-    """真工程，数据源把标签的结束藏在一个属性里。
-
-    ``<datasource x="/>" ...>`` 是合法 XML：属性值是 ``/>``，所以在第一个 ``>`` 处结束标签的
-    扫描器会以为它是自闭合标签，永远读不到后面的文本——而那里正是用例自己监听着的 ``/vsicurl`` 源。
-
-    A real project whose datasource hides the end of its tag in an attribute.
-    ``<datasource x="/>" ...>`` is legal XML: the attribute value is ``/>``, so a scanner that
-    ends the tag at the first ``>`` sees a self-closing tag and never reads the text after it --
-    which is a ``/vsicurl`` source the case makes its own listener observable on.
-    """
-
-    _write_project(path, [], [local_raster])
-    _replace_first_datasource(
-        path, f'<datasource x="/>">{REMOTE_LISTENER.format(port=port)}</datasource>'
-    )
-
-
-def write_mixed_content_remote(path: Path, local_raster: Path, port: int) -> None:
-    """真工程，数据源把 URI 放在子元素的 tail 里。
-
-    ``<datasource><x/>/vsicurl/…</datasource>`` 让 ``element.text`` 为空，而
-    QDomElement::text() 拼接整个子树；于是 ``read()`` 看到了这个源，只读 ``element.text`` 的扫描没
-    看到。
-
-    A real project whose datasource holds its URI in a child element's tail.
-    ``<datasource><x/>/vsicurl/…</datasource>`` leaves ``element.text`` empty, and
-    QDomElement::text() concatenates the subtree, so ``read()`` saw the source while a scan that
-    only read ``element.text`` did not.
-    """
-
-    _write_project(path, [], [local_raster])
-    _replace_first_datasource(
-        path, f"<datasource><x/>{REMOTE_LISTENER.format(port=port)}</datasource>"
-    )
-
-
-# 拆成多段文本节点的数据源：没有一段带着标记，拼起来才是 read() 会去碰的地址。
-# A datasource spelled as several text nodes: no fragment holds a marker, and their concatenation
-# is the address read() reaches.
-SPLIT_DATASOURCE = "/v<x/>sicurl/htt<y/>p:<y2/>/<z/>/127.0.0.1:{port}/never.tif"
-
-
-def write_split_content_remote(path: Path, local_raster: Path, port: int) -> None:
-    """真工程，数据源的 URI 分散在几个子元素里。
-
-    ``QDomElement::text()`` 把它们拼起来，所以 ``read()`` 看到的是
-    ``/vsicurl/http://127.0.0.1:<port>/never.tif``，而单独看每一段都只是路径中的普通字符串。
-
-    A real project whose datasource URI is split across several child elements.
-    ``QDomElement::text()`` concatenates them, so ``read()`` sees
-    ``/vsicurl/http://127.0.0.1:<port>/never.tif`` while every single fragment is an ordinary
-    piece of a path.
-    """
-
-    _write_project(path, [], [local_raster])
-    _replace_first_datasource(
-        path, f"<datasource>{SPLIT_DATASOURCE.format(port=port)}</datasource>"
-    )
-
-
 def write_vsi_directory_project(path: Path, source: Path, sub_layer: str) -> None:
     """真工程，数据源在一个名叫 ``vsi_data`` 的目录里。
 
-    ``/vsi`` 只有在打开路径时才是虚拟文件系统：目录名叫 ``vsi_data`` 的图层就是普通本地文件，而
-    按子串判断的实现把它当成远程数据源拒掉了。
+    ``/vsi`` 只有在打开路径时才是虚拟文件系统：目录名叫 ``vsi_data`` 的图层就是普通本地文件，
+    而按子串判远程源的旧扫描把它当成网络地址拒掉了。
 
     A real project whose datasource sits in a directory spelled ``vsi_data``.  ``/vsi`` is a
     virtual file system only when it opens the path: a layer in a directory called ``vsi_data``
-    is an ordinary local file, and a substring check refused it as a remote source.
+    is an ordinary local file, and the old value scan refused it as a remote source.
     """
 
-    from qgis.core import QgsVectorLayer
+    from qgis.core import QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     directory = path.parent / "vsi_data"
     directory.mkdir(exist_ok=True)
@@ -623,35 +503,19 @@ def write_vsi_directory_project(path: Path, source: Path, sub_layer: str) -> Non
 def write_subdataset_project(path: Path, local_raster: Path) -> None:
     """真工程，唯一图层是本地 GDAL 子数据集。
 
-    GDAL 的栅格 provider 不拆这种写法：写出来的 ``<datasource>`` 整个是 ``GTIFF_DIR:1:<file>``；
-    把它当成路径的逐图层检查会读成“在允许目录之外”，然后把图层删掉。工程先用普通文件写出来、
-    再改文本，和 ``_write_remote_project`` 一样：拿这种写法建图层，正是 ``read()`` 在用例里做的事。
+    GDAL 的栅格 provider 不拆这种写法：写出来的 ``<datasource>`` 整个是 ``GTIFF_DIR:1:<file>``，
+    路径只要求绝对，所以它原样进 provider、图层建得出来。工程先用普通文件写出来、再改文本，和
+    ``_write_remote_project`` 一样：拿这种写法建图层，正是 ``read()`` 在用例里做的事。
 
     A real project whose one layer is a local GDAL subdataset.  GDAL's raster provider does not
-    split the spelling: the written ``<datasource>`` is ``GTIFF_DIR:1:<file>`` whole, which a
-    per-layer check that took it for a path read as outside the roots and removed the layer for.
-    The project is written from the plain file and the text is replaced afterwards, as
-    ``_write_remote_project`` does: building the layer from the spelling is what ``read()`` does
-    during the case.
+    split the spelling: the written ``<datasource>`` is ``GTIFF_DIR:1:<file>`` whole, paths only
+    have to be absolute, so it reaches the provider as written and the layer builds.  The project is
+    written from the plain file and the text is replaced afterwards, as ``_write_remote_project``
+    does: building the layer from the spelling is what ``read()`` does during the case.
     """
 
     _write_project(path, [], [local_raster])
     _rewrite_datasource(path, f"GTIFF_DIR:1:{local_raster}")
-
-
-def write_subdataset_remote_project(path: Path, local_raster: Path, port: int) -> None:
-    """真工程，子数据集在自己的语法里写着一个远程文件。
-
-    ``NETCDF:"/vsicurl/http://…":temperature`` 是 GDAL 自己会打开的形状，标记不在值的开头；
-    只问开头的扫描就放了 ``read()`` 去取。
-
-    A real project whose one subdataset names a remote file inside its own syntax.
-    ``NETCDF:"/vsicurl/http://…":temperature`` is the shape GDAL opens by itself, and the marker
-    is not at the start of the value, so a scan that asked only the start let ``read()`` fetch it.
-    """
-
-    _write_project(path, [], [local_raster])
-    _rewrite_datasource(path, f'NETCDF:"{REMOTE_LISTENER.format(port=port)}":temperature')
 
 
 def _replace_first_datasource(path: Path, replacement: str) -> None:
@@ -687,52 +551,6 @@ def _replace_in_datasource_text(text: str, replacement: str) -> str:
     if not marker or replaced != 1:
         raise RuntimeError("the project XML holds no <datasource> to replace")
     return head + marker + rewritten
-
-
-def _encode_utf16(path: Path) -> None:
-    """把工程改写成带 BOM 的 UTF-16，QDomDocument 仍能读。
-
-    Rewrite a project in UTF-16 with a BOM, which QDomDocument still reads.
-    """
-
-    text = path.read_text(encoding="utf-8")
-    path.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
-
-
-def _space_datasource_tags(path: Path) -> None:
-    """给 ``datasource`` 标签加上 XML 允许的 ``>`` 前空格。
-
-    Give the ``datasource`` tags the whitespace XML allows before ``>``.
-    """
-
-    text = path.read_text(encoding="utf-8")
-    spaced = text.replace("<datasource>", "<datasource >").replace(
-        "</datasource>", "</datasource >"
-    )
-    if spaced == text:
-        raise RuntimeError(f"could not space the datasource tags in {path}")
-    path.write_text(spaced, encoding="utf-8")
-
-
-def _write_oversized_project(path: Path, local_raster: Path) -> None:
-    """一个合法工程被撑过扫描上限：磁盘上很小，解开 300 MB。
-
-    A valid project padded past the scan limit: tiny on disk, 300 MB unpacked.
-    """
-
-    seed = path.with_name(path.name + ".seed.qgs")
-    _write_project(seed, [], [local_raster])
-    document = seed.read_bytes()
-    seed.unlink()
-    path.with_name(seed.name + "_attachments.zip").unlink(missing_ok=True)
-    chunk = b" " * (1024 * 1024)
-    with (
-        zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive,
-        archive.open("project.qgs", "w") as member,
-    ):
-        member.write(document)
-        for _ in range(BOMB_MEMBER_BYTES // len(chunk)):
-            member.write(chunk)
 
 
 def _write_encrypted_project(path: Path, local_raster: Path) -> None:
@@ -810,7 +628,7 @@ def _write_labelled_project(path: Path, source: Path, sub_layer: str, count: int
     value holds a bare ``>``.
     """
 
-    from qgis.core import (
+    from qgis.core import (  # pyright: ignore[reportMissingImports]
         QgsPalLayerSettings,
         QgsTextFormat,
         QgsVectorLayer,
@@ -837,7 +655,7 @@ def _write_grouped_project(path: Path, source: Path, sub_layer: str, groups: int
     A real project whose one layer sits at the bottom of ``groups`` nested groups.
     """
 
-    from qgis.core import QgsVectorLayer
+    from qgis.core import QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     project = QgsProject()
     layer = QgsVectorLayer(f"{source}|layername={sub_layer}", "grouped", "ogr")
@@ -860,7 +678,7 @@ def write_csv_project(path: Path, data: Path) -> None:
     CSV's own directory, after ``initQgis()``, so QGIS stores the relative ``file:`` URI.
     """
 
-    from qgis.core import QgsProviderRegistry, QgsVectorLayer
+    from qgis.core import QgsProviderRegistry, QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     csv = data / "points.csv"
     csv.write_text("name,lon,lat\none,1.0,2.0\ntwo,3.0,4.0\n", encoding="utf-8")
@@ -892,7 +710,7 @@ def write_metadata_project(path: Path, source: Path, sub_layer: str) -> None:
     A real project whose layer metadata carries the dataset's own URL.
     """
 
-    from qgis.core import QgsLayerMetadata, QgsVectorLayer
+    from qgis.core import QgsLayerMetadata, QgsVectorLayer  # pyright: ignore[reportMissingImports]
 
     layer = QgsVectorLayer(f"{source}|layername={sub_layer}", "documented", "ogr")
     metadata = QgsLayerMetadata()
@@ -923,11 +741,11 @@ def _write_entity_project(path: Path) -> None:
 
 
 def _junction(link: Path, target: Path) -> Path | None:
-    """允许目录里的一个目录联接，解析后指向外面。
+    """工程目录里的一个目录联接，解析后指向外面。
 
     用联接而不是符号链接：符号链接需要本机不一定给的特权；对 ``Path.resolve`` 来说两者行为一样。
 
-    A directory link inside the allowed roots that resolves outside them.  A junction is used
+    A directory link inside the fixture tree that resolves outside it.  A junction is used
     because a symbolic link needs a privilege this machine may not grant; it resolves exactly
     like one for ``Path.resolve``.
     """

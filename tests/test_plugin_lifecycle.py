@@ -20,22 +20,22 @@ import types
 import weakref
 from typing import Any
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin import plugin
-from qgis_agent_plugin.core.config import Settings
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin import plugin  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.config import Settings  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     DUPLICATE_OPERATION,
     ENGINE_CLOSING,
     ExecutionStatus,
     FrameworkError,
 )
-from qgis_agent_plugin.core.registry import OperationRegistry
-from qgis_agent_plugin.core.runners import qgs_task
-from qgis_agent_plugin.operations import register_all
+from qgis_agent_plugin.core.registry import OperationRegistry  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.core.runners import qgs_task  # pyright: ignore[reportMissingImports]
+from qgis_agent_plugin.operations import register_all  # pyright: ignore[reportMissingImports]
 
 # 构建必须恰好注册这个集合，否则就是错的 / the build registers exactly this set, or it is wrong
-PRD_NAMES = frozenset(
+OPERATION_NAMES = frozenset(
     {
         "project.create",
         "project.open",
@@ -94,9 +94,9 @@ class FakeCrs:
 
 
 class FakeProject:
-    """工程单例，按插件的读法：一个信号加四路读取。
+    """工程单例，按插件的读法：一个信号加五路读取。
 
-    The project singleton as the plugin reads it: one signal and four reads.
+    The project singleton as the plugin reads it: one signal and five reads.
     """
 
     def __init__(self) -> None:
@@ -113,6 +113,11 @@ class FakeProject:
 
     def mapLayers(self) -> dict[str, Any]:
         return {}
+
+    def title(self) -> str:
+        # 新建或未命名工程的标题是空串，`project.get_info` 原样报它。
+        # An unnamed project's title is the empty string, and `project.get_info` reports it.
+        return ""
 
 
 class FakeTaskManager:
@@ -174,6 +179,19 @@ class FakeSettingsStore:
         return self.values.get(key)
 
 
+class FakeMessageLog:
+    """``QgsMessageLog`` 压成一份列表，日志面板的替身。
+
+    ``QgsMessageLog`` reduced to a list, standing in for the log panel.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str, Any]] = []
+
+    def logMessage(self, message: str, tag: str, level: Any) -> None:
+        self.lines.append((message, tag, level))
+
+
 class FakeQTimer:
     """把下一个事件循环回合记下来而不执行：单元测试里没有事件循环。
 
@@ -215,12 +233,14 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     Install a stand-in ``qgis`` package, so ``plugin`` talks to the fakes above.
     """
 
+    message_log = FakeMessageLog()
     state = types.SimpleNamespace(
         project=FakeProject(),
         application=FakeApplication(),
         managers=[],
         settings=FakeSettingsStore(),
         pending=[],
+        message_log=message_log,
     )
 
     def new_manager() -> FakeTaskManager:
@@ -235,6 +255,10 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
         QgsTaskManager=new_manager,
         QgsSettings=lambda: state.settings,
         QgsTask=FakeQgsTask,
+        Qgis=types.SimpleNamespace(
+            MessageLevel=types.SimpleNamespace(Info="info", Warning="warning", Critical="critical")
+        ),
+        QgsMessageLog=message_log,
     )
     qtcore = _module("qgis.PyQt.QtCore", QObject=FakeQObject, QTimer=FakeQTimer(state.pending))
     pyqt = _module("qgis.PyQt", QtCore=qtcore)
@@ -252,12 +276,12 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
 # --- 构建交付什么 / what the build ships ---------------------------------------
 
 
-def test_the_build_registers_exactly_the_seventeen_operations_of_the_prd() -> None:
+def test_the_build_registers_exactly_seventeen_operations() -> None:
     registry = OperationRegistry()
 
     register_all(registry)
 
-    assert {spec.name for spec in registry.list_specs()} == PRD_NAMES
+    assert {spec.name for spec in registry.list_specs()} == OPERATION_NAMES
 
 
 def test_a_duplicate_is_still_the_registry_refusal() -> None:
@@ -294,17 +318,17 @@ def test_the_supervisor_holds_work_until_the_last_task_is_gone() -> None:
     supervisor = plugin.Supervisor(object(), object(), dispose=lambda: disposed.append(True))
     supervisor.attach(7)
     supervisor.attach(9)
-    supervisor.close()
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
 
-    assert supervisor.live == frozenset({7, 9})
+    assert supervisor.live == frozenset({7, 9})  # pyright: ignore[reportAttributeAccessIssue]
     assert disposed == []
 
     supervisor.release(7)
-    assert supervisor.live == frozenset({9})
+    assert supervisor.live == frozenset({9})  # pyright: ignore[reportAttributeAccessIssue]
     assert disposed == []
 
     supervisor.release(9)
-    assert supervisor.live == frozenset()
+    assert supervisor.live == frozenset()  # pyright: ignore[reportAttributeAccessIssue]
     assert disposed == [True]
 
 
@@ -312,8 +336,8 @@ def test_a_supervisor_with_nothing_live_disposes_itself_at_once() -> None:
     disposed: list[bool] = []
     supervisor = plugin.Supervisor(object(), object(), dispose=lambda: disposed.append(True))
 
-    supervisor.close()
-    supervisor.close()
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
     supervisor.release(1)  # 没持有过的 id 不算第二次释放 / an id never held is no second disposal
 
     assert disposed == [True]
@@ -329,7 +353,7 @@ def test_the_supervisor_lets_go_of_the_work_it_held() -> None:
     del engine
     assert engine_ref() is not None
 
-    supervisor.close()
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
 
     assert engine_ref() is None
 
@@ -343,8 +367,8 @@ def test_the_shell_belongs_to_the_application_and_follows_its_manager(fake_qgis)
 
     manager.taskAdded.emit(11)
     manager.taskAdded.emit(12)
-    supervisor.close()
-    assert supervisor.live == frozenset({11, 12})
+    supervisor.close()  # pyright: ignore[reportAttributeAccessIssue]
+    assert supervisor.live == frozenset({11, 12})  # pyright: ignore[reportAttributeAccessIssue]
     assert supervisor.deleted is False
 
     manager.taskAboutToBeDeleted.emit(11)
@@ -352,7 +376,7 @@ def test_the_shell_belongs_to_the_application_and_follows_its_manager(fake_qgis)
 
     manager.taskAboutToBeDeleted.emit(12)
     assert supervisor.deleted is True
-    assert supervisor.live == frozenset()
+    assert supervisor.live == frozenset()  # pyright: ignore[reportAttributeAccessIssue]
 
 
 # --- initGui 与 unload / initGui and unload ------------------------------------
@@ -374,7 +398,7 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
 
         assert iface.agent_engine is engine
         assert iface.agent_registry is registry
-        assert {spec.name for spec in registry.list_specs()} == PRD_NAMES
+        assert {spec.name for spec in registry.list_specs()} == OPERATION_NAMES
         # 工程代数只由这一个信号推进，只连一次 / one connection to the signal that bumps the epoch
         assert len(fake_qgis.project.aboutToBeCleared.slots) == 1
         assert supervisor.parent_object is fake_qgis.application
@@ -382,7 +406,8 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
         # Console 就是这样调用的，底下是伪造的工程 / what the Console does, on a fake project
         record = engine.run_sync("project.get_info", {})
         assert record.status is ExecutionStatus.SUCCEEDED
-        assert record.result is not None and record.result["project_epoch"] == 0
+        # 记录自己带着它被接受时的工程代数 / a record carries the epoch it was accepted under
+        assert record.project_epoch == 0
 
         instance.unload()
 
@@ -406,6 +431,33 @@ def test_three_loads_and_unloads_leave_no_connection_and_no_session(fake_qgis) -
     assert len(fake_qgis.managers) == 3
 
 
+def test_session_logs_reach_the_message_log_and_stop_at_unload(fake_qgis) -> None:
+    """会话日志进 QgsMessageLog，卸载后不再进。
+
+    坞窗把操作者指向 QGIS 日志面板，所以 initGui 必须把 Python logging 转发进面板；
+    unload 拆掉转发，之后的行面板看不见。
+
+    Session logs reach QgsMessageLog, and stop at unload. The dock points the operator at
+    the QGIS log panel, so initGui must forward Python logging into the panel; unload
+    removes the forwarding, and later lines never reach it.
+    """
+
+    iface = types.SimpleNamespace()
+    instance = plugin.Plugin(iface)
+    instance.initGui()
+
+    plugin._LOGGER.error("a session error")
+    assert ("a session error", "QGIS Agent") in [
+        (message, tag) for message, tag, _level in fake_qgis.message_log.lines
+    ]
+
+    instance.unload()
+
+    before = len(fake_qgis.message_log.lines)
+    plugin._LOGGER.error("an error after unload")
+    assert len(fake_qgis.message_log.lines) == before
+
+
 def test_a_count_key_below_one_refuses_the_load_and_publishes_nothing(fake_qgis) -> None:
     iface = types.SimpleNamespace()
     fake_qgis.settings.values["qgis_agent_plugin/max_pending"] = 0
@@ -420,6 +472,31 @@ def test_a_count_key_below_one_refuses_the_load_and_publishes_nothing(fake_qgis)
     assert "max_pending" in str(refusal.value)
     assert not hasattr(iface, "agent_engine")
     assert not hasattr(iface, "agent_registry")
+
+
+def test_a_session_that_dies_half_assembled_leaves_no_log_forwarding(
+    fake_qgis: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """装配到一半就死的会话不把日志转发漏给进程。
+
+    QGIS 对加载失败的插件不调 unload，所以装在中间的 handler 会活到进程结束、重新加载后
+    每条日志出现两次；转发放在最后一步，失败就什么都不留下。
+
+    A session that dies half-assembled leaks no forwarding into the process. QGIS does
+    not call unload for a plugin whose load failed, so a handler installed half-way would
+    live to process end and double every line on the next load; installed as the last
+    step, a failure leaves nothing behind.
+    """
+
+    def refuse(*args: Any) -> None:
+        raise RuntimeError("a broken build")
+
+    monkeypatch.setattr("qgis_agent_plugin.operations.register_all", refuse)
+    with pytest.raises(RuntimeError):
+        plugin.Plugin(types.SimpleNamespace()).initGui()
+
+    # 转发是 initGui 的最后一步，坏装配留不下它 / forwarding is initGui's last step, so none leaks
+    assert logging.getLogger("qgis_agent_plugin").handlers == []
 
 
 def test_unloading_keeps_a_task_that_is_still_running(fake_qgis) -> None:
@@ -454,12 +531,12 @@ def test_unloading_keeps_a_task_that_is_still_running(fake_qgis) -> None:
     # 活着的任务被留下，不随实例丢弃，由 supervisor 单独持有，另一条用例验证了这点
     # the live task is kept, not dropped with the plugin instance: the supervisor is the one
     # holder, as ``test_the_supervisor_lets_go_of_the_work_it_held`` shows
-    assert supervisor.live == frozenset({1})
+    assert supervisor.live == frozenset({1})  # pyright: ignore[reportAttributeAccessIssue]
     assert supervisor.deleted is False
 
     # 最后一项任务已结束，外壳自己清理掉 / the last task is gone, so the shell clears itself
     fake_qgis.managers[-1].taskAboutToBeDeleted.emit(1)
-    assert supervisor.live == frozenset()
+    assert supervisor.live == frozenset()  # pyright: ignore[reportAttributeAccessIssue]
     assert supervisor.deleted is True
 
 

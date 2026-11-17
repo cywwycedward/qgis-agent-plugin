@@ -15,7 +15,7 @@
 | 组 | 成员 | 何时跑 | 命令 |
 | --- | --- | --- | --- |
 | 规范组 | `test_comments`、`test_source_rules`、`test_docs`、`test_package`（`pytestmark = pytest.mark.conformance`） | **每次改完代码** | `npm run test:rules`（2 s，12 条） |
-| 功能组 | 其余全部（契约、状态机、引擎、适配器、操作、坞窗） | 按需，合并前必跑 | `npm run test`（34 s，744 条） |
+| 功能组 | 其余全部（契约、状态机、引擎、适配器、操作、坞窗） | 按需，合并前必跑 | `npm run test`（15 s，627 条） |
 
 新写测试默认为功能组；只有当它断言"对整个仓库都成立、读源码/文档、不需要 QGIS"时才加
 `pytestmark = pytest.mark.conformance`，否则别把它拖进每次必跑的那 2 秒里。不要用替身断言真实 PyQGIS 行为（`read()` 是否真的
@@ -104,8 +104,12 @@
   `file:./points.csv` 那种工程写不出来。
 - `initQgis()` 不带 Processing 的 provider，所以 harness 显式注册它们；注册失败时
   `processing.*` 的用例 `Skip` 并说明原因，而不是对着空注册表报错。
-- `CASES` 元组（`cases.py` 末尾）共 98 条，按前缀分六组：`AT*` 56、`P*` 16、`S*` 6、`A*` 7、`V*` 8、
-  `R*` 5；用例函数名跟着 id 走（`at_01_*`、`p13_*`…），所以**不能按 `at_` 前缀数用例**。每条返回
+- `CASES` 共 93 条，按前缀分六组：`AT*` 48、`P*` 19、`S*` 6、`A*` 7、`V*` 8、`R*` 5。`cases.py` 里
+  只有把六族按跑的顺序拼起来的 `CASES`；用例本体在 `cases_engine.py`（AT 的引擎与会话部分）、
+  `cases_project.py`（AT 的工程部分）、`cases_layer.py`（AT 的图层部分）、`cases_processing.py`、
+  `cases_qml.py`、`cases_renderer.py`，共用的读法在 `helpers.py`。所以 `AT*` 这一组横跨三个模块，
+  跑的顺序是：引擎与会话 → 工程 → 图层 → 处理 → 样式 → 渲染器。用例函数名跟着 id 走
+  （`at_01_*`、`p13_*`…），所以**不能按 `at_` 前缀数用例**。每条返回
   一行证据；判定是 `tally.Row` 的字段，**不从打印文本里数 `PASS`/`FAIL`**（证据里出现这些词不改变
   统计）。用例抛 `AssertionError` 是 FAIL，抛 `harness.Skip` 是 SKIP，其它异常同样记 FAIL 并带文件名
   与行号。

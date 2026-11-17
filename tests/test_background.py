@@ -34,7 +34,6 @@ from qgis_agent_plugin.core.models import (
     INVALID_LAYER,
     LAYER_NOT_FOUND,
     OUTPUT_VALIDATION_FAILED,
-    SNAPSHOT_LIMIT_EXCEEDED,
     STALE_PROJECT,
     UNSUPPORTED_EXECUTION_MODE,
     ExecutionRecord,
@@ -48,7 +47,7 @@ from qgis_agent_plugin.operations.layer import (
     FieldSum,
     FieldValues,
     LayerSumNumericField,
-    SumNumericFieldParams,
+    LayerSumNumericFieldParams,
 )
 
 QUEUED = ExecutionStatus.QUEUED
@@ -93,6 +92,28 @@ class FakeFields:
         return self._fields[index]
 
 
+class FakeFeatureRequest:
+    """``QgsFeatureRequest`` 只留求和快照建请求所需的部分，并记下收到的裁剪。
+
+    Enough of ``QgsFeatureRequest`` for the sum snapshot to build its request,
+    remembering the trim it was handed.
+    """
+
+    NoGeometry = 1
+
+    def __init__(self) -> None:
+        self.flags = 0
+        self.attribute_indexes: list[int] = []
+
+    def setFlags(self, flags: int) -> FakeFeatureRequest:  # noqa: N802 - the QGIS name
+        self.flags = flags
+        return self
+
+    def setSubsetOfAttributes(self, indexes: list[int]) -> FakeFeatureRequest:  # noqa: N802
+        self.attribute_indexes = list(indexes)
+        return self
+
+
 class FakeFeature:
     def __init__(self, values: tuple[Any, ...]) -> None:
         self._values = values
@@ -112,10 +133,16 @@ class FakeVectorLayer:
         rows: list[tuple[Any, ...]],
         fields: list[FakeField] | None = None,
         valid: bool = True,
+        selected_rows: list[tuple[Any, ...]] | None = None,
     ) -> None:
         self.rows = rows
         self._fields = FakeFields(fields if fields is not None else [FakeField(FIELD)])
         self._valid = valid
+        # 选择集：空列表就是“没有选中任何要素”。
+        # The selection: an empty list means nothing is selected.
+        self.selected_rows = list(selected_rows or [])
+        # 最后一次读请求，快照裁剪那条用例查它 / the last request; the trim test checks it
+        self.last_request: Any = None
 
     def isValid(self) -> bool:  # noqa: N802 - the QGIS name
         return self._valid
@@ -123,8 +150,16 @@ class FakeVectorLayer:
     def fields(self) -> FakeFields:
         return self._fields
 
-    def getFeatures(self) -> Any:  # noqa: N802 - the QGIS name
+    def getFeatures(self, request: Any = None) -> Any:  # noqa: N802 - the QGIS name
+        self.last_request = request
         return iter([FakeFeature(row) for row in self.rows])
+
+    def selectedFeatureCount(self) -> int:  # noqa: N802 - the QGIS name
+        return len(self.selected_rows)
+
+    def getSelectedFeatures(self, request: Any = None) -> Any:  # noqa: N802 - the QGIS name
+        self.last_request = request
+        return iter([FakeFeature(row) for row in self.selected_rows])
 
 
 @pytest.fixture(autouse=True)
@@ -136,6 +171,7 @@ def fake_qgis(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
     core = types.ModuleType("qgis.core")
     core.QgsVectorLayer = FakeVectorLayer  # type: ignore[attr-defined]
+    core.QgsFeatureRequest = FakeFeatureRequest  # type: ignore[attr-defined]
     core.NULL = NULL  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "qgis", types.ModuleType("qgis"))
     monkeypatch.setitem(sys.modules, "qgis.core", core)
@@ -201,9 +237,40 @@ def test_a_field_sum_is_computed_from_a_copied_snapshot() -> None:
         "count": 2,
         "skipped_null": 1,
         "total": 15.0,
+        "selected_only": False,
         "snapshot_project_epoch": 0,
     }
     assert record.progress == 100
+
+
+def test_a_selection_narrows_the_sum_only_when_it_is_asked_for() -> None:
+    """选择集只在调用方点名时才用：面板上那是要用户勾的开关，默认不勾。
+
+    A selection is used only when the caller names it: on the panel that is a switch the user
+    ticks, and it starts unchecked.
+    """
+
+    layer = make_layer([(1.0,), (2.0,), (3.0,)], selected_rows=[(2.0,), (3.0,)])
+    harness = harness_with(layer)
+
+    whole = settled(harness, submit_sum(harness))
+    assert whole.status is SUCCEEDED
+    assert whole.result is not None
+    assert whole.result["count"] == 3
+    assert whole.result["total"] == 6.0
+    assert whole.result["selected_only"] is False
+
+    selected = settled(
+        harness,
+        harness.submit(SUM, {"layer_id": "layer-1", "field_name": FIELD, "selected_only": True}),
+    )
+    assert selected.status is SUCCEEDED
+    assert selected.result is not None
+    assert selected.result["count"] == 2
+    assert selected.result["total"] == 5.0
+    assert selected.result["selected_only"] is True
+    # 选择集也走同一个裁剪请求 / the selection read takes the same trimmed request.
+    assert layer.last_request.attribute_indexes == [0]
 
 
 def test_a_null_that_arrives_as_the_qgis_null_value_is_skipped() -> None:
@@ -217,6 +284,20 @@ def test_a_null_that_arrives_as_the_qgis_null_value_is_skipped() -> None:
     assert record.result["count"] == 2
     assert record.result["skipped_null"] == 1
     assert record.result["total"] == 8.0
+
+
+def test_the_snapshot_asks_the_layer_for_only_the_field_it_sums() -> None:
+    layer = make_layer([(1,)])
+    harness = harness_with(layer)
+
+    settled(harness, submit_sum(harness))
+
+    # 只读一个字段、不要几何：请求必须带 NoGeometry 且裁剪到那一列
+    # one field and no geometry: the request must carry NoGeometry and that column
+    request = layer.last_request
+    assert request is not None
+    assert request.flags == FakeFeatureRequest.NoGeometry
+    assert request.attribute_indexes == [0]
 
 
 def test_every_value_null_is_an_empty_sum_not_a_failure() -> None:
@@ -241,7 +322,7 @@ def test_the_task_depends_on_the_layer_it_reads() -> None:
     # the task declares the layer it reads, which is what lets QGIS cancel it
     assert harness.tasks[0].dependent_layers == [layer]
     assert LayerSumNumericField().dependent_layer_ids(
-        SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
+        LayerSumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
     ) == ["layer-1"]
 
 
@@ -265,14 +346,16 @@ def test_a_synchronous_field_sum_is_unsupported_and_leaves_no_record() -> None:
 @pytest.mark.parametrize("value", [None, 1, "", True])
 def test_the_parameters_accept_only_a_plain_layer_and_field_name(value: Any) -> None:
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate({"layer_id": value, "field_name": FIELD})
+        LayerSumNumericFieldParams.model_validate({"layer_id": value, "field_name": FIELD})
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate({"layer_id": "a", "field_name": value})
+        LayerSumNumericFieldParams.model_validate({"layer_id": "a", "field_name": value})
 
 
 def test_an_undeclared_parameter_is_refused() -> None:
     with pytest.raises(ValidationError):
-        SumNumericFieldParams.model_validate({"layer_id": "a", "field_name": FIELD, "limit": 10})
+        LayerSumNumericFieldParams.model_validate(
+            {"layer_id": "a", "field_name": FIELD, "limit": 10}
+        )
 
 
 def test_the_operation_registers_as_a_background_query() -> None:
@@ -385,21 +468,6 @@ def test_a_sum_of_finite_values_is_still_written_and_parsed_strictly() -> None:
     assert record.status is SUCCEEDED
     assert record.result is not None and record.result["total"] == 4.0
     assert json.loads(json.dumps(record.result, allow_nan=False))["total"] == 4.0
-
-
-def test_more_features_than_the_limit_is_refused_not_truncated() -> None:
-    harness = harness_with(
-        make_layer([(1,), (2,), (3,)]), settings=Settings(max_snapshot_features=2)
-    )
-
-    record = settled(harness, submit_sum(harness))
-
-    # 看起来完整的残缺和不如直接拒绝 / a partial sum that looks complete is worse than a refusal
-    assert record.status is FAILED
-    assert record.error is not None
-    assert record.error.code == SNAPSHOT_LIMIT_EXCEEDED
-    assert record.result is None
-    assert harness.tasks == []
 
 
 # --- 取消 / cancellation ------------------------------------------------------
@@ -648,6 +716,7 @@ def test_the_worker_stops_when_the_control_reports_a_cancel() -> None:
         field_name=FIELD,
         values=tuple(float(value) for value in range(1000)),
         skipped_null=0,
+        selected_only=False,
         project_epoch=0,
     )
 
@@ -665,6 +734,7 @@ def test_the_worker_reports_progress_across_the_whole_range() -> None:
         field_name=FIELD,
         values=tuple(1.0 for _ in range(400)),
         skipped_null=0,
+        selected_only=False,
         project_epoch=0,
     )
     control = _NoCancel()
@@ -679,9 +749,14 @@ def test_the_worker_reports_progress_across_the_whole_range() -> None:
 def test_the_finalize_refuses_a_snapshot_from_an_older_generation() -> None:
     harness = harness_with(make_layer([(1,)]))
     operation = LayerSumNumericField()
-    request = SumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
+    request = LayerSumNumericFieldParams(layer_id="layer-1", field_name=FIELD)
     snapshot = FieldValues(
-        layer_id="layer-1", field_name=FIELD, values=(1.0,), skipped_null=0, project_epoch=0
+        layer_id="layer-1",
+        field_name=FIELD,
+        values=(1.0,),
+        skipped_null=0,
+        selected_only=False,
+        project_epoch=0,
     )
     result = operation.execute_worker(snapshot, _NoCancel())
     harness.lifecycle.bump()

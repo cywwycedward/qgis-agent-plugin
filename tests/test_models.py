@@ -9,10 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-import pytest
-from pydantic import BaseModel, StrictBool, ValidationError
+import pytest  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel, StrictBool, ValidationError  # pyright: ignore[reportMissingImports]
 
-from qgis_agent_plugin.core.models import (
+from qgis_agent_plugin.core.models import (  # pyright: ignore[reportMissingImports]
     ERROR_CODES,
     INTERNAL_ERROR,
     LAYER_NOT_FOUND,
@@ -32,7 +32,7 @@ from qgis_agent_plugin.core.models import (
 # 它是调用方唯一能分支的词汇表。
 # The whole error vocabulary: one more is a defect.
 # It is the only vocabulary the callers can branch on.
-PRD_ERROR_CODES = {
+EXPECTED_ERROR_CODES = {
     "OPERATION_NOT_FOUND",
     "INVALID_OPERATION_DEFINITION",
     "DUPLICATE_OPERATION",
@@ -41,7 +41,6 @@ PRD_ERROR_CODES = {
     "UNSUPPORTED_EXECUTION_MODE",
     "EXECUTION_NOT_FOUND",
     "INVALID_INPUT",
-    "INVALID_CRS",
     "PROJECT_REPLACE_REQUIRED",
     "PROJECT_OPEN_FAILED",
     "PROJECT_SAVE_FAILED",
@@ -52,7 +51,6 @@ PRD_ERROR_CODES = {
     "LAYER_NOT_FOUND",
     "LAYER_NOT_IN_TREE",
     "INVALID_FIELD_TYPE",
-    "SNAPSHOT_LIMIT_EXCEEDED",
     "TOO_MANY_EXECUTIONS",
     "TASK_SUBMISSION_FAILED",
     "STALE_PROJECT",
@@ -86,8 +84,8 @@ def record(**overrides: object) -> ExecutionRecord:
     return ExecutionRecord(**values)
 
 
-def test_error_codes_are_exactly_the_prd_table() -> None:
-    assert frozenset(PRD_ERROR_CODES) == ERROR_CODES
+def test_error_codes_are_exactly_the_expected_set() -> None:
+    assert frozenset(EXPECTED_ERROR_CODES) == ERROR_CODES
 
 
 def test_framework_error_carries_its_code_and_message() -> None:
@@ -216,7 +214,7 @@ def test_operation_spec_has_exactly_the_documented_fields() -> None:
     }
 
 
-def test_cancel_receipt_has_the_prd_fields_and_no_reason_by_default() -> None:
+def test_cancel_receipt_has_the_expected_fields_and_no_reason_by_default() -> None:
     receipt = CancelReceipt(execution_id="exec-1", accepted=False, status=ExecutionStatus.QUEUED)
     assert receipt.reason is None
     assert set(CancelReceipt.model_fields) == {
@@ -227,7 +225,7 @@ def test_cancel_receipt_has_the_prd_fields_and_no_reason_by_default() -> None:
     }
 
 
-def test_cancel_receipt_reason_is_the_prd_set() -> None:
+def test_cancel_receipt_reason_is_one_of_the_expected_values() -> None:
     for reason in ("ALREADY_TERMINAL", "NOT_INTERRUPTIBLE", "FINALIZING"):
         receipt = CancelReceipt(
             execution_id="exec-1",

@@ -125,7 +125,7 @@ npm run deploy:list   # 只列会拷贝什么，不落盘
 | 组 | 断的是什么 | 什么时候跑 | 命令 | 条数与耗时 |
 | --- | --- | --- | --- | --- |
 | **规范组**（`conformance`） | 整个仓库的成文规则：注释双语、导入位置、文档索引、注册面 | **每次改完代码都跑** | `npm run test:rules` | 12 条，约 2 s |
-| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 744 条，约 33 s |
+| **功能组** | 具体行为：契约、状态机、引擎、适配器、操作、坞窗 | 按需——改到那块逻辑，或合并前 | `npm run test` | 627 条，约 15 s |
 
 一条测试属于规范组，当且仅当三件事都成立：它断言的是**对整个仓库都成立**的规则（不是某条行为）、
 它**读源码或文档**而不是驱动代码、它**不需要 QGIS**。文件顶部写 `pytestmark = pytest.mark.conformance`
@@ -138,18 +138,18 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 ```
 
 通过的判据（三行都要在输出里）：`All checks passed`、`N files already formatted`、
-`12 passed, 732 deselected`。
+`12 passed, 615 deselected`。
 
 **按需加跑**（碰了什么跑什么）：
 
 | 改动 | 加跑 | 通过长什么样 |
 | --- | --- | --- |
-| `src/` 里任何逻辑 | `npm run test`（全量） | `744 passed` |
-| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `732 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
+| `src/` 里任何逻辑 | `npm run test`（全量） | `627 passed` |
+| 改了导入层、新增/移动模块 | 裸解释器 `& 'D:\QGIS 3.44.13\apps\Python312\python.exe' -m pytest -q tests` | `570 passed, 3 skipped`：多出的 `test_ui_dock.py` 与 `test_claim_root.py` 整模块、`test_engine.py` 一条真信号用例在裸解释器里 skip，属预期 |
 | 碰了真实 PyQGIS 行为、耗时阈值、新增 Operation | 验收跑 `& 'D:\QGIS 3.44.13\bin\python-qgis-ltr.bat' tests\qgis_integration\run_acceptance.py` | `summary: PASS …, FAIL 0, SKIP n`，退出码 0 |
 | 新增/移动模块 | 把模块名加进 `tests/test_package.py` 的导入列表——守卫只覆盖它列出的模块 | `test_package` 仍绿 |
-| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、`cases.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
-| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `744 passed` |
+| 新增 Operation | `tests/test_package.py` 的数量与名字断言、`metadata.txt` 的 description/about、本文档 §1 与 §7.6 的计数、对应族的 `cases_*.py` 至少一条验收用例 | 规范组 + 验收跑都绿 |
+| 改 `ui/` | `npm run test`（`test_ui_dock.py` 在裸解释器里整模块 skip，只有 QGIS 解释器能看见它） | `627 passed` |
 | 改 `scripts/` | `npm run deploy:list` 干跑看清单，再 `npm run deploy`；部署是镜像，之后必须重启 QGIS | 清单不含 `__pycache__`，退出码 0 |
 | 装依赖 | 先经用户批准（同一 QGIS 全局环境），装完同步 `ENVIRONMENT.md` 的清单 | — |
 
@@ -158,7 +158,7 @@ npm run check      # ruff check + ruff format --check + npm run test:rules
 - 裸解释器的绿色少三个用例，不能按条数比；**按解释器判断跑没跑过**。
 - 验收跑退出码 `2` 是"拒绝使用给定的工作目录"，不是失败；换个空目录，或让脚本自己建。
 - PowerShell 里 `$LASTEXITCODE` 会被管道上一条命令污染，以单独跑一次的输出为准。
-- 机器忙时时间阈值会偶发红（`.qgz` 成员数那条 1.5 s 的上限），先单跑那条，再判断是不是负载。
+- 机器忙时时间阈值会偶发红（`AT-40` / `AT-43` 那两条 20 s 的上限），先单跑那条，再判断是不是负载。
 - "应该能过"不算结论：报告里贴实际输出，红的就是红的。
 
 ### 2.4 工具配置
@@ -192,6 +192,7 @@ qgis-agent-plugin/
 ├── docs/                         面向操作者的说明与开发/协作规范
 │   ├── INSTALL.md                安装、配置、排错、卸载
 │   ├── CONSOLE.md                Python Console 的实测样例
+│   ├── processing-run-algorithm-examples.json   processing.run_algorithm 的可跑参数实例
 │   ├── audit/                    生成的审计页面
 │   └── agents/                   规范文档（本目录）
 │       ├── DEVELOP.md            本文档：唯一的开发规范
@@ -211,7 +212,7 @@ qgis-agent-plugin/
 │   │   ├── engine.py             OperationEngine：run_sync/submit/get/cancel/shutdown/on_project_replaced
 │   │   ├── execution_store.py    ExecutionStore：记录快照、状态机、保留策略
 │   │   ├── context.py            ProjectLifecycle（epoch）与 require_main_thread
-│   │   ├── config.py             Settings（五项配置）与 from_mapping
+│   │   ├── config.py             Settings（四项配置）与 from_mapping
 │   │   ├── security.py           absolute_path（只要求绝对路径）
 │   │   └── runners/
 │   │       ├── __init__.py       只有 docstring
@@ -219,12 +220,12 @@ qgis-agent-plugin/
 │   │       └── qgs_task.py       OperationTaskRunner：QgsTask 适配器（两并发、进度、取消、完成）
 │   ├── operations/
 │   │   ├── __init__.py           PROJECT_/LAYER_/PROCESSING_OPERATIONS、OPERATIONS、register_all
-│   │   ├── project.py            四个 project.* 操作及其模型与读前扫描
+│   │   ├── project.py            四个 project.* 操作及其模型与深度守卫
 │   │   ├── layer.py              十个 layer.* 操作及其模型、QML 与 renderer 构建
 │   │   └── processing.py         三个 processing.* 操作及其 JSON 边界
 │   └── ui/
 │       ├── __init__.py           只有 docstring（保持空壳，裸解释器不会顺着它碰到 Qt）
-│       ├── dock.py               OperationDock：按 input_schema 生成表单、运行、轮询、显示记录
+│       ├── dock.py               OperationDock：按 input_schema 生成表单、运行、轮询、三块记录
 │       └── theme.py              唯一配色来源：从 QPalette 派生颜色、对比度自检、生成 QSS
 └── tests/
     ├── test_contracts.py         协议：策略与阶段声明、校验拒绝
@@ -240,14 +241,21 @@ qgis-agent-plugin/
     ├── test_qgs_task.py          适配器记账：两槽、task id、100 ms 进度窗、提交被拒
     ├── test_background.py        后台端到端：快照、取消、换代、卸载（假任务）
     ├── test_plugin_lifecycle.py  会话装配、信号连接、epoch、Supervisor、重复加载
-    ├── test_ui_dock.py           坞窗：选择器、表单、状态、配色对比度、两条引擎路径
+    ├── test_ui_dock.py           坞窗：选择器、表单、状态、三块记录、配色对比度、入口、两条引擎路径
     ├── test_package.py           [规范组] 裸解释器导入守卫 + 十七个 Operation 注册 + dock 源码守则
     ├── test_comments.py          [规范组] 注释与 docstring：双语、不引用文档、shortcut 标记存活
     ├── test_source_rules.py      [规范组] 导入位置、__future__、日志器名、主题不写十六进制颜色
     ├── test_docs.py              [规范组] 文档索引与相对链接：每份规范都被索引、没指向已删文档
     └── qgis_integration/         真实 QGIS 验收跑（非 pytest 用例）
         ├── run_acceptance.py     入口：临时目录、临时 profile、打印逐条结果与汇总
-        ├── cases.py              每条验收用例（返回一行证据，失败抛 AssertionError）
+        ├── cases.py              唯一的对外表面：把六个族的元组按跑的顺序拼成 CASES
+        ├── cases_engine.py       引擎、执行与会话的用例（AT 里的注册、排队、取消、代数、会话）
+        ├── cases_project.py      四项 project.* 的用例（AT 里的换工程、打开、保存、路径）
+        ├── cases_layer.py        图层装载、列表、可见性与字段求和的用例（AT 的一部分）
+        ├── cases_processing.py   三个 processing.* 的用例，以及验收自己注册的提供者（P）
+        ├── cases_qml.py          QML 导出的用例（S）
+        ├── cases_renderer.py     渲染器候选、读写与安装的用例（A、V、R）
+        ├── helpers.py            用例共用的读法：错误码、结果、真实图层、一份 QML
         ├── fixtures.py           用 PyQGIS 现场生成 GeoPackage/GeoTIFF/QGZ/损坏文件等
         ├── harness.py            headless QgsApplication、真实 QgsProject/QgsTaskManager、探针操作
         ├── tally.py              从判定字段统计 PASS/FAIL/SKIP，不从文本里数
@@ -262,7 +270,7 @@ qgis-agent-plugin/
 
 | 模块 | 公开名字 | 说明 |
 | --- | --- | --- |
-| `core/models.py` | 25 个错误码常量、`ERROR_CODES` | 见 §7.4 的完整表 |
+| `core/models.py` | 23 个错误码常量、`ERROR_CODES` | 见 §7.4 的完整表 |
 | | `OperationKind`、`ExecutionStrategy`、`ExecutionStatus` | 三个 `StrEnum` |
 | | `FrameworkError(code, message)` | 控制面异常；构造时校验 code 已知 |
 | | `ErrorDetail`、`CancelReceipt`、`ExecutionRecord`、`OperationSpec` | Pydantic DTO，全部 `extra="forbid"` |
@@ -278,7 +286,7 @@ qgis-agent-plugin/
 | | `BackgroundRunner`、`BackgroundCanceller` | 后台适配器的两个注入点（类型别名） |
 | `core/execution_store.py` | `ExecutionStore`、`TERMINAL_STATUSES` | 唯一的记录写入者 |
 | `core/context.py` | `ProjectLifecycle`、`require_main_thread` | epoch 与线程 |
-| `core/config.py` | `Settings` | 五项配置的 frozen dataclass |
+| `core/config.py` | `Settings` | 四项配置的 frozen dataclass |
 | `core/security.py` | `absolute_path` | 路径参数的唯一规则：必须是绝对路径 |
 | `core/runners/main_thread.py` | `MainThreadRunner` | `post(execution_id, callback)` |
 | `core/runners/qgs_task.py` | `OperationTaskRunner`、`task_class()` | 后台适配器与 `QgsTask` 子类 |
@@ -388,6 +396,7 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
   dataclass；`OperationRegistry` 与 `ExecutionStore` 交出的是深拷贝，调用方改不动内部状态。
 - 记录里的 `error.message` 是给调用方看的：不带原始路径、provider URI，也不带异常原文。异常
   文本进日志（`log.exception`），进记录只有类型名（`"ValueError: unexpected failure"`）。
+  `processing.run_algorithm` 是唯一例外：失败的运行把 QGIS 报给用户的那一句当 message（§7.6）。
 - 不写"以后可能用到"的参数、配置、抽象。没有第二个调用方的包装层不要建。
 
 ### 5.3 日志
@@ -409,12 +418,13 @@ operations、plugin 与 ui 包（`ui/__init__.py` 是空壳，所以 `ui.theme` 
 | Operation 名字 | `<group>.<verb>`，两段都小写 snake，只允许一个点 | `layer.set_visibility` |
 | Operation 类 | CamelCase，模块内以能力族开头 | `LayerSetVisibility`、`ProjectOpen` |
 | 输入/结果模型 | `<操作类名>Params` / `<操作类名>Result` | `LayerAddParams`、`ProjectOpenResult` |
+| 输出里的嵌套 DTO | 普通 `BaseModel`，自己写 `model_config = ConfigDict(extra="forbid")`；**不**继承 `Result` | `LayerSummary`、`ProcessingMessage` |
 | 后台快照/中间结果 | 描述数据的名词 + `Values` / `Sum` 等 | `FieldValues`、`FieldSum` |
 | 测试 | 文件 `test_<被测模块>.py`；用例名是一句描述行为的短句（下划线连接，不是固定的三段式） | `test_a_queued_call_cancelled_before_its_turn_never_runs`、`test_progress_rewrites_the_record_at_most_once_per_interval` |
-| 常量 | 全大写；上限类常量带单位或含义 | `MAX_PROJECT_BYTES`、`PROGRESS_INTERVAL_SECONDS` |
+| 常量 | 全大写；上限类常量带单位或含义 | `MAX_PROJECT_DEPTH`、`PROGRESS_INTERVAL_SECONDS` |
 
-历史例外：`layer.sum_numeric_field` 的模型叫 `SumNumericFieldParams` / `SumNumericFieldResult`
-（没有 `Layer` 前缀）。新代码按上表走，不要扩散这个例外。
+历史例外：无。`layer.sum_numeric_field` 的两个模型曾经没有 `Layer` 前缀，已改名成
+`LayerSumNumericFieldParams` / `LayerSumNumericFieldResult`。
 
 ### 5.5 注释与 docstring
 
@@ -448,13 +458,22 @@ GIS 开发者，和不懂中文的下一个 agent；两种人都要一句话看�
 
 1. 先想再写（Think Before Coding）：不确定就说明假设、列出选项，不默默选一个；有更简单的
    做法要主动提；不清楚就停下来问。
-2. 简单优先（Simplicity First）：只写解决问题需要的代码；不做没被要求的抽象、配置与灵活性；
-   200 行能写成 50 行就重写。
-3. 外科式改动（Surgical Changes）：只碰必须碰的行；不顺手"优化"相邻代码；发现无关的死代码
-   只说、不删；自己造成的孤儿 import/变量要清掉。
-4. 目标驱动执行（Goal-Driven Execution）：把任务变成可验证的目标（先写会红的测试，再让它
+2. 简单优先（Simplicity First）：只写解决问题需要的代码。抽象、配置、开关、判断都算代码：
+   没有第二个调用方就不抽象，没人要求的灵活性不写，被调用方答得了的问题不在调用方先答一遍
+   （`QgsProject.read()` 会告诉你文件打不开，就不必在它前面先探一遍）。
+3. 破坏性重构（Breaking Changes）：接口随需求改，旧形状随改随删——旧参数、旧字段、别名、
+   向后兼容分支、只为旧行为存在的测试与迁移代码都不留。调用方就在本仓库里（坞窗、agent、
+   验收脚本），没有要照顾的第三方。
+4. 归位（A+B-B=A）：需求是 A、实现是 A+B 时，改法是把 B 删掉，而不是加一个 C 遮住 B。多数的
+   C 长得像开关：一个布尔参数、一个跳过条件、一条 `if`，行为变成了 A，B 却还留在代码里。
+5. 名字与注释描述代码，不描述需求：`save_target_suffix` 说的是这个字段是什么，
+   `desktop_save_target` 说的是谁提的要求——同一个字段，后者随需求一起过期。注释同理，
+   写法与双语要求见 §5.5。
+6. 外科式改动（Surgical Changes）：只碰这次改动必须碰的行；与它无关的死代码只说、不删；
+   自己造成的孤儿 import/变量要清掉。
+7. 目标驱动执行（Goal-Driven Execution）：把任务变成可验证的目标（先写会红的测试，再让它
    绿）；多步任务先列计划与每步的验证方式。
-5. 改动必须覆盖它的全部落点：调用方、测试、fixture、配置、导出的名字。新增 Operation 时
+8. 改动必须覆盖它的全部落点：调用方、测试、fixture、配置、导出的名字。新增 Operation 时
    `tests/test_package.py` 的数量与名字断言、`metadata.txt` 里的计数、本文档 §1 与 §7.6 的
    表格必须同步改，否则文档与代码开始互相矛盾。
 
@@ -578,7 +597,7 @@ class OperationContext:
     iface: Any  # QGIS 的 iface，或验收用的替身；headless 里可能是 None
     project: Any  # 当前 QgsProject 实例；headless 里是替身
     lifecycle: Any  # ProjectLifecycle 实例（工程代数）；契约层只透传，不依赖它的具体类型
-    policy: Settings  # 五项配置（frozen）
+    policy: Settings  # 四项配置（frozen）
 ```
 
 `OperationContext` 只交给主线程阶段，**永远不进 worker**。
@@ -628,7 +647,7 @@ revalidate_instances="always")`——拒未知键，并且传进来的已构造�
 `CANCELLED` 两者都不能有；非终态不能有 `finished_at` 或 `result`；只有 `FAILED` 能有 `error`。
 一份"状态机到不了的组合"会在构造时就 `ValueError`，不会被静默修好。
 
-`ErrorDetail` 有 `code`、`message`、`details`；`code` 在构造时校验必须在 25 个已知错误码里；
+`ErrorDetail` 有 `code`、`message`、`details`；`code` 在构造时校验必须在 23 个已知错误码里；
 `details` 目前恒为 `None`（没有通路的字段不要假装有）。
 
 两类失败，不要混：
@@ -636,7 +655,7 @@ revalidate_instances="always")`——拒未知键，并且传进来的已构造�
 | 形态 | 什么时候 | 调用方拿到 |
 | --- | --- | --- |
 | 控制面异常 | 调用本身无效：未知 Operation、未知执行 id、非主线程、引擎已关闭、对后台操作调 `run_sync` | 抛 `FrameworkError`，有 `.code`/`.message`，**不建记录** |
-| `FAILED` 记录 | 调用有效但执行失败：入参校验、路径策略、GIS 动作、输出校验、任务提交失败 | `ExecutionRecord.status == "FAILED"`，`record.error.code` 是 25 个码之一 |
+| `FAILED` 记录 | 调用有效但执行失败：入参校验、路径策略、GIS 动作、输出校验、任务提交失败 | `ExecutionRecord.status == "FAILED"`，`record.error.code` 是 23 个码之一 |
 
 ### 6.7 状态机（`ExecutionStore._TRANSITIONS`）
 
@@ -714,7 +733,6 @@ OperationEngine(
 | `max_active_background` | 适配器活动表里的任务数：`SCHEDULED`、`RUNNING`、`CANCEL_REQUESTED`（已交给 QGIS、还没结束）；再多一个就在等待队列里按提交顺序排。引擎里的 `_ACTIVE_BACKGROUND` 只有 `SCHEDULED`/`RUNNING`，那是"发取消请求"的集合，不用于限流（见 §6.10） |
 | `max_terminal_records` | 终态记录保留条数，超出先淘汰最旧的 |
 | `terminal_ttl_seconds` | 终态记录保留秒数，超时即淘汰 |
-| `max_snapshot_features` | 后台快照的要素上限（`layer.sum_numeric_field` 用） |
 
 保留策略没有定时器：`get` 与 `ids` 每次都 prune；`create`/`transition` 只在写入终态记录时
 prune。一条超过 TTL 的记录在被问到之前仍占内存，被问到时已经不存在。
@@ -820,7 +838,7 @@ class OperationTask(QgsTask):
 
 没有用到、也不要随手引入的两种机制：`QgsTask.fromFunction`（拿不到 `setDependentLayers` 这类
 实例方法）与 `QgsProcessingAlgRunnerTask`/`QgsMapRendererParallelJob`（自带一套生命周期或自带
-线程；`processing.run_algorithm` 是在主线程直接调 `qgis.processing.run`）。
+线程；`processing.run_algorithm` 是在主线程直接调 `qgis.processing.runAndLoadResults`）。
 
 ### 6.11 插件生命周期：`Plugin`
 
@@ -830,7 +848,7 @@ class OperationTask(QgsTask):
 
 `initGui()` 的顺序是固定的：
 
-1. `read_settings()`：从 `QgsSettings` 读 `qgis_agent_plugin/<五项键>`，`Settings.from_mapping`
+1. `read_settings()`：从 `QgsSettings` 读 `qgis_agent_plugin/<四项键>`，`Settings.from_mapping`
    转成 frozen dataclass。没写的键保持默认。
 2. `ProjectLifecycle()`。
 3. 为本插件单独建一个 `QgsTaskManager()`（不用全局的，`cancelAll()` 会波及别的插件）。
@@ -844,15 +862,19 @@ class OperationTask(QgsTask):
    随后调 `engine.on_project_replaced()`；slot 里异常只记日志，不向外抛。
 9. `_create_dock()`：优先 `iface.addDockWidget`，否则 `iface.mainWindow().addDockWidget`；没有
    可停靠的宿主就不建，这种情况下连 Qt 都不会被 import。
-10. `_publish()`：`iface.agent_engine = engine`、`iface.agent_registry = registry`。
+10. `_create_entry()`：插件菜单（`&QGIS Agent`）下挂一项、工具栏加一个 `mActionTerminal` 开关，
+   两者指向同一个坞窗（`checkable`，坞窗自己的关闭按钮会把开关弹回来）。界面没有
+   `addPluginToMenu`/`addToolBarIcon` 时坞窗照建，入口不建。
+11. `_publish()`：`iface.agent_engine = engine`、`iface.agent_registry = registry`。
 
 `unload()` 的顺序也是固定的：
 
 1. 断开 `aboutToBeCleared`（重复卸载或从未加载时用 `suppress` 吞掉）。
 2. 先卸坞窗（它的轮询会碰引擎），`dock.shutdown()` + `removeDockWidget` + `deleteLater()`。
-3. 从 `iface` 撤掉两个属性（`_withdraw`）。
-4. `engine.shutdown()`：拒绝新工作 → 取消所有排队项 → 对活动后台任务发停止请求（从不全局取消）。
-5. `supervisor.close()`：把还在跑的任务交给 Supervisor；最后一个任务真正终止后，它在主线程上
+3. `_remove_entry()`：`removePluginMenu` + `removeToolBarIcon` + `action.deleteLater()`。
+4. 从 `iface` 撤掉两个属性（`_withdraw`）。
+5. `engine.shutdown()`：拒绝新工作 → 取消所有排队项 → 对活动后台任务发停止请求（从不全局取消）。
+6. `supervisor.close()`：把还在跑的任务交给 Supervisor；最后一个任务真正终止后，它在主线程上
    `deleteLater()` 自删，并释放 engine/runner 引用。没有任何一步阻塞等待。
 
 `Supervisor` 的记账只有三个动作：`attach(task_id)`（任务进了本插件的 manager）、
@@ -869,7 +891,6 @@ class OperationTask(QgsTask):
 | `max_pending` | 32 | 排队上限（主线程 + 后台合计） |
 | `max_terminal_records` | 200 | 终态记录保留条数 |
 | `terminal_ttl_seconds` | 1800 | 终态记录保留秒数 |
-| `max_snapshot_features` | 10000 | 后台快照要素上限 |
 
 `Settings.from_mapping` 的规则：键缺失或为 `None` 都算"没设置"，保留默认；这个版本不认识的键
 （旧配置里留下的 `allowed_data_roots` 之类）直接忽略，不让加载失败；计数接受数字字符串，但
@@ -925,55 +946,39 @@ absolute_path(raw: str) -> Path
 没有根目录白名单，也没有 `allowed_*_roots` 配置：一条路径可以是这台机器上进程能读写的任何位置。
 这是刻意的边界，记在 `12。
 
-`project.open` 在 `read()` 之前多一层扫描，因为 `QgsProject.read()` 会就地构造文件里写的每个图层、
-取布局里的图片：一个远程 URI 就是主线程上的一次 HTTP 请求或一次带 Windows 凭据的 SMB 连接，
-等逐层检查时请求已经发出去了。扫描用标准库 `expat`（事件驱动、不建树），只读字节：
+`project.open` 在 `read()` 之前只做一件额外的事：拒掉两种会让**进程直接消失**的输入。这是本插件
+唯一比 GUI 严的地方，所以两条都有本机 QGIS 3.44.13 上的实测，而且界限只由"崩"定，不由"慢"定：
 
-- **每个元素的整段文本**（start 到匹配 end 之间的每个字符数据事件按序拼接，即
-  `QDomElement::text()` 的语义）与**每个属性值**过同一条判据：`strip` → 剥掉开头的本地 scheme
-  （`file:`、`attachment:`）→ 以 `/vsi`、UNC 前缀（`\\`、`//`）或 `scheme://` **开头**就
-  `PATH_NOT_ALLOWED`，消息是 `the project file names a remote data source; it was not opened`。
-  属性值必须一起判：布局图片项把图片写在 `file=` 属性里，`read()` 取布局时就去取它——只问
-  `<datasource>` 文本的版本放行过这种工程（实测：5 KB 文件让 `project.open` 发 **9 次 TCP** 并
-  返回 `SUCCEEDED`；对端接受连接但永不回应时主线程停 **180.1 s**，仍报 `SUCCEEDED`）。
-- **`<datasource>` 再加一条"包含"判据**：`://` 出现在值里任何位置都拒。GDAL 把远程文件写在
-  自己的本地语法里（`NETCDF:"/vsicurl/http://…":var`、`GTIFF_DIR:1:/vsicurl/http://…`、
-  `type=xyz&url=https://…`），只看开头会放行（实测：5 KB 工程让 `read()` 发 **5 次 TCP**）。
-- **别的值只看值的开头，不做子串匹配**：`D:/vsi_data/x.gpkg`、`./vsi_data/…`、正文里引用 URL
-  的 `<abstract>Downloaded from https://…</abstract>` 都不被误拒。代价是值本身就是 URL 的
-  元数据（`<identifier>https://…</identifier>`、`Option value="https://…"`）会被拒，见 §12。
-- **字符引用先解码再判**：`&#47;vsicurl&#47;…` 与它指向的路径同一种判法；元素的文本也不只是
-  `element.text` 或子元素 `tail`（实测：只读 `element.text` 时 `read()` 会为拆成多段的 URI 发出
-  **42 次 HTTP 请求**；五段拼接的 `/vsicurl` 地址在逐段判时穿过了前扫，`project.open` 失败前
-  已发 **8 次 TCP**）。
-- **解析前拒带内部子集的 DOCTYPE**（出现 `<!ENTITY`，或 `<!DOCTYPE` 后出现 `[`）：expat 会把
-  实体展开进元素文本，展开后的体积不进任何预算（实测：1 MiB 实体读 50 次的 1 MiB 工程让前扫
-  峰值 **100 MiB**；8 MiB × 90 峰值 **1,440 MiB**）。QGIS 自己写的 `<!DOCTYPE qgis PUBLIC …>`
-  没有 `[`，不会误拒。
-- **深度**由解析事件数（开标签 +1、闭标签 −1，迭代遍历）：注释/CDATA 里的尖括号不是元素。
-  上限 `256`，按 `read()` 的**耗时**标定而不是崩溃点：实测 200 层嵌套分组 0.28 s、600 层 8.84 s、
-  900 层 30.11 s（同体积的 4.2 MB 平铺工程 0.14 s，所以那是深度不是体积）；QGIS 自己写的 100 层
-  分组图层树是 105 层深；5500 层还能开，6000 层带 `0xC00000FD` 直接杀死进程。
-- **标签数**先看一次 `bytes.count(b"<")`（元素数的上界）：超过 `400_000` 直接
-  `PROJECT_OPEN_FAILED`。实测 400000 个标签解析 0.12–0.19 s；真实 16 MB 工程的标签密度是
-  42.6–61 字节/标签，即 26–39 万个标签，落在这个上限内。
-- **体积预算按实际解压出来的字节**算（分块读、边读边加），不信 zip 清单声明的尺寸；工程文件
-  本身与 `.qgz` 里每个成员解压后的总量都不得超过 16 MB，否则 `PATH_NOT_ALLOWED`。逐个成员判不够：
-  实测 100 个 1 MB 成员的 112 KB 档案能吃 **200 MB**；声明 100 字节的 204 KB 档案解压峰值
-  **437 MiB**。档案文件自己的大小也用同一条 16 MB 判据在进 zip 之前查（一次 `stat()`）：
-  40 万个空成员的 39 MB 档案要花 2.92 s / **222 MiB** 才能轮到"成员太多"那条拒绕。
-- **`.qgz` 成员数**超过 `1000` → `PROJECT_OPEN_FAILED`（实测 10 万个空成员的 10.4 MB 档案让
-  前扫忙 **1.75 s**，按成员数线性增长）。加密成员（`flag_bits & 0x1`）、压缩方法不是
-  stored/deflate、或流里对不上清单（CRC、尺寸）的档案不交给 `read()`：QGIS 3.44 在加密成员上
-  直接 `0xC0000005` 崩掉。
-- 字节里有 NUL（不是 UTF-8）或 XML 不合法 → 拒；后者用 `read()` 失败时同一句消息，文件不再
-  交给 `read()`。
+- **嵌套深度**由标准库 `expat` 的事件数算（开标签 +1、闭标签 −1；注释与 CDATA 不是元素）。解析器
+  不开命名空间处理，与 `QDomDocument` 同口径：`<q:a>`（前缀没声明）在两边都是普通元素名，都算
+  一层——开了命名空间处理，这种标签会让 `expat` 报 `unbound prefix`、深度没数，而 `read()` 照样
+  构造出深 DOM。
+  上限 `4096` 层。实测：`read()` 在 6000 层以 `0xC00000FD`（栈溢出）结束进程，5500 层 0.10 s
+  读完；元素名叫 `a` / `b` / `maplayer` / `properties` 的崩溃点一模一样，所以那是 DOM 深度而不是
+  某个标签的性质。900 层要 30 s 才读完（200 层 0.30 s、600 层 8.62 s、2000 层 518 s），但"慢"
+  不是拒绝的理由：GUI 同样慢。QGIS 自己写出的 100 层嵌套分组是 105 层深。深度只数一个文档：
+  `QgsProjectArchive::projectFile()` 只返回归档里第一个 `.qgs`（`src/core/qgsarchive.cpp:147`–`157`），
+  `QgsProject::unzip` 也只把它交给 `readProjectFile()`（`src/core/project/qgsproject.cpp:4677`），
+  第二个 `.qgs` 再深也进不了 DOM。
+- **`.qgz` 里的加密成员**（`flag_bits & 0x1`）：`read()` 解开整个归档，碰到它直接以
+  `0xC0000005` 结束进程，连异常都没有（实测）。成员表只看头部字段，一个成员都不解压。
 
-这一层是**读前的尽力而为清单**，不是"QGIS 会取什么"的完备枚举：除了 `<datasource>` 里那个
-`://`，它只问每个值的开头，所以值中间才出现的远程形状它看不见；容器格式内部引用的远程文件
-也不看（见 `12）。`read()` 之后不再有逐层检查：工程点名的数据源可以是根外路径、目录、不存在的
-源或远程源，插件不判它们——那种工程会正常打开，加载不出来的层只让 `invalid_layer_count` 变大。
-它挡的是**主线程上的一次网络往返**，不是访问控制。
+被量过、但**不**杀进程的形状一个都不留，全部交给 `read()`：
+
+| 形状 | 本机实测 | 现在 |
+| --- | --- | --- |
+| 远程数据源（`/vsicurl`、UNC、`<datasource>` 里任意位置的 `://`、布局图片 URL） | GUI 自己去取，`read()` 照样读 | 不判，加载不出来的层只让 `invalid_layer_count` 变大 |
+| XML 实体声明（`<!ENTITY`、带 `[` 的 DOCTYPE） | `read()` 0.53 s 读完、`ok=True`（QDomDocument 不展开自定义实体） | 不判；扫描流式解析、不累积，实体展开也不进内存 |
+| 体积（工程文件与 `.qgz` 成员） | 64 MiB 的 `.qgs` 在 1.80 s 内读完、`ok=True` | 没有上限，GUI 也是 `readAll()` |
+| 标签数（标签炸弹） | 40 万个标签解析 0.12–0.19 s | 没有计数 |
+| `.qgz` 成员数 | 10 万个空成员要 1.75 s | 没有上限 |
+| 压缩方法不是 stored/deflate（如 bzip2） | `read()` 读完、`ok=True` | 不判 |
+| 成员的 CRC 对不上 | `read()` 读完、`ok=True` | 不判 |
+| 成员声明的解压尺寸撒谎 | `read()` 返回假 → `PROJECT_OPEN_FAILED`，与拒掉同码 | 不判 |
+| 字节里有 NUL / 不是 UTF-8 / XML 不合法 | `read()` 返回假 → `PROJECT_OPEN_FAILED` | 不判；扫描解析失败就交给 `read()` |
+
+扫描读不懂的文件不是扫描的结论：`expat` 报错就返回，`read()` 用自己的码回答。`read()` 之后也
+不再有逐层检查：工程点名的数据源可以是根外路径、目录、不存在的源或远程源，插件不判它们。
 
 ### 7.3 destructive 标记
 
@@ -988,18 +993,22 @@ absolute_path(raw: str) -> Path
 
 ### 7.4 错误码
 
-25 个码是完整词表，多一个少一个都是缺陷（`FrameworkError` 与 `ErrorDetail` 构造时都校验）。
+23 个码是完整词表，多一个少一个都是缺陷（`FrameworkError` 与 `ErrorDetail` 构造时都校验）。
 按"什么时候产生"分三类，调用方的处理方式完全不同：
 
 | 类 | 出现方式 | 有没有记录 | 码 |
 | --- | --- | --- | --- |
 | 注册期 | 插件加载时抛异常，插件起不来 | 无 | `INVALID_OPERATION_DEFINITION`、`DUPLICATE_OPERATION` |
 | 控制面 | 调用本身无效，抛 `FrameworkError` | **无** | `OPERATION_NOT_FOUND`、`WRONG_THREAD`、`ENGINE_CLOSING`、`UNSUPPORTED_EXECUTION_MODE`、`EXECUTION_NOT_FOUND` |
-| 执行面 | 调用有效但失败，返回 `FAILED` 记录 | 有 | 其余 18 个 |
+| 执行面 | 调用有效但失败，返回 `FAILED` 记录 | 有 | 其余 16 个 |
 
 `record.error` 的形状是 `{"code": "…", "message": "…", "details": null}`：`details` 存在但
 **恒为 `null`**（`FrameworkError` 只带 code 与 message，没有 details 通路）；`message` 是给人看的
-一句话，不含原始路径、provider URI 或异常文本，堆栈只进本机日志。
+一句话，不含原始路径、provider URI 或异常文本（例外：QGIS 自己拼的 `read()`/`write()` 错误，见
+下面的使用规则；`processing.run_algorithm` 的失败是算法自己报的原文，见 §7.6），堆栈只进本机日志。
+
+§7.6 里还有一处同类例外：GUI 自己把那句话拼给用户的地方（加图层时点名源、统计时点名字段、样式
+导出失败），消息就是 GUI 那一句，包括它嵌进去的路径与字段名。
 
 | 码 | 何时用 | 谁用 |
 | --- | --- | --- |
@@ -1011,18 +1020,16 @@ absolute_path(raw: str) -> Path
 | `UNSUPPORTED_EXECUTION_MODE` | 对后台操作调 `run_sync` | 引擎 |
 | `EXECUTION_NOT_FOUND` | 未知或已淘汰的执行 id | 记录仓库 |
 | `INVALID_INPUT` | 入参不合法（未知键、类型、形状、未知算法 id） | 引擎校验、操作内 validator |
-| `INVALID_CRS` | 构造不出有效 CRS | `project.create` |
-| `PROJECT_REPLACE_REQUIRED` | 当前工程有内容且没有 `discard_current=true` | `project.create/open` |
-| `PROJECT_OPEN_FAILED` | 工程读不出来，或读前扫描判定不可打开 | `project.open` |
-| `PROJECT_SAVE_FAILED` | `write()` 返回假；文件可能已部分写入 | `project.save` |
+| `PROJECT_REPLACE_REQUIRED` | 有任务还依赖当前工程的图层；或 GUI 的四道问句任一命中（图层编辑、memory 或临时图层、工程脏、栅格 RAT，见 §7.6）且没有 `discard_current=true` | `project.create/open` |
+| `PROJECT_OPEN_FAILED` | 工程读不出来（含嵌套超上限、加密的 `.qgz` 成员） | `project.open` |
+| `PROJECT_SAVE_FAILED` | 关联文件不可写（QGIS 写之前那句），或 `write()` 返回假；文件可能已部分写入 | `project.save` |
 | `PROJECT_PATH_REQUIRED` | 没给路径且工程没有关联文件 | `project.save` |
-| `TARGET_EXISTS` | 目标已存在且没有 `overwrite=true` | `project.save` |
-| `PATH_NOT_ALLOWED` | 路径不是绝对的，或不是本地路径字形；工程文件过大、声明 XML 实体、不是 UTF-8、点名远程数据源 | `absolute_path`、`project.open` 的读前扫描 |
-| `INVALID_LAYER` | 图层源加载不出有效图层，或不是有效的可处理图层 | `layer.add`、`layer.*` 的样式读、`layer.sum_numeric_field` |
+| `TARGET_EXISTS` | Save As 的目标已存在且没有 `overwrite=true`（Save 自己的关联文件不查） | `project.save` |
+| `PATH_NOT_ALLOWED` | 路径不是绝对路径 | `absolute_path` |
+| `INVALID_LAYER` | provider 的清单为空（没有认得出的子图层）、源里有好几个子图层而没点名、不是矢量/栅格图层、没有渲染器、非空间图层的可见性 | `layer.add`、`layer.*` 的样式与渲染器操作、`layer.set_visibility` |
 | `LAYER_NOT_FOUND` | 工程里没有这个 id | `layer.get_info/set_visibility/sum_numeric_field` 与样式读 |
-| `LAYER_NOT_IN_TREE` | 图层已注册但没有树节点（`add_to_legend=false`） | `layer.set_visibility` |
-| `INVALID_FIELD_TYPE` | 没有该字段、字段非数值、值或和不是有限数 | `layer.sum_numeric_field`、`layer.set_renderer` |
-| `SNAPSHOT_LIMIT_EXCEEDED` | 要素数超过 `max_snapshot_features` | `layer.sum_numeric_field` |
+| `LAYER_NOT_IN_TREE` | 图层已注册但不在图层树里（加载来的工程可以这样；`layer.add` 已经造不出这种图层） | `layer.set_visibility` |
+| `INVALID_FIELD_TYPE` | 没有该字段、字段非数值、值或和不是有限数 | `layer.sum_numeric_field` |
 | `TOO_MANY_EXECUTIONS` | `QUEUED` 数超过 `max_pending` | 引擎 `submit` |
 | `TASK_SUBMISSION_FAILED` | 没装后台适配器，或 `addTask` 返回 0 | 引擎 / 适配器 |
 | `STALE_PROJECT` | 结果落地时工程代数已变 | 后台 `finalize_main` / 适配器 |
@@ -1033,7 +1040,10 @@ absolute_path(raw: str) -> Path
 
 - 能归到具体码的，不要用 `INTERNAL_ERROR`；它是"插件缺陷或环境异常"的兜底。
 - 不要新增码来区分同一种失败的不同位置；调用方只该按语义分支。
-- 消息是英文短句、面向调用方：不复述路径、不贴异常文本、不带调用方传的值。
+- 消息是英文短句、面向调用方：不复述路径、不贴异常文本、不带调用方传的值。例外是 QGIS 自己的
+  ``read()``/``write()`` 错误：它原样进 `message`，因为那就是 GUI 弹框的正文，它可能点到打不开
+  的那个文件；§7.6 里 GUI 自己拼给用户的那几句（加图层时点名源、统计时点名字段、样式导出失败）
+  同样照抄，包括路径与字段名。
 
 ### 7.5 常见错误
 
@@ -1061,55 +1071,58 @@ absolute_path(raw: str) -> Path
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `crs_authid`（StrictStr ≥1，默认 `EPSG:4326`）；`discard_current`（StrictBool，默认 `false`） |
-| 返回 | `crs_authid`（规范 authid）、`file_path`（新工程无关联文件时为 `null`）、`layer_count` |
-| 业务错误码 | `INVALID_CRS`（在动当前工程之前拒）、`PROJECT_REPLACE_REQUIRED`、`INTERNAL_ERROR`（`iface.newProject(promptToSaveFlag=False)` 返回假） |
-| 行为 | 替换当前工程；成功路径触发 `aboutToBeCleared`，`project_epoch` +1，旧代数的排队调用立即 `CANCELLED`，本次调用照常 `SUCCEEDED`；`setCrs` 会把工程标脏，之后 `get_info` 可能是 `is_dirty=true` |
+| 参数 | `discard_current`（StrictBool，默认 `false`） |
+| 返回 | `crs_authid`（工程现在持有的规范 authid，构造不出 CRS 时是 `""`）、`layer_count`（默认模板可以带图层进来） |
+| 业务错误码 | `PROJECT_REPLACE_REQUIRED`（有任务还依赖当前工程的图层，或下面四道问句任一命中且没有 `discard_current=true`）、`INTERNAL_ERROR`（`iface.newProject(promptToSaveFlag=False)` 返回假） |
+| 行为 | 先任务检查（`QgsApplication.taskManager().tasksDependentOnLayer`；QGIS 那时弹 `Active Tasks` 模态框并返回假，这里把同一句话作为拒绝返回，调用方 `cancel` 掉任务再来；这一问**不由 `discard_current` 回答**），再问四道问句（`QgisApp::fileNew` 在 `promptToSaveFlag` 为真时才问的就是这四道）：① 带 provider 的非 memory 矢量图层 `isEditable() && isModified()`；② 带要素的 memory 图层（设了 `skipMemoryLayersCheck` 的除外）或临时图层，两者都有时先报临时图层；③ 工程 `isDirty()`；④ 栅格波段的 RAT `isDirty()`，循环是 `bandNo = 1; bandNo < bandCount()`（最高那一带不问）。`discard_current=true` 就是这四句共同的 Discard 答案。然后 `iface.newProject(promptToSaveFlag=False)` 做 `QgisApp::fileNew(false)` 剩下的部分：清空当前工程、给新工程设置里的 CRS、读默认模板，最后 `setDirty(false)`。返回的 CRS 与图层数都从工程里读回来；新工程没有关联文件，所以没有 `file_path`。成功路径触发 `aboutToBeCleared`，`project_epoch` +1，旧代数的排队调用立即 `CANCELLED` |
+| 与 GUI 的偏差 | ① 不读 `qgis/askToSaveProjectChanges` 与 `askToSaveMemoryLayers`：它们只决定 GUI 问不问，而这里的问句就是 `discard_current`，读了会让同一组入参按用户偏好得出不同结果；② 没有 `crs_authid` 参数：`fileNew` 没有 CRS 入参，新工程的 CRS 来自设置与默认模板 |
 
 #### project.open
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `path`（绝对 `.qgs`/`.qgz`，大小写不敏感）；`discard_current`（默认 `false`） |
-| 返回 | `file_path`（`resolve()` 后的绝对路径）、`crs_authid`（可能为 `""`）、`layer_count`、`invalid_layer_count` |
-| 业务错误码 | `INVALID_INPUT`（形状/后缀）、`PATH_NOT_ALLOWED`（文件或数据源越界、读前扫描拒绝）、`PROJECT_REPLACE_REQUIRED`、`PROJECT_OPEN_FAILED`（`read()` 为假、嵌套过深、标签过多、成员过多、XML 不合法、成员取不出来） |
-| 行为 | 用 `QgsProject.read()`，不用 `iface.addProject()`（后者会弹框）；读前扫描与读后逐层检查见 §7.2；读成功但有坏图层算成功（`invalid_layer_count > 0`），不谎称为全部可用；四个失败路径与成功路径互不干扰 |
+| 参数 | `path`（StrictStr ≥1，绝对路径，**不判后缀**）；`discard_current`（默认 `false`） |
+| 返回 | `file_path`（调用方给的绝对路径）、`crs_authid`（可能为 `""`）、`layer_count`、`invalid_layer_count`（`isValid()` 为假的那些，就是 QGIS 那个 `unavailable layers` 对话框会列出来的） |
+| 业务错误码 | `PATH_NOT_ALLOWED`（不是绝对路径）、`PROJECT_REPLACE_REQUIRED`（与 `create` 同一组任务检查与四道问句）、`PROJECT_OPEN_FAILED`（`read()` 为假时消息就是 `QgsProject.error()`；嵌套超过 `MAX_PROJECT_DEPTH` 与加密成员是自写的一句加 `; it was not opened and the current project was not changed`，因为那两条拒在 `clear()` 之前） |
+| 行为 | 先任务检查与四道问句（`QgisApp::openProject` 的顺序），两者都拒在碰当前工程之前；再 `_refuse_if_ends_the_process(path)`（§7.2）；然后在 `QgsProject.blockDirtying()` 里 `ctx.project.clear()` 与 `read()`（`addProject` 全程挡着 dirty：先 `closeProject()` 再 `read()`），所以打开的工程是干净的，读失败之后也是。不判后缀：`read()` 只把 `.qgz` 当压缩包、剩下的交给解析器（`x.qgs~` 备份也是这样打开的）。有坏图层算成功（`invalid_layer_count > 0`） |
+| 与 GUI 的偏差 | ① `<file>~` 备份那句补充问句不照拼：那是 Yes/No 问题，调用方可以自己再 open 一次那个路径；② 坏图层只报 `invalid_layer_count`，不复制那个对话框驱动的 `setDirty(true)`；③ `read()` 之后没有逐层检查（§7.2） |
 
 #### project.save
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `path`（StrictStr \| null，为空则用工程当前关联文件）；`overwrite`（默认 `false`） |
-| 返回 | `file_path`、`is_dirty`（写完之后工程的真实状态） |
-| 业务错误码 | `PROJECT_PATH_REQUIRED`、`INVALID_INPUT`、`PATH_NOT_ALLOWED`（父目录不存在/越界/目标是目录）、`TARGET_EXISTS`（含关联文件本身）、`PROJECT_SAVE_FAILED`（文件可能已部分写入，不承诺原子性） |
-| 行为 | 不创建父目录；`write()` 成功会清 dirty，所以返回的是 QGIS 的真实状态，不是写死的 false |
+| 参数 | `path`（StrictStr ≥1 \| null，为空则用工程当前关联文件；给了就必须是 `.qgs`/`.qgz`，大小写不敏感，否则 `INVALID_INPUT`）；`overwrite`（默认 `false`） |
+| 返回 | `file_path`（写出的那个文件；`write()` 成功会把它记成关联文件） |
+| 业务错误码 | `PROJECT_PATH_REQUIRED`（没给路径且工程没有关联文件）、`INVALID_INPUT`（`path` 后缀不是 `.qgs`/`.qgz`）、`PATH_NOT_ALLOWED`（不是绝对路径）、`TARGET_EXISTS`（**只有 Save As 才查**）、`PROJECT_SAVE_FAILED`（关联文件存在但不可写时是 QGIS 写之前那句 `The project file is not writable.`；`write()` 为假时是 `QgsProject.error()`） |
+| 行为 | 给了 `path` 就是 Save As：目标已存在且没有 `overwrite=true` 就拒（覆盖确认本来由保存对话框问，所以 `overwrite` 就是那个答案），不写视图设置。不给 `path` 就是 Save：先查关联文件可写（`QFileInfo.isWritable()`），再把 `iface.mapCanvas()` 的范围与旋转写进 `viewSettings()`（`QgisApp::fileSave` 的两步），最后 `write()`。后缀：保存对话框把不是 `.qgs`/`.qgz` 的名字**补**成其中之一，所以这里收的只是它能给出的那些；`write()` 再按后缀决定写 zip 还是写 XML；不创建父目录 |
+| 与 GUI 的偏差 | `QgisApp::fileSave` 还查`磁盘上的文件在这次加载/上次保存之后被外部改过吗`（`Project Has Changed on Disk`），这里不查：那个时间戳是 QGIS Desktop 窗口自己记的，`QgsProject` 里没有对应值，操作层也不在调用之间留状态 |
 
 #### project.get_info
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无（任何键都 `INVALID_INPUT`） |
-| 返回 | `file_path`（未保存过为 `null`）、`crs_authid`（无 CRS 时为 `""`）、`is_dirty`、`layer_count`、`project_epoch` |
+| 返回 | `file_path`（未保存过为 `null`）、`crs_authid`（无 CRS 时为 `""`）、`is_dirty`、`layer_count`、`title`（工程属性里的标题，没设置时是 `""`） |
 | 业务错误码 | 无 |
-| 行为 | 不保存、不改工程属性；`project_epoch` 是插件本地的代数（从 0 开始，每次 `aboutToBeCleared` +1），不是 QGIS 的版本号 |
+| 行为 | 不保存、不改工程属性。这五个字段就是 GUI 显示的工程事实：属性面板的标题与工程文件、CRS，标题栏的 `*`（`is_dirty`）与图层树里的图层数。标题栏在 `title` 为空时改显示 `Untitled Project` 或文件名，那两样由 `file_path` 回答，所以这里给的是属性面板里的原始标题。`lastSaveDateTime`、`saveUser` 只存不显示，模板是设置不是工程状态，所以不给 |
 
 #### layer.add
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对路径）、`name`（1–128）、`sub_layer`（仅 vector，`^[A-Za-z0-9_-]{1,64}$`）、`add_to_legend`（默认 `true`） |
-| 返回 | `layer_id`、`name`、`kind`、`provider`（`ogr` 或 `gdal`）、`crs_authid` |
-| 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（构造后 `isValid()` 为假） |
-| 行为 | provider 由 `kind` 决定，调用方不能指定；sub-layer 的 URI 由 OGR provider 的 `encodeUri` 生成，不手拼；`add_to_legend=false` 的图层没有树节点，之后 `set_visibility` 会得 `LAYER_NOT_IN_TREE` |
+| 参数 | `kind`（`vector`/`raster`）、`source_path`（绝对路径）、`name`（≥1，无长度上限）、`sub_layer`（≥1，名字是 provider 的自由文本；矢量与栅格都行） |
+| 返回 | `layer_id`、`name`、`kind`、`provider`（`ogr` 或 `gdal`）、`crs_authid`（图层无效时为 `""`） |
+| 业务错误码 | `INVALID_INPUT`、`PATH_NOT_ALLOWED`、`INVALID_LAYER`（栅格文件不是 raster、provider 的清单为空、`sub_layer` 不在清单里、源里有好几个子图层而调用方没点名） |
+| 行为 | provider 由 `kind` 决定，调用方不能指定。栅格先过 `QgsRasterLayer.isValidRasterFileName`，不像栅格就一句 `"<path> is not a supported raster data source"`（这个绑定吞掉原生的 `retError`，所以没有后半句）。然后问 provider 的 `querySublayers`（带 `IncludeSystemTables`，与加图层的对话框同一个调用）并只留声明类型那几条：清单为空是 `"<path> is not a valid or recognized data source."`；正好一条且细节完整时用那条自己的 `uri()` 建图层（不自己拼，GDAL 的子数据集是别的形状）；点名 `sub_layer` 时用那条的 `uri()`，不在清单里就报出这个名字；清单里好几条（或细节需要更深扫描）而没点名时把名字列出来交回去，不静默挑一个——那是加图层对话框会问用户的地方。认出来的图层不查 `isValid()`：读不出来的照样进图例，靠坏图层图标提示；每次调用都进图例 |
 
 #### layer.list
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无 |
-| 返回 | `layers`: 按 `layer_id` 字典序升序的 `LayerSummary`（`layer_id`、`name`、`kind`(vector/raster/other)、`crs_authid`、`in_layer_tree`、`visible`、`effective_visible`） |
+| 返回 | `layers`: `LayerSummary`（`layer_id`、`name`、`kind`(vector/raster/other)、`crs_authid`、`in_layer_tree`、`visible`、`effective_visible`）的列表，顺序 = 图例从上到下 |
 | 业务错误码 | 无 |
-| 行为 | `visible` 是节点自己的勾选状态，`effective_visible` 是连祖先组一起算的结果；没有树节点时两者都是 `null`，不是 `false` |
+| 行为 | 顺序是图层树的深度优先顺序（面板看到的就是它），工程里有而树里没有的图层接在后面、保持 `mapLayers()` 的顺序；`visible` 是节点自己的勾选状态，`effective_visible` 是连祖先组一起算的结果；没有树节点时两者都是 `null`；非空间图层（属性表）在图例里没有勾选框，两者也是 `null` |
 
 #### layer.get_info
 
@@ -1125,89 +1138,75 @@ absolute_path(raw: str) -> Path
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1）、`visible`（StrictBool） |
-| 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible`、`changed`（本次是否真的改了） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE` |
-| 行为 | 只动这一个节点：不碰父级组、不碰其他图层、不改数据源 |
+| 返回 | `layer_id`、`visible`（设置后的勾选状态）、`effective_visible` |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`LAYER_NOT_IN_TREE`、`INVALID_LAYER`（非空间图层没有勾选框） |
+| 行为 | 勾上时连祖先分组一起勾，取消只写这一个节点；写入口对同值本来就是空操作，所以实现不需要先判断。真的改了东西才 `setDirty(True)`（图例的勾选会置脏工程，同值重写不会） |
 
 #### layer.sum_numeric_field
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`field_name`（≥1，必须是整型或浮点字段） |
-| 返回 | `layer_id`、`field_name`、`count`（参与求和的非 null 要素数）、`skipped_null`、`total`、`snapshot_project_epoch` |
-| 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没字段、非数值、值或和不是有限数）、`SNAPSHOT_LIMIT_EXCEEDED`、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
-| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch；非有限值与溢出都拒（NaN/Infinity 不是合法 JSON）；超过 `max_snapshot_features` 直接拒，不截断；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
-| 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程（`Dummy-1`）、`finished` 回调在 `MainThread`；10001 要素 → `SNAPSHOT_LIMIT_EXCEEDED`；记录里的进度序列（4 要素）`PREPARING 0 → SCHEDULED 0 → RUNNING 0 → RUNNING 33.333 → RUNNING 66.667 → FINALIZING 66.667 → SUCCEEDED 100`，9000 要素 `RUNNING 0 → 1.0 → 99.0 → FINALIZING 99.0 → SUCCEEDED 100` |
+| 参数 | `layer_id`（≥1）、`field_name`（≥1，必须是整型或浮点字段）、`selected_only`（StrictBool，默认 `false`） |
+| 返回 | `layer_id`、`field_name`、`count`（参与求和的非 null 要素数）、`skipped_null`、`total`、`selected_only`（本次是否只算了选择集）、`snapshot_project_epoch` |
+| 业务错误码 | `INVALID_INPUT`（在 `submit` 返回前就判掉）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INVALID_FIELD_TYPE`（没有该字段用统计算法那句 `Invalid field for statistics: “<name>” does not exist`；非数值字段、值或和不是有限数）、`STALE_PROJECT`、`TASK_SUBMISSION_FAILED`；控制面 `UNSUPPORTED_EXECUTION_MODE` |
+| 行为 | 唯一的后台 op：`prepare_main` 主线程拷成 `tuple[float, ...]`，`execute_worker` 后台求和，`finalize_main` 只比对 epoch。选择集只在 `selected_only=true` 时用（那是 Processing 面板上要用户勾的开关，默认不勾：有选择集而没勾时算法照样算整层）。NaN / Infinity 与溢出都拒：记录必须是 RFC 8259 解析器读得懂的 JSON，所以这是传输约束，不是统计口径。要素数没有上限；结果描述快照，不是结束时的实时值；声明 `dependent_layer_ids`，图层被删时 QGIS 自己取消任务 |
+| 实测量级 | 4 个要素（1 个 null）→ `count=3`、`skipped_null=1`、`total=225.0`、`selected_only=false`；同一图层选中 2 个后 `selected_only=true` → `count=2`、`total=160.0`；9000 要素 → `total=40495500.0`，状态观测到 `QUEUED → SCHEDULED → SUCCEEDED`，worker 在 Qt 线程池线程、`finished` 回调在 `MainThread` |
 
 #### layer.list_style_categories
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`categories`（按 QGIS 声明顺序；矢量 18 个、栅格 10 个） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是有效矢量/栅格，或矢量没有点线面几何） |
-| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
+| 返回 | `layer_id`、`categories`（样式对话框的勾选框名单；矢量 18 个按枚举声明顺序，栅格 9 个按分类模型的顺序，不含 `Labeling`） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，含别人的图层类型） |
+| 行为 | 报的是"这类图层适用哪些 category"，不是"有没有内容"；名单由代码固定，不从 XML 反推（`QgsMapLayer.StyleCategory` 是位标记枚举，Python 侧不能按声明顺序迭代，实测）；没有几何的矢量表也算数；无效图层照样答（样式读写没有有效性这道门）；位标记只在请求时构建，所以模块仍能在裸解释器里加载 |
 
 #### layer.get_qml
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部适用项；给了就非空、不重复、必须适用） |
-| 返回 | `layer_id`、`qml`（XML 字符串，只在内存里） |
-| 业务错误码 | `INVALID_INPUT`（重复或不适用的 category）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（导出失败） |
-| 行为 | QML 来自图层自己的 `exportNamedStyle`；不写文件、不回显导出器的原始错误文本（可能带路径） |
+| 参数 | `layer_id`（≥1）、`categories`（可省略；省略=全部位标记；重复的名字就是一个位，不适用的分类只是一个没人写的位，都不拒；空列表=一个都不导出） |
+| 返回 | `layer_id`、`qml`（XML 字符串，只在内存里，2 空格缩进） |
+| 业务错误码 | `INVALID_INPUT`（不是 `StyleCategoryName`）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（原生的导出消息；那是保存样式对话框弹给用户的那句话） |
+| 行为 | QML 来自图层自己的 `exportNamedStyle`；不写文件；分类是按位或出来的一个标志，默认是 `AllStyleCategories`，导出只写这门图层类型有的那几类 |
 
 #### layer.list_available_renderers
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `renderer_types`（去重、排序；来自活动的 QGIS 注册表，不是本地表） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER` |
-| 行为 | 矢量走 `QgsApplication.rendererRegistry()`，栅格走 `QgsRasterRendererRegistry()`（3.44 没有绑定实例化那个访问器） |
+| 返回 | `renderer_types`（下拉框里的名字，按下拉框顺序，不去重不排序） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器） |
+| 行为 | 矢量走 `QgsApplication.rendererRegistry().renderersList(layer)`（按几何过滤），栅格走注册表清单再按图层的 `rasterType()` 过滤（普通栅格里没有 `singlebandcolordata`，`SingleBandColorData` 栅格里只有它）；前置条件是符号页存在，即图层有渲染器。栅格那份清单来自新建的 `QgsRasterRendererRegistry()`（3.44 没把应用级那个访问器绑给 Python，见 `available_renderer_types` 上的 `shortcut:`），所以第三方注册在 C++ 单例里的栅格渲染器既列不出来、也会被 `layer.set_renderer` 的同一份清单拒——这张表同时是写入的前置条件 |
 
 #### layer.get_renderer
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | `layer_id`（≥1） |
-| 返回 | `layer_id`、`renderer_type`（没有 renderer 时为 `""`） |
-| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER` |
-| 行为 | 只读一个类型名，不返回 renderer 对象或它的配置 |
+| 返回 | `layer_id`、`renderer_type`（图层当前渲染器的类型名）、`renderer_xml`（那个渲染器自己的文档，见下） |
+| 业务错误码 | `INVALID_INPUT`、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器） |
+| 行为 | 文档是渲染器自己写出来的那一份：矢量是 `QgsFeatureRenderer.save()` 的元素（根名 `renderer-v2`），栅格是 `writeXml()` 写进管道的 `rasterrenderer` 元素；`renderer_xml` 可以直接喂回 `layer.set_renderer`，读与写是同一件事的两个方向 |
 
 #### layer.set_renderer
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `layer_id`（≥1）、`renderer`（判别联合，`type` 字段选型） |
+| 参数 | `layer_id`（≥1）、`renderer`（≥1 的 XML 字符串，形状与 `layer.get_renderer` 的 `renderer_xml` 相同） |
 | 返回 | `layer_id`、`renderer_type`（安装后的类型名） |
-| 业务错误码 | `INVALID_INPUT`（符号与几何不符、category 重复、category 值与字段类型不符、band 越界、规则过滤器语法错、min≥max、ranges 重叠或未排序、stops 未严格递增）、`INVALID_FIELD_TYPE`（没有该字段/不是数值）、`LAYER_NOT_FOUND`、`INVALID_LAYER`、`INTERNAL_ERROR`（原生设置失败，原生文本只进日志） |
-| 行为 | 整张 renderer 先在本地搭好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式；成功后 `triggerRepaint()` + `setDirty(True)`；只有这一个样式 op 是 destructive |
+| 业务错误码 | `INVALID_INPUT`（XML 解析失败——消息是解析器那句带行列号的话；解析出来了但没有这门图层类型认得的渲染器；类型不在这门图层的候选清单里）、`LAYER_NOT_FOUND`、`INVALID_LAYER`（不是矢量/栅格，或图层没有渲染器）、`INTERNAL_ERROR`（未预期异常，由引擎兜底） |
+| 行为 | 整份渲染器先建好再一次性 `setRenderer`，所以被拒的配置不会留下半个样式，旧渲染器还在；矢量用 `QgsFeatureRenderer.load()`（QGIS 读样式文件时同一次调用），栅格用各类型自己的 `create(element, provider)`（注册表里那个建渲染器的函数，Python 拿不到函数指针所以按类型名写明）。只装候选清单里的类型，理由分两半：栅格那边实测有类型会被 QGIS 默不作声地保留（普通栅格上的 `singlebandcolordata`，报告成功就是谎报），矢量那边是下拉框已经按几何筛过、GUI 表达不出那个组合。类型名解析完就在文档根元素上，所以这道检查在建渲染器之前（建那一步会进注册表调对应元数据；清单里的类型照旧建）。成功后 `triggerRepaint()` + `setDirty(True)`，与属性对话框的 Apply 两步相同；只有这一个样式 op 是 destructive |
 
-配置矩阵（`renderer.type`，共 9 种）：
-
-| 类型 | 归属 | 必填字段 |
-| --- | --- | --- |
-| `nullSymbol` | 矢量 | 无 |
-| `singleSymbol` | 矢量 | `symbol` |
-| `categorizedSymbol` | 矢量 | `field`、`categories[]`（`value`、`label`、`symbol`） |
-| `graduatedSymbol` | 矢量 | `field`、`ranges[]`（`lower`、`upper`、`label`、`symbol`） |
-| `RuleRenderer` | 矢量 | `rules[]`（`label`、`filter` 或 `else_rule`、`symbol`） |
-| `singlebandgray` | 栅格 | `band`、`min`、`max` |
-| `multibandcolor` | 栅格 | `red_band`、`green_band`、`blue_band` |
-| `singlebandpseudocolor` | 栅格 | `band`、`stops[]`（≥2，`value` 严格递增）、`interpolation`（默认 `linear`） |
-| `singlecolor` | 栅格 | `band`、`color` |
-
-符号只有三种（`marker`：`color`、`size_mm`=2.0；`line`：`color`、`width_mm`=0.3；`fill`：`color`、`outline_color`=`#333333`、`outline_width_mm`=0.3）；颜色是 `^#[0-9A-Fa-f]{6}$`，长度是毫米；符号类型必须与图层几何一致（点/线/面，Multi* 取基础类型）。
+文档里没有的东西一律不装：符号类型、类别、断点、规则、波段、色带都在 XML 里，由 QGIS 自己读。能装什么由注册表按图层类型给的清单决定，这里不维护另一张表：`heatmapRenderer` 只在列它的图层类型上装得上（多边形图层上同一份文档会被拒），而清单里、元数据是 Python 实现的那一类会在重建时结束进程（见 §12“`layer.set_renderer` 的文档”那一行）。
 
 #### processing.list_algorithms
 
 | 项 | 内容 |
 | --- | --- |
 | 参数 | 无 |
-| 返回 | `algorithms`（按 id 排序的 `{id, name, group}`） |
+| 返回 | `algorithms`：每个 `{id, name, group, provider}`（名字都是 QGIS 显示给自己的那个）；扁平投影，顺序就是工具箱那三层的遍历顺序（provider、分组、算法名），同名的用 id 定序 |
 | 业务错误码 | 无 |
-| 行为 | 列当前注册的**全部**算法，没有 allow-list、没有"能不能跑"的字段 |
+| 行为 | 列工具箱能看到的算法：`HideFromToolbox` 总是挡掉，`KnownIssues` 只在 `Processing/Configuration/SHOW_ALGORITHMS_KNOWN_ISSUES` 关着时挡掉（缺键时默认关）；`get_algorithm_info` 仍能读被挡掉的算法 |
 
 #### processing.get_algorithm_info
 
@@ -1215,18 +1214,18 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | 参数 | `algorithm_id`（≥1） |
 | 返回 | `algorithm`（`id`、`name`、`short_description`、`help`）；`parameters[]`（`name`、`description`、`help`、`type`、`options`、`accepted_types`）；`outputs[]`（`name`、`type`、`description`） |
-| 业务错误码 | `INVALID_INPUT`（算法未注册——是调用方输入错误，不是未知插件操作） |
-| 行为 | 隐藏参数直接跳过（与 `algorithmHelp()` 一致）；`options` 只有枚举才有，其余是 `null`；字段取值来自原生定义，不在这里翻译或校验 |
+| 业务错误码 | `INVALID_INPUT`（算法未注册——是调用方输入错误，不是未知插件操作；消息是 `algorithmHelp()` 打印的那句 `Algorithm "<id>" not found.`） |
+| 行为 | 隐藏参数直接跳过；`options` 只有枚举才有，其余是 `null`；字段取值来自原生定义，不在这里翻译或校验 |
 
 #### processing.run_algorithm
 
 | 项 | 内容 |
 | --- | --- |
-| 参数 | `algorithm_id`（≥1）、`parameters`（以原生参数名为键的 JSON 树） |
-| 返回 | `algorithm_id`、`outputs`（原生键下的输出，结果图层报 id）、`messages`（`level`/`text`/`fatal`，七种级别） |
-| 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象）、`INTERNAL_ERROR`（`qgis.processing.run` 抛异常、结果无无损 JSON 形式、结果图层没加进工程、结果键不是字符串） |
-| 行为 | 不重新实现 QGIS：只带一个记录消息的 feedback 调 `qgis.processing.run()`，算法是否存在、参数是否可接受、context 怎么建、怎么执行都由 QGIS 决定；七个 `push*`/`reportError` 覆写都先调 `super()`，保留 QGIS 自己的日志，再把同一条文本记进 `messages`；未声明的参数键、远程 URI 一律原样透传；异常文本与 feedback 消息只进日志，调用方只拿到引擎的未预期失败码；结果图层会加进当前工程并报 id，结果无法返回时只移除这次调用加的那几个（算法自己的外部副作用不声称回滚） |
-| 输出目标 | 输出值也原样交给 QGIS：插件不注入目标目录、不改写值、不替调用方判定目的地。`memory:`、`QgsProcessing.TEMPORARY_OUTPUT`（值是字符串，JSON 安全）与磁盘绝对路径都按算法自己的规则处理。实测到三种行为：`native:buffer` + `TEMPORARY_OUTPUT` → 结果图层进工程；`gdal:convertformat` + 磁盘路径 → 文件写出且 `outputs` 里就是该路径；`gdal:buffervectors` + `memory:` → QGIS 报 `SUCCEEDED`、把字面量 `memory:` 当输出值且不产生图层，插件不替它改判；远程目标（`/vsicurl/…`）由 QGIS 报错，插件不会先拒 |
+| 参数 | `algorithm_id`（≥1）、`parameters`（以原生参数名为键的 JSON 树）、`continue_on_crs_mismatch`（StrictBool，默认 `false`；参数 CRS 不一致时那句“要继续吗”的答案，QGIS 的默认按钮是“否”） |
+| 返回 | `algorithm_id`、`outputs`（原生键下的输出；图层输出是工程里的图层 id 或调用方给的路径，取决于 QGIS 交给 `runAndLoadResults` 的值）、`messages`（`level`/`text`/`fatal`，七种级别） |
+| 业务错误码 | `INVALID_INPUT`（参数不是有限 JSON：非字符串键、NaN、Infinity、bytes、QGIS/Qt 对象；未知算法 id，消息是运行路径那句 `Error: Algorithm <id> not found`（含结尾换行）；参数值过不了 QGIS 的 `checkValueIsAcceptable`；输出值过不了 `isSupportedOutputValue`；`checkParameterValues` 拒绝；CRS 不一致且 `continue_on_crs_mismatch=false`）、`INTERNAL_ERROR`（`runAndLoadResults` 抛异常，消息是异常的原文（空则类型名）；结果无无损 JSON 形式） |
+| 行为 | 运行前的问题都是 QGIS 自己的函数，顺序与参数面板一致：`createAlgorithmById` 取实例，补上控件会交出的值（缺席的可见参数用 `defaultValueForGui()`，缺席的输出参数是临时输出，可选且不默认创建的保持缺席），按参数定义顺序逐个问 `checkValueIsAcceptable` / 对每个有值的输出问 `isSupportedOutputValue`，过一遍 `preprocessParameters`，问 CRS 不一致的确认（受 `Processing/Configuration/WARN_UNMATCHING_CRS` 约束），最后问 `checkParameterValues`；任一条不过就是 `INVALID_INPUT`，消息是 QGIS 对同一问题说的那一句。通过后把参数、一个记录消息的 feedback 与同一个 `processing.createContext(feedback)` 上下文交给 `qgis.processing.runAndLoadResults()`：结果图层由 QGIS 的后处理加载进当前工程（磁盘输出也一样），图层名、样式与结果分组都由 QGIS 决定；后处理没能读回某个输出图层时记录仍是 `SUCCEEDED`（`runAndLoadResults` 丢掉 `handleAlgorithmResults` 的返回值），错误文本在 `messages` 里。七个 `push*`/`reportError` 覆写都先调 `super()`，再把同一条文本记进 `messages`；提供者的 `warningMessage()` 在运行前用 `reportError` 报出（与对话框同一位置：`checkParameterValues` 过完、开跑之前）；未声明的参数键、远程 URI 一律原样透传；运行失败抛 `FrameworkError(INTERNAL_ERROR, 异常原文（空则类型名）)`，`FAILED` 记录没有 `messages` 字段，所以那一批消息另有一份进本地日志。`messages` 只收算法与 Processing 核心说的话（含核心那句 `Results: {...}`）；对话框自己的日志装饰（`Input parameters:`、开始时间、耗时、十行版本号）与 `pushVersionInfo()` 不进 `messages`，它们描述的是这一次窗口运行，而不是算法的结果 |
+| 输出目标 | 输出参数是调用方的回答，缺席不是“随便”：参数面板对每个输出参数都自带一个值，默认就是临时输出，所以缺席的必填输出会被补成 `QgsProcessing.TEMPORARY_OUTPUT`（字符串，JSON 安全），可选且不默认创建的输出保持缺席（面板的“跳过输出”），显式 `None` 也是跳过输出（键被去掉；必填输出同样如此，于是它落到 `checkParameterValues` 的拒绝而不是临时输出）。远程字形先过 `isSupportedOutputValue`，再由 QGIS 打开。实测：`native:buffer` + `TEMPORARY_OUTPUT`（或缺席）→ 结果图层进工程（名字是输出参数的描述）；`gdal:convertformat` + 磁盘路径 → 文件写出、`outputs` 里就是该路径，图层由后处理读进工程；`gdal:buffervectors` + `memory:` → `INVALID_INPUT`、消息 `This algorithm only supports disk-based outputs`；`.zzz` 这种扩展名同样被拒（不然 QGIS 会自己补成 `.zzz.gpkg` 写出去）；`/vsicurl/…` 目标过判据后由 QGIS 报错 |
 
 ### 7.7 一次调用会碰到的其它码
 
@@ -1236,7 +1235,43 @@ absolute_path(raw: str) -> Path
 | --- | --- |
 | `TOO_MANY_EXECUTIONS` | `submit` 时排队数已达 `max_pending`（实测：32 时第 33 个 `submit` 得到 `FAILED`） |
 | `OUTPUT_VALIDATION_FAILED` | Operation 的返回值不合它自己声明的输出模型 |
-| `INTERNAL_ERROR` | 未预期异常；`message` 是下面几种之一：`<异常类型名>: unexpected failure`、`QGIS did not create a new project`、`the task ended without a result`、`the completion of this execution failed`、`<id>: <旧状态> -> <新状态> is not a transition`、`<id>: <状态> is final and cannot change` |
+| `INTERNAL_ERROR` | 未预期异常；`message` 是下面几种之一：`<异常类型名>: unexpected failure`、`QGIS did not create a new project`、`the task ended without a result`、`the completion of this execution failed`、`<id>: <旧状态> -> <新状态> is not a transition`、`<id>: <状态> is final and cannot change`；`processing.run_algorithm` 的失败是另一种：算法自己报的原文（§7.6），异常文本为空时用它的类型名 |
+
+### 7.8 operation 的判据来自 QGIS 的同一个动作
+
+写或改一个 operation，先在 QGIS 3.44 的源码里找到它对应的那个用户动作（菜单项、按钮、对话框
+背后的函数），再照着写。源码检出在
+`D:\core\workspace\mine\github_mine\gis-compare\project\QGIS`，四个起点：`src/app`（菜单与
+动作）、`src/gui`（对话框、图层树、符号页）、`src/core`（`QgsProject`、`QgsMapLayer`、`QgsStyle`
+这些模型层）、`python/plugins/processing`（Processing 的 Python 半边；它与 `src/analysis`、
+`src/core/processing` 的 C++ 半边在同一个注册表里）。
+
+抄这五样：
+
+| 项 | 抄什么 |
+| --- | --- |
+| 顺序 | 先做什么、后做什么；哪一步失败时，前面几步留下的状态是什么 |
+| 接口与参数 | 用哪个类哪个方法；参数的含义、默认值、可接受范围 |
+| 拒绝条件 | 什么输入被拒，由谁拒——QGIS 自己会拒的，这里就不再先拒一遍 |
+| 拒绝的文本 | 那句话怎么拼出来的：拼进去的图层名、字段名、provider 的抱怨 |
+| 返回值与副作用 | 成功时返回什么；改了哪些可见状态（图层树、脏标记、当前工程、选择、重绘） |
+
+界面上的话走返回值，这是唯一允许的差异：
+
+| GUI 的送达方式 | 这里的送达方式 |
+| --- | --- |
+| `iface.messageBar().pushInfo/pushWarning(...)` | `Result` 里的一个字符串字段 |
+| `QMessageBox.warning/critical(...)` | `FrameworkError(code, message)` 的 `message` |
+| `QgsMessageLog.logMessage(...)` | 同上；日志照写，但那句话必须能作为返回值取到 |
+| 一次动作产生多条消息 | 按现有形状返回成列表（`processing.run_algorithm` 的 `messages` 就是这种） |
+
+调用方是 agent：它读得到返回值，而一个模态窗口它读不到、也关不掉。所以消息进返回值，界面元素
+不进代码。
+
+比 GUI 严的地方只有 §7.2 那两条会让进程直接消失的输入；其余一律交给 QGIS。
+
+**完成判据**：这个 operation 的每条判据都能指到源码里的同一处（文件、函数、那一行判断），或者
+指到“这是我们自己加的”并把它删掉。指不出来的那条不算写完。
 
 ---
 
@@ -1352,17 +1387,19 @@ class FieldSum:  # worker 返回的中间结果：同样只有纯数据
 
 
 class LayerSumNumericField(
-    BaseQuery[SumNumericFieldParams, SumNumericFieldResult],
-    BackgroundOperationMixin[SumNumericFieldParams, SumNumericFieldResult, FieldValues, FieldSum],
+    BaseQuery[LayerSumNumericFieldParams, LayerSumNumericFieldResult],
+    BackgroundOperationMixin[
+        LayerSumNumericFieldParams, LayerSumNumericFieldResult, FieldValues, FieldSum
+    ],
 ):
     name = "layer.sum_numeric_field"
     description = "Sum one numeric field of a vector layer over a copied snapshot"
-    input_model = SumNumericFieldParams
-    output_model = SumNumericFieldResult
+    input_model = LayerSumNumericFieldParams
+    output_model = LayerSumNumericFieldResult
 
     def prepare_main(self, ctx, request) -> FieldValues: ...  # 读 QGIS，拷数据
     def execute_worker(self, snapshot, control) -> FieldSum: ...  # 不碰 QGIS
-    def finalize_main(self, ctx, request, result) -> SumNumericFieldResult: ...
+    def finalize_main(self, ctx, request, result) -> LayerSumNumericFieldResult: ...
     def dependent_layer_ids(self, request) -> list[str]: ...  # 可选
 ```
 
@@ -1370,7 +1407,7 @@ class LayerSumNumericField(
 
 | 阶段 | 线程 | 可以做 | 不可以做 |
 | --- | --- | --- | --- |
-| `prepare_main` | 主线程 | 读 `ctx.project`、读要素、读字段、算小规模前置统计、把状态拷成纯数据 | 把 QGIS 对象放进快照；做**没有上限**的长循环（有上限的拷贝，例如 `max_snapshot_features` 个要素，正是本阶段的职责） |
+| `prepare_main` | 主线程 | 读 `ctx.project`、读要素、读字段、算小规模前置统计、把状态拷成纯数据 | 把 QGIS 对象放进快照；做没有取消检查的长循环 |
 | `execute_worker` | Qt 线程池 | 纯 Python 计算；用 `control.is_cancelled()` / `control.set_progress()` | 碰 `ctx`、碰 `QgsProject`、碰任何 QGIS/Qt 对象；假设自己在主线程 |
 | `finalize_main` | 主线程 | 比对 epoch、把 worker 结果包装成 `output_model`、必要时做少量主线程校验 | 写工程状态（本框架的后台操作都是 query）；重新读一遍大数据 |
 
@@ -1381,8 +1418,7 @@ class LayerSumNumericField(
 - 快照里带上 `project_epoch`，`finalize_main` 里与 `ctx.lifecycle.current_epoch` 比对；不一致抛
   `STALE_PROJECT`。适配器在落地前也会比对一次，两处都要有（一处防"算完了工程已换"，一处防
   "调用方忘了"）。
-- 超限就拒绝，不截断：静默的部分结果比失败更糟。上限从 `ctx.policy` 读（例如
-  `max_snapshot_features`），不要写死。
+- 拷贝要素时也要看取消，不要把一个几十万要素的列一口气读完；上限类阈值不要再发明（要素数就是没有上限，实测 100 万要素 3.14 s）。
 - 长循环里周期性检查取消并报进度；不要在每个元素上都报进度（适配器有 100 ms 节流，但 worker
   自己也不该制造无意义的调用）。进度不要主动写 100，成功由适配器写。
 - `execute_worker` 里可以抛 `FrameworkError` 表达业务失败（适配器保留错误码，例如求和溢出为
@@ -1406,7 +1442,8 @@ class LayerSumNumericField(
 6. 如果是后台操作，`test_qgs_task.py`/`test_background.py` 的假适配器模式可直接复用；补一个
    "换代 → `STALE_PROJECT`" 与一个"取消 → `CANCELLED`"的用例。
 7. `npm run lint`、`npm run test:unit` 全绿。若操作触到真实 PyQGIS 行为，在
-   `tests/qgis_integration/cases.py` 加一条验收用例（用 `fixtures.py` 生成的数据，不碰用户工程）。
+   `tests/qgis_integration/` 里它所属能力族的那个 `cases_*.py` 加一条验收用例（用 `fixtures.py`
+   生成的数据，不碰用户工程），并把函数追加进同族的元组。
 8. `npm run deploy`，重启 QGIS，在坞窗里手工跑一次，确认表单、结果、错误提示都对。
 9. 提交并按 §11 合并；合并后删分支。
 
@@ -1417,8 +1454,9 @@ class LayerSumNumericField(
 - [ ] 输出只含 JSON 安全值；新模型带 `extra="forbid"`。
 - [ ] QGIS/Qt 只在函数体内 import（`ui/dock.py` 除外）。
 - [ ] 路径参数只走 `absolute_path`，不自己做存在性预检。
+- [ ] 判据取自 QGIS 3.44 源码里的同一个用户动作，消息以字符串回到调用方（§7.8）。
 - [ ] 可预期失败用 `FrameworkError` + 既有错误码。
-- [ ] 后台操作：快照纯数据、带 epoch、执行中检查取消、超限拒绝、结果无 NaN/Inf。
+- [ ] 后台操作：快照纯数据、带 epoch、执行中检查取消、结果无 NaN/Inf。
 - [ ] 新增了模块的话，它已加进 `tests/test_package.py` 的导入列表。
 - [ ] `metadata.txt` 与本文档里的 Operation 计数已同步。
 - [ ] 测试覆盖成功、输入失败、业务失败；需要真实 QGIS 的部分进验收跑。
@@ -1448,8 +1486,8 @@ class LayerSumNumericField(
 - 新操作覆盖成功路径、一个输入校验失败、一个业务失败；有路径参数再加一个相对路径的用例。
 - 后台操作补一条"换代 → `STALE_PROJECT`"与一条"取消 → `CANCELLED`"。
 - 断言落在错误码、字段值、调用次数上；不断言日志文本与私有属性。
-- 触到真实 PyQGIS 行为的部分进 `tests/qgis_integration/cases.py`，用 `fixtures.py` 现场生成数据，
-  不碰用户工程。
+- 触到真实 PyQGIS 行为的部分进 `tests/qgis_integration/` 里对应能力族的 `cases_*.py`，用
+  `fixtures.py` 现场生成数据，不碰用户工程。
 - 新用例先在缺陷存在时确认是红的。
 
 ---
@@ -1467,10 +1505,14 @@ class LayerSumNumericField(
 | 选择器 | 左边 `name`，右边等宽小字 `kind · strategy`；`destructive=true` 带警示色点，选中后摘要行标"可破坏" |
 | 摘要 | 类型/策略一行（等宽小字），下面是 `description`（次要色，自动换行） |
 | 参数 | 由 `input_schema` 生成，一字段一行：标签（次要色，有中文映射表）+ 编辑器；必填字段标签后有小号"必填" |
-| 动作条 | 主按钮"运行"（强调色，全坞窗唯一）、次按钮"取消"（仅后台调用运行中可点）、文字按钮"复制 JSON"、右侧状态胶囊 |
+| 动作条 | 主按钮"运行"（强调色，全坞窗唯一）、次按钮"取消"（仅后台调用运行中可点）、文字按钮"复制 JSON"（整条记录）、右侧状态胶囊 |
 | 状态胶囊 | `就绪 / 运行中 / 完成 / 失败 / 已取消 / 无操作`；运行中下方有进度条 |
 | 错误区 | 只在失败时出现：等宽的 `CODE` + 一句"发生了什么" + 一句"接下来怎么办"；引擎原文只放在鼠标悬停提示里 |
-| 结果 | 上方一行小字：运行中给 `进度 n%`，结束给 `耗时 n ms`（取消过就追加回执）；下面是只读、可选中、等宽的 `ExecutionRecord` JSON |
+| 结果区 | 没记录时是一句话（该跑一次 / 本次没有产生记录）。有记录时是三个标签页：`执行信息`（`result` 以外的每个字段，两列等宽值；没有值的字段整行不出现）/ `结果`（`result` 的 JSON；失败与取消时没有这一页）/ `原始 JSON`（整条记录）。上方一行小字：运行中给 `进度 n%`，结束给 `耗时 n ms`（取消过就追加回执） |
+
+入口属于界面的一半：`initGui` 把坞窗挂进右侧，同时在插件菜单下挂一项、工具栏加一个开关，两者
+都指向同一个坞窗。关掉的坞窗只是隐藏，入口把它要回来——不重建，记录还在。界面承载不了入口
+（无头验收的假 `iface`）时只建坞窗。
 
 两条属于坞窗的合同：
 
@@ -1531,18 +1573,15 @@ Git flow：
 | 路径策略 | 只要求绝对路径，没有根目录白名单 | 操作能读写进程能读写的任何位置；调用方是 agent 时这就是一次能力决定，不是遗漏 |
 | 远程图层 | `layer.add` 接受 `/vsi…` 的绝对字形，也接受 provider 自己能解的其它源 | URL（`https://…`）不算 Windows 绝对路径，因此被拒；要加远程支持是新的设计，不是放宽一条规则 |
 | 工程内的数据源 | 不判：根外路径、目录、不存在的源、远程源都随工程读进来 | 加载不出来的层只让 `invalid_layer_count` 变大 |
-| `project.open` 的读前扫描 | 远端值、超大/过深/标签过多、XML 实体、非 UTF-8、可疑 `.qgz` 成员在 `read()` 前拒绝 | 是尽力而为的清单，不是"QGIS 会取什么"的完备枚举 |
-| 值本身就是 URL 的元数据 | 读前扫描会拒绝 | 这类工程打不开，是统一判据的已知误拒 |
-| 容器格式内部的远程源 | 不检查：只审调用方点名的文件，不审文件内部引用的源（例如本地 `.vrt` 里的 `/vsicurl/`） | 把这类文件当不可信输入时才需要升级这层检查（代码里的 `shortcut:` 注释写明了这个条件） |
-| 布局图片等其它取数落点 | 没有逐项枚举 | 不在承诺内 |
-| 后台快照上限 | `max_snapshot_features` 默认 10000 | 超限 `SNAPSHOT_LIMIT_EXCEEDED`，不截断 |
+| `project.open` 的深度守卫 | 只拒两种实测能杀掉进程的输入：``read()`` 会解析的那个文档嵌套超过 `4096` 层、`.qgz` 里有加密成员 | 深度只数归档里第一个 `.qgs`（`read()` 只解析它）；解析器不开命名空间，所以带未声明前缀的 `<q:a>` 也是一层；其余形状（远程源、实体、体积、标签数、成员数、压缩方式、CRC）一律不判，交给 `read()`；代价是一个远程源的工程会在主线程上取一次远端 |
+| 未保存工程的判断 | 任务检查加 GUI 的四道问句：非 memory 带 provider 矢量图层的 `isEditable() && isModified()`、带要素的 memory 图层或临时图层、`is_dirty()`、栅格波段的 RAT `isDirty()` | 任一条成立就要 `discard_current=true`；图层数与关联文件名不是条件，一个没改过的工程（哪怕加了图层）照样被换掉；两个“问不问”的设置不读 |
+| `project.save` 的覆盖判断 | 只有给了 `path`（Save As）才查 `TARGET_EXISTS`；不给 `path` 时先查关联文件可写 | 写自己的关联文件不需要 `overwrite`，与 GUI 的 Save 一致；磁盘上被外部改过的那一条不查（那是窗口自己记的时间戳） |
+| `project.create` 之后的 CRS 与 dirty | CRS 来自 QGIS 的设置与默认模板，操作不收回；`is_dirty` 在新建后是 `false` | 与 `QgisApp::fileNew` 一致，没有 CRS 入参，也不需要为它补一次 `setDirty(false)` |
 | 后台结果的口径 | 是快照，不是结束时的实时值 | 期间有人编辑，返回的仍是旧数 |
 | 进度 | 最多每 100 ms 写一次；从不写 100 除成功 | 记录里的 `RUNNING` 可能来自完成路径补写 |
 | 记录保留 | 按条数与 TTL，在访问与写入终态时 prune | 超时记录在被访问前仍占内存；被访问时已经不存在 |
 | 取消的语义 | 协作式；`CANCEL_REQUESTED` 只有任务自己的报告才变 `CANCELLED` | 主线程已开始的操作不可中断 |
-| 未保存工程的判断 | 图层、关联文件、dirty 三者之一即算"有内容"（编辑缓冲只存在于图层上，已被图层数覆盖） | 需要显式 `discard_current=true` |
-| `project.save` 的覆盖判断 | 关联文件本身也算"已存在" | 重复保存同一工程也要 `overwrite=true` |
-| `project.create` 之后的 dirty | `setCrs` 会把工程标脏 | `project.get_info` 可能返回 `is_dirty=true`，这是 QGIS 的事实 |
 | 后台名额的计数口径 | 适配器数的是自己活动表里的任务（`SCHEDULED`/`RUNNING`/`CANCEL_REQUESTED`），引擎里名为 `_ACTIVE_BACKGROUND` 的集合只有前两个 | 两者不同义：限流看适配器，发取消请求看引擎；`FINALIZING` 不占名额 |
+| `layer.set_renderer` 的文档 | 只装注册表按图层类型给的清单里的类型；矢量用 `QgsFeatureRenderer.load`，栅格用各类型自己的 `create(element, provider)` | 清单里、元数据由 Python 实现的渲染器（`QgsRendererAbstractMetadata` 子类）会让 `load` 走进 Python 并当场结束进程（`0xC0000409`，sip 所有权），所以这类类型只能出现在候选清单里、不能被装；栅格清单来自新建的 `QgsRasterRendererRegistry()`，第三方注册在 C++ 单例里的栅格渲染器既列不出来也装不上 |
 | 依赖版本 | pydantic 只支持 2.x（导入时拒绝其他 major），QGIS 3.44（`metadata.txt`） | 换 pydantic major 或 QGIS 大版本前要重新验证；非 2.x 是加载期 `RuntimeError`，不是运行期错误 |
-| 测得的数字 | 本文档里的耗时、字节、TCP 次数都是在 QGIS 3.44.13 / Windows x64 上测的 | 它们支撑判据，不是承诺；换环境要重测再改阈值 |
+| 测得的数字 | 本文档里的耗时、崩溃码都是在 QGIS 3.44.13 / Windows x64 上测的 | 它们支撑判据（尤其是 §7.2 那两条），不是承诺；换环境要重测再改阈值 |
